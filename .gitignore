@@ -10,6 +10,7 @@ wheels/
 .venv
 worktrees/
 results/
+results.tsv
 queue/
 
 # Agent prompt files (generated per-session by launchers)

@@ -1,0 +1,297 @@
+from dataclasses import dataclass
+
+import mlx.core as mx
+from mlx.utils import tree_flatten, tree_unflatten
+
+
+POLAR_EXPRESS_COEFFS = [
+    (8.156554524902461, -22.48329292557795, 15.878769915207462),
+    (4.042929935166739, -2.808917465908714, 0.5000178451051316),
+    (3.8916678022926607, -2.772484153217685, 0.5060648178503393),
+    (3.285753657755655, -2.3681294933425376, 0.46449024233003106),
+    (2.3465413258596377, -1.7097828382687081, 0.42323551169305323),
+]
+
+
+@dataclass(frozen=True)
+class AdamWGroup:
+    name: str
+    paths: tuple[str, ...]
+    beta1: float
+    beta2: float
+    eps: float
+    weight_decay: float
+
+
+@dataclass(frozen=True)
+class MuonGroup:
+    paths: tuple[str, ...]
+    shape: tuple[int, ...]
+    red_dim: int
+    beta2: float
+    ns_steps: int
+
+
+def _safe_key(path: str) -> str:
+    return path.replace(".", "__")
+
+
+def _adamw_update(param, grad, exp_avg, exp_avg_sq, step, lr, beta1, beta2, eps, weight_decay):
+    lr = lr.astype(param.dtype)
+    beta1 = beta1.astype(param.dtype)
+    beta2 = beta2.astype(param.dtype)
+    eps = eps.astype(param.dtype)
+    weight_decay = weight_decay.astype(param.dtype)
+    step = step.astype(param.dtype)
+
+    param = param * (1 - lr * weight_decay)
+    exp_avg = exp_avg + (1 - beta1) * (grad - exp_avg)
+    exp_avg_sq = exp_avg_sq + (1 - beta2) * (mx.square(grad) - exp_avg_sq)
+    bias1 = 1 - mx.power(beta1, step)
+    bias2 = 1 - mx.power(beta2, step)
+    denom = mx.sqrt(exp_avg_sq / bias2) + eps
+    step_size = lr / bias1
+    param = param - step_size * (exp_avg / denom)
+    return param, exp_avg, exp_avg_sq
+
+
+def _matrix_norm(x):
+    return mx.sqrt(mx.sum(mx.square(x.astype(mx.float32)), axis=(-2, -1), keepdims=True))
+
+
+def _muon_update(stacked_params, stacked_grads, momentum_buffer, second_momentum_buffer, lr, momentum, weight_decay, beta2, ns_steps, red_dim):
+    momentum = momentum.astype(stacked_grads.dtype)
+    momentum_buffer = momentum_buffer + (1 - momentum) * (stacked_grads - momentum_buffer)
+    g = stacked_grads + momentum * (momentum_buffer - stacked_grads)
+
+    x = g.astype(mx.bfloat16)
+    x = x / (_matrix_norm(x) * 1.02 + 1e-6)
+    if g.shape[-2] > g.shape[-1]:
+        for a, b, c in POLAR_EXPRESS_COEFFS[:ns_steps]:
+            a_matrix = x.swapaxes(-1, -2) @ x
+            b_matrix = b * a_matrix + c * (a_matrix @ a_matrix)
+            x = a * x + x @ b_matrix
+    else:
+        for a, b, c in POLAR_EXPRESS_COEFFS[:ns_steps]:
+            a_matrix = x @ x.swapaxes(-1, -2)
+            b_matrix = b * a_matrix + c * (a_matrix @ a_matrix)
+            x = a * x + b_matrix @ x
+
+    g = x
+    beta2 = beta2.astype(g.dtype)
+    v_mean = mx.mean(mx.square(g.astype(mx.float32)), axis=red_dim, keepdims=True)
+    red_dim_size = g.shape[red_dim]
+    v_norm_sq = mx.sum(v_mean, axis=(-2, -1), keepdims=True) * red_dim_size
+    v_norm = mx.sqrt(v_norm_sq)
+
+    beta2_state = beta2.astype(second_momentum_buffer.dtype)
+    second_momentum_buffer = second_momentum_buffer + (1 - beta2_state) * (
+        v_mean.astype(second_momentum_buffer.dtype) - second_momentum_buffer
+    )
+    step_size = mx.rsqrt(mx.maximum(second_momentum_buffer, 1e-10))
+    scaled_sq_sum = (v_mean * red_dim_size) * mx.square(step_size.astype(mx.float32))
+    v_norm_new = mx.sqrt(mx.sum(scaled_sq_sum, axis=(-2, -1), keepdims=True))
+    final_scale = step_size * (v_norm / mx.maximum(v_norm_new, 1e-10))
+    g = g * final_scale.astype(g.dtype)
+
+    lr = lr.astype(g.dtype)
+    weight_decay = weight_decay.astype(g.dtype)
+    mask = (g * stacked_params) >= 0
+    updated = stacked_params - (lr * g + lr * weight_decay * stacked_params * mask.astype(g.dtype))
+    return updated, momentum_buffer, second_momentum_buffer
+
+
+class MuonAdamW:
+    def __init__(
+        self,
+        model,
+        *,
+        unembedding_lr: float = 0.004,
+        embedding_lr: float = 0.2,
+        matrix_lr: float = 0.02,
+        weight_decay: float = 0.0,
+        adam_betas=(0.8, 0.95),
+        scalar_lr: float = 0.5,
+    ):
+        self.model_dim = model.config.n_embd
+        dmodel_lr_scale = (self.model_dim / 768) ** -0.5
+        print(f"Scaling AdamW LRs by 1/sqrt({self.model_dim}/768) = {dmodel_lr_scale:.6f}")
+
+        self.initial_lrs = {
+            "lm_head": unembedding_lr * dmodel_lr_scale,
+            "embedding": embedding_lr * dmodel_lr_scale,
+            "value_embedding": embedding_lr * dmodel_lr_scale,
+            "resid": scalar_lr * 0.01,
+            "x0": scalar_lr,
+            "muon": matrix_lr,
+        }
+
+        flat_params = dict(tree_flatten(model.trainable_parameters()))
+        self.adamw_groups, self.muon_groups = self._build_groups(flat_params, adam_betas, weight_decay)
+        self.state = self._init_state(flat_params)
+        self.set_schedule(lr_multiplier=1.0, muon_momentum=0.95, muon_weight_decay=weight_decay)
+
+    def _build_groups(self, flat_params, adam_betas, weight_decay):
+        all_paths = set(flat_params.keys())
+        lm_head_paths = tuple(path for path in flat_params if path.startswith("lm_head."))
+        embedding_paths = tuple(path for path in flat_params if path == "transformer.wte.weight")
+        value_embedding_paths = tuple(path for path in flat_params if path.startswith("value_embeds."))
+        resid_paths = tuple(path for path in flat_params if path == "resid_lambdas")
+        x0_paths = tuple(path for path in flat_params if path == "x0_lambdas")
+        matrix_paths = tuple(
+            path
+            for path, value in flat_params.items()
+            if path.startswith("transformer.h.") and value.ndim >= 2
+        )
+
+        accounted_for = set(lm_head_paths) | set(embedding_paths) | set(value_embedding_paths) | set(resid_paths) | set(x0_paths) | set(matrix_paths)
+        unhandled = sorted(all_paths - accounted_for)
+        if unhandled:
+            raise ValueError(f"Unhandled parameters for optimizer grouping: {unhandled}")
+
+        adamw_groups = (
+            AdamWGroup("lm_head", lm_head_paths, adam_betas[0], adam_betas[1], 1e-10, 0.0),
+            AdamWGroup("embedding", embedding_paths, adam_betas[0], adam_betas[1], 1e-10, 0.0),
+            AdamWGroup("value_embedding", value_embedding_paths, adam_betas[0], adam_betas[1], 1e-10, 0.0),
+            AdamWGroup("resid", resid_paths, adam_betas[0], adam_betas[1], 1e-10, 0.0),
+            AdamWGroup("x0", x0_paths, 0.96, 0.95, 1e-10, 0.0),
+        )
+
+        by_shape = {}
+        for path in matrix_paths:
+            by_shape.setdefault(tuple(flat_params[path].shape), []).append(path)
+        muon_groups = []
+        for shape, paths in sorted(by_shape.items()):
+            red_dim = -1 if shape[-2] >= shape[-1] else -2
+            muon_groups.append(
+                MuonGroup(tuple(paths), shape, red_dim, beta2=0.95, ns_steps=5)
+            )
+        return adamw_groups, tuple(muon_groups)
+
+    def _init_state(self, flat_params):
+        adamw_state = {}
+        for group in self.adamw_groups:
+            for path in group.paths:
+                param = flat_params[path]
+                adamw_state[_safe_key(path)] = {
+                    "exp_avg": mx.zeros_like(param),
+                    "exp_avg_sq": mx.zeros_like(param),
+                }
+
+        muon_state = []
+        for group in self.muon_groups:
+            param = flat_params[group.paths[0]]
+            num_params = len(group.paths)
+            state_shape = (
+                (num_params, group.shape[-2], 1)
+                if group.shape[-2] >= group.shape[-1]
+                else (num_params, 1, group.shape[-1])
+            )
+            muon_state.append(
+                {
+                    "momentum_buffer": mx.zeros((num_params, *group.shape), dtype=param.dtype),
+                    "second_momentum_buffer": mx.zeros(state_shape, dtype=param.dtype),
+                }
+            )
+
+        return {
+            "step": mx.array(0, dtype=mx.uint64),
+            "hyperparams": {
+                "lm_head_lr": mx.array(self.initial_lrs["lm_head"], dtype=mx.float32),
+                "embedding_lr": mx.array(self.initial_lrs["embedding"], dtype=mx.float32),
+                "value_embedding_lr": mx.array(self.initial_lrs["value_embedding"], dtype=mx.float32),
+                "resid_lr": mx.array(self.initial_lrs["resid"], dtype=mx.float32),
+                "x0_lr": mx.array(self.initial_lrs["x0"], dtype=mx.float32),
+                "muon_lr": mx.array(self.initial_lrs["muon"], dtype=mx.float32),
+                "muon_momentum": mx.array(0.95, dtype=mx.float32),
+                "muon_weight_decay": mx.array(0.0, dtype=mx.float32),
+            },
+            "adamw": adamw_state,
+            "muon": muon_state,
+        }
+
+    def set_schedule(self, *, lr_multiplier: float, muon_momentum: float, muon_weight_decay: float) -> None:
+        hyperparams = self.state["hyperparams"]
+        hyperparams["lm_head_lr"] = mx.array(self.initial_lrs["lm_head"] * lr_multiplier, dtype=mx.float32)
+        hyperparams["embedding_lr"] = mx.array(self.initial_lrs["embedding"] * lr_multiplier, dtype=mx.float32)
+        hyperparams["value_embedding_lr"] = mx.array(self.initial_lrs["value_embedding"] * lr_multiplier, dtype=mx.float32)
+        hyperparams["resid_lr"] = mx.array(self.initial_lrs["resid"] * lr_multiplier, dtype=mx.float32)
+        hyperparams["x0_lr"] = mx.array(self.initial_lrs["x0"] * lr_multiplier, dtype=mx.float32)
+        hyperparams["muon_lr"] = mx.array(self.initial_lrs["muon"] * lr_multiplier, dtype=mx.float32)
+        hyperparams["muon_momentum"] = mx.array(muon_momentum, dtype=mx.float32)
+        hyperparams["muon_weight_decay"] = mx.array(muon_weight_decay, dtype=mx.float32)
+
+    def update(self, model, gradients) -> None:
+        params = model.trainable_parameters()
+        updated = self.apply_gradients(gradients, params)
+        model.update(updated)
+
+    def apply_gradients(self, gradients, parameters):
+        flat_params = dict(tree_flatten(parameters))
+        flat_grads = dict(tree_flatten(gradients))
+        updated = dict(flat_params)
+        step = self.state["step"] + 1
+        self.state["step"] = step
+        hyperparams = self.state["hyperparams"]
+
+        group_lrs = {
+            "lm_head": hyperparams["lm_head_lr"],
+            "embedding": hyperparams["embedding_lr"],
+            "value_embedding": hyperparams["value_embedding_lr"],
+            "resid": hyperparams["resid_lr"],
+            "x0": hyperparams["x0_lr"],
+        }
+
+        for group in self.adamw_groups:
+            lr = group_lrs[group.name]
+            beta1 = mx.array(group.beta1, dtype=mx.float32)
+            beta2 = mx.array(group.beta2, dtype=mx.float32)
+            eps = mx.array(group.eps, dtype=mx.float32)
+            weight_decay = mx.array(group.weight_decay, dtype=mx.float32)
+            for path in group.paths:
+                if path not in flat_grads:
+                    continue
+                param = flat_params[path]
+                grad = flat_grads[path]
+                state_entry = self.state["adamw"][_safe_key(path)]
+                new_param, exp_avg, exp_avg_sq = _adamw_update(
+                    param,
+                    grad,
+                    state_entry["exp_avg"],
+                    state_entry["exp_avg_sq"],
+                    step,
+                    lr,
+                    beta1,
+                    beta2,
+                    eps,
+                    weight_decay,
+                )
+                state_entry["exp_avg"] = exp_avg
+                state_entry["exp_avg_sq"] = exp_avg_sq
+                updated[path] = new_param
+
+        muon_lr = hyperparams["muon_lr"]
+        muon_momentum = hyperparams["muon_momentum"]
+        muon_weight_decay = hyperparams["muon_weight_decay"]
+        for idx, group in enumerate(self.muon_groups):
+            stacked_params = mx.stack([flat_params[path] for path in group.paths], axis=0)
+            stacked_grads = mx.stack([flat_grads[path] for path in group.paths], axis=0)
+            state_entry = self.state["muon"][idx]
+            updated_stack, momentum_buffer, second_momentum_buffer = _muon_update(
+                stacked_params,
+                stacked_grads,
+                state_entry["momentum_buffer"],
+                state_entry["second_momentum_buffer"],
+                muon_lr * max(1.0, group.shape[-2] / group.shape[-1]) ** 0.5,
+                muon_momentum,
+                muon_weight_decay,
+                mx.array(group.beta2, dtype=mx.float32),
+                group.ns_steps,
+                group.red_dim,
+            )
+            state_entry["momentum_buffer"] = momentum_buffer
+            state_entry["second_momentum_buffer"] = second_momentum_buffer
+            for param_idx, path in enumerate(group.paths):
+                updated[path] = updated_stack[param_idx]
+
+        return tree_unflatten(list(updated.items()))
