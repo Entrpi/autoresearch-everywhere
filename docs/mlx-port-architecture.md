@@ -367,10 +367,10 @@ These departures are not accidents. They are the core meaning of the fork: porta
 | Compile strategy | `torch.compile(model)` plus fused optimizer kernels | `mx.compile(train_step)` over model state + optimizer state | Intentional divergence | Compile boundary is different, but still designed for repeated-step execution. |
 | Runtime configurability | Edit constants in source | Presets, CLI overrides, smoke mode | Intentional divergence | Better for local experimentation, less faithful to single-file mutation. |
 | Hardware scope | NVIDIA CUDA, FlashAttention-driven | Apple Silicon + Metal via MLX | Intentional divergence | This is the fork's main purpose. |
-| MFU reporting | H100-relative MFU estimate | `mfu_percent` hardcoded to `0.00` | Gap | The MLX port does not yet provide a meaningful utilization metric. |
+| Utilization reporting | H100-relative MFU estimate | Measured step compute-share utilization plus estimated training TFLOPs and explicit loader/grad/optimizer/checkpoint/eval breakdowns | Intentional divergence | The MLX path now reports hardware-agnostic utilization telemetry instead of an H100-relative MFU estimate. |
 | Overnight experimentation | No in-repo runner | Added local sweep runner and detached launcher | Extension | Useful addition, but not part of upstream parity. |
 | Autonomous code mutation | Human/agent edits `train.py` directly | Human/agent edits `train_mlx.py` and/or package modules | Partial parity | The loop exists, but the MLX path is multi-file by design. |
-| Resume/checkpoint support | Not present | Step-boundary checkpoint and resume in `train_mlx.py` | Improvement | The MLX path now saves model, optimizer, runtime counters, and train-loader state for resumable local runs. |
+| Resume/checkpoint support | Not present | Step-boundary checkpoint and resume in `train_mlx.py` | Improvement | The MLX path now saves model, optimizer, runtime counters, and train-loader state for resumable local runs, and the end-of-run summary separates current-invocation timing from cumulative progress so resumed reports stay scope-consistent. |
 
 ## The Most Important Metric Caveat
 
@@ -391,7 +391,7 @@ Despite that caveat, the port is internally coherent for three reasons:
 - The backend adaptation is honest. The implementation does not pretend to be a tiny patch on top of CUDA assumptions.
 - The operational story is complete. There is a real path from setup, to one run, to repeated sweeps, to per-run artifact capture.
 
-In other words, this is already a real system, not a sketch. The main remaining gaps are dataset/pipeline efficiency, utilization reporting, and operational polish, not missing architecture.
+In other words, this is already a real system, not a sketch. The main remaining gaps are dataset/pipeline efficiency and operational polish, not missing architecture.
 
 ## Recommended Mental Model
 

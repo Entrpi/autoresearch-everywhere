@@ -24,7 +24,70 @@ On this hardware, the default canonical matched benchmark window for optimizatio
 
 ## Unreleased
 
-### New commit — Auto-enable checkpoint cadence for longer MLX runs — score `4`
+### New commit — Add robust MLX utilization instrumentation — score `4`
+
+**Human-directed, AI-shaped (4)**
+
+- Requested that optimization work focus on robust utilization instrumentation rather than another raw speed change.
+  - Replaced the fake per-step `mfu` readout with measured step compute-share utilization and estimated training TFLOPs.
+  - Added persistent step-telemetry counters so resumed runs keep coherent step-level utilization summaries.
+  - Added explicit loader/grad/accumulate/optimizer/checkpoint/eval breakdowns to the final run summary while retaining `mfu_percent` as a backward-compatible alias.
+  - Tightened resumed-run reporting so current-invocation timing and checkpoint percentages no longer mix with cumulative training progress.
+    - `training_seconds`, `total_seconds`, `checkpoint_percent`, `eval_percent`, and `checkpoint_count` are now current-invocation metrics.
+    - `cumulative_training_seconds`, `cumulative_checkpoint_seconds`, and `cumulative_checkpoint_count` are printed separately.
+    - utilization remains resume-aware because the step-telemetry window is restored from checkpoints.
+
+**Grounding**
+
+- Files:
+  - `train_mlx.py`
+  - `autoresearch_mlx/checkpoints.py`
+  - `program_mlx.md`
+  - `docs/mlx-port-architecture.md`
+  - `CHANGELOG.md`
+- Validation:
+  - `python3 -m py_compile train_mlx.py autoresearch_mlx/checkpoints.py`
+  - `./.venv/bin/python train_mlx.py --smoke`
+  - `./.venv/bin/python train_mlx.py --preset m5-balanced --time-budget 20 --eval-tokens 512 --canonical-eval-tokens 512`
+  - `./.venv/bin/python train_mlx.py --preset m5-fast --time-budget 20 --eval-tokens 512 --canonical-eval-tokens 512`
+  - `./.venv/bin/python train_mlx.py --preset m5-large --time-budget 20 --eval-tokens 512 --canonical-eval-tokens 512`
+  - `./.venv/bin/python train_mlx.py --preset m5-xlarge --time-budget 20 --eval-tokens 512 --canonical-eval-tokens 512`
+  - `./.venv/bin/python train_mlx.py --smoke --checkpoint-path /tmp/autoresearch_util_resume_smoke --checkpoint-interval 0.5`
+  - `./.venv/bin/python train_mlx.py --resume-from /tmp/autoresearch_util_resume_smoke --time-budget 1.5`
+  - `./.venv/bin/python train_mlx.py --smoke --checkpoint-path /tmp/autoresearch_resume_metrics --checkpoint-interval 0.5`
+  - `./.venv/bin/python train_mlx.py --resume-from /tmp/autoresearch_resume_metrics --time-budget 1.5`
+- Measurements:
+  - `20s` profile comparison runs (`512` proxy/canonical eval tokens):
+
+    | Preset | `val_bpb` | `proxy_val_bpb` | `mfu_percent` | `train_tflops` | `loader_percent` | `grad_percent` | `accum_percent` | `optimizer_percent` | `other_step_percent` | `checkpoint_percent` | `eval_percent` | `peak_vram_mb` | `util_window_steps` | Train loader |
+    | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |
+    | `m5-fast` | `2.018503` | `1.946999` | `99.50` | `0.706` | `0.45` | `66.24` | `5.97` | `27.30` | `0.05` | `0.00` | `0.11` | `146.5` | `2912` | prepacked cache |
+    | `m5-balanced` | `1.929286` | `1.908801` | `99.83` | `1.359` | `0.16` | `75.85` | `1.77` | `22.21` | `0.01` | `0.00` | `0.17` | `949.9` | `349` | prepacked cache |
+    | `m5-large` | `2.184426` | `2.200882` | `99.28` | `1.716` | `0.71` | `78.84` | `2.22` | `18.23` | `0.01` | `0.00` | `0.42` | `1944.3` | `74` | token cache / live packing |
+    | `m5-xlarge` | `2.246450` | `2.284754` | `99.86` | `2.207` | `0.13` | `83.54` | `0.67` | `15.64` | `0.00` | `0.00` | `0.78` | `4294.2` | `38` | token cache / live packing |
+
+  - smoke run:
+    - `mfu_percent=99.32`
+    - `train_tflops=0.564`
+    - `loader_percent=0.63`
+    - `optimizer_percent=26.50`
+  - smoke checkpoint/resume path:
+    - checkpointed smoke ended with `checkpoint_count=2` and `checkpoint_percent=2.24`
+    - resumed smoke ended with `mfu_percent=99.43`, `train_tflops=0.591`, `util_window_steps=175`, and `checkpoint_count=1`
+  - resume-metrics smoke path:
+    - checkpointed smoke ended with `training_seconds=1.0`, `total_seconds=1.1`, `checkpoint_count=2`, `cumulative_training_seconds=1.0`, `cumulative_checkpoint_seconds=0.020`, and `cumulative_checkpoint_count=2`
+    - resumed smoke ended with `training_seconds=0.5`, `total_seconds=0.5`, `checkpoint_count=1`, `cumulative_training_seconds=1.5`, `cumulative_checkpoint_seconds=0.027`, and `cumulative_checkpoint_count=3`
+- Confirmed behavior:
+  - per-step progress lines now report `util` and `tflops` instead of a fake `mfu`
+  - final summaries now expose the step-time split and end-of-run checkpoint/eval shares
+  - resumed runs restore the saved step-telemetry state and continue the utilization window instead of resetting it to zero
+  - resumed runs no longer print a cumulative `training_seconds` beside a per-invocation `total_seconds`
+  - across the shipped M5 presets, utilization stays near saturation while `train_tflops` rises with model size and the larger presets still reveal the token-cache/live-pack fallback in their train-loader path
+  - no performance-improvement claim is attached to this change; the grounding here is instrumentation correctness and observability
+
+## Committed History
+
+### March 9, 2026 — `62f2f9c` — Auto-enable checkpoint cadence for longer runs — score `4`
 
 **Human-directed, AI-shaped (4)**
 
@@ -53,8 +116,6 @@ On this hardware, the default canonical matched benchmark window for optimizatio
   - `--no-checkpoint` suppresses both the automatic path and cadence selection.
   - an explicit `--checkpoint-interval` without `--checkpoint-path` now auto-selects the checkpoint directory and reached a real checkpoint-save attempt during the smoke probe.
   - no performance claim is attached to this change; the grounding here is behavioral rather than benchmark-driven.
-
-## Committed History
 
 ### March 9, 2026 — `1c67475` — Add checkpoint interval tradeoff tooling — score `4`
 

@@ -69,6 +69,62 @@ class RunConfig:
     resume_from: str | None
 
 
+@dataclass
+class StepTiming:
+    total_seconds: float = 0.0
+    loader_seconds: float = 0.0
+    grad_seconds: float = 0.0
+    accumulate_seconds: float = 0.0
+    optimizer_seconds: float = 0.0
+
+    @property
+    def compute_seconds(self) -> float:
+        return self.grad_seconds + self.accumulate_seconds + self.optimizer_seconds
+
+    @property
+    def other_seconds(self) -> float:
+        accounted = self.loader_seconds + self.compute_seconds
+        return max(0.0, self.total_seconds - accounted)
+
+
+@dataclass
+class StepTelemetry:
+    total_steps: int = 0
+    total_step_seconds: float = 0.0
+    total_loader_seconds: float = 0.0
+    total_grad_seconds: float = 0.0
+    total_accumulate_seconds: float = 0.0
+    total_optimizer_seconds: float = 0.0
+    steady_steps: int = 0
+    steady_step_seconds: float = 0.0
+    steady_loader_seconds: float = 0.0
+    steady_grad_seconds: float = 0.0
+    steady_accumulate_seconds: float = 0.0
+    steady_optimizer_seconds: float = 0.0
+
+    def record_step(self, timing: StepTiming, *, include_in_steady: bool) -> None:
+        self.total_steps += 1
+        self.total_step_seconds += timing.total_seconds
+        self.total_loader_seconds += timing.loader_seconds
+        self.total_grad_seconds += timing.grad_seconds
+        self.total_accumulate_seconds += timing.accumulate_seconds
+        self.total_optimizer_seconds += timing.optimizer_seconds
+        if include_in_steady:
+            self.steady_steps += 1
+            self.steady_step_seconds += timing.total_seconds
+            self.steady_loader_seconds += timing.loader_seconds
+            self.steady_grad_seconds += timing.grad_seconds
+            self.steady_accumulate_seconds += timing.accumulate_seconds
+            self.steady_optimizer_seconds += timing.optimizer_seconds
+
+    @classmethod
+    def from_dict(cls, payload: dict | None) -> "StepTelemetry":
+        if not payload:
+            return cls()
+        valid = {field: payload.get(field, 0) for field in cls.__dataclass_fields__}
+        return cls(**valid)
+
+
 def verify_mlx_env() -> None:
     if sys.platform != "darwin":
         raise RuntimeError(f"train_mlx.py requires macOS. Detected platform: {sys.platform}")
@@ -138,16 +194,69 @@ def make_apply_grads_fn(model, optimizer):
     return apply_grads
 
 
+def percent(part: float, whole: float) -> float:
+    if whole <= 0.0:
+        return 0.0
+    return 100.0 * part / whole
+
+
+def estimate_step_tflops(num_flops_per_token: int, total_batch_size: int, step_seconds: float) -> float:
+    if step_seconds <= 0.0:
+        return 0.0
+    return (num_flops_per_token * total_batch_size) / step_seconds / 1e12
+
+
+def summarize_step_telemetry(step_telemetry: StepTelemetry, *, num_flops_per_token: int, total_batch_size: int) -> dict[str, float | int]:
+    if step_telemetry.steady_steps > 0:
+        label = "steady-state"
+        steps = step_telemetry.steady_steps
+        step_seconds = step_telemetry.steady_step_seconds
+        loader_seconds = step_telemetry.steady_loader_seconds
+        grad_seconds = step_telemetry.steady_grad_seconds
+        accumulate_seconds = step_telemetry.steady_accumulate_seconds
+        optimizer_seconds = step_telemetry.steady_optimizer_seconds
+    else:
+        label = "all-steps"
+        steps = step_telemetry.total_steps
+        step_seconds = step_telemetry.total_step_seconds
+        loader_seconds = step_telemetry.total_loader_seconds
+        grad_seconds = step_telemetry.total_grad_seconds
+        accumulate_seconds = step_telemetry.total_accumulate_seconds
+        optimizer_seconds = step_telemetry.total_optimizer_seconds
+
+    other_seconds = max(0.0, step_seconds - loader_seconds - grad_seconds - accumulate_seconds - optimizer_seconds)
+    compute_seconds = grad_seconds + accumulate_seconds + optimizer_seconds
+    return {
+        "window_label": label,
+        "window_steps": steps,
+        "train_tflops": estimate_step_tflops(num_flops_per_token, total_batch_size, step_seconds / max(steps, 1)),
+        "mfu_percent": percent(compute_seconds, step_seconds),
+        "loader_percent": percent(loader_seconds, step_seconds),
+        "grad_percent": percent(grad_seconds, step_seconds),
+        "accumulate_percent": percent(accumulate_seconds, step_seconds),
+        "optimizer_percent": percent(optimizer_seconds, step_seconds),
+        "other_step_percent": percent(other_seconds, step_seconds),
+    }
+
+
 def run_train_step(loader, grad_step, apply_grads, grad_accum_steps: int, model, optimizer):
     total_loss = None
     total_grads = None
     epoch = 1
+    step_timing = StepTiming()
+    t_step_start = time.perf_counter()
 
     for _ in range(grad_accum_steps):
+        t_loader_start = time.perf_counter()
         batch_inputs, batch_targets, epoch = next(loader)
+        step_timing.loader_seconds += time.perf_counter() - t_loader_start
+
+        t_grad_start = time.perf_counter()
         loss, grads = grad_step(batch_inputs, batch_targets)
         mx.eval(loss, grads)
+        step_timing.grad_seconds += time.perf_counter() - t_grad_start
 
+        t_accumulate_start = time.perf_counter()
         scaled_loss = loss / grad_accum_steps
         scaled_grads = tree_map(lambda grad: grad / grad_accum_steps, grads)
         if total_grads is None:
@@ -157,10 +266,14 @@ def run_train_step(loader, grad_step, apply_grads, grad_accum_steps: int, model,
             total_loss = total_loss + scaled_loss
             total_grads = tree_map(lambda left, right: left + right, total_grads, scaled_grads)
         mx.eval(total_loss, total_grads)
+        step_timing.accumulate_seconds += time.perf_counter() - t_accumulate_start
 
+    t_optimizer_start = time.perf_counter()
     optimizer_step = apply_grads(total_grads)
     mx.eval(optimizer_step, model.state, optimizer.state)
-    return total_loss, epoch
+    step_timing.optimizer_seconds += time.perf_counter() - t_optimizer_start
+    step_timing.total_seconds = time.perf_counter() - t_step_start
+    return total_loss, epoch, step_timing
 
 
 # Model architecture
@@ -177,6 +290,7 @@ ADAM_BETAS = (0.8, 0.95)
 WARMUP_RATIO = 0.0
 WARMDOWN_RATIO = 0.5
 FINAL_LR_FRAC = 0.0
+UTILIZATION_WARMUP_STEPS = 1
 
 PRESETS = {
     "m5-fast": RunPreset(
@@ -480,7 +594,7 @@ def main() -> None:
             "Lower --canonical-eval-seq-len or increase --seq-len."
         )
     verify_mlx_env()
-    t_start = time.time()
+    t_start = time.perf_counter()
     mx.random.seed(args.seed)
 
     tokenizer = Tokenizer.from_directory()
@@ -554,13 +668,16 @@ def main() -> None:
         )
         print(
             f"Resumed from {args.resume_from}: step={restored['step']}, "
-            f"training_seconds={restored['total_training_time']:.1f}"
+            f"cumulative_training_seconds={restored['total_training_time']:.1f}"
         )
     else:
         restored = {
             "step": 0,
             "total_training_time": 0.0,
             "smooth_train_loss": 0.0,
+            "step_telemetry": None,
+            "total_checkpoint_time": 0.0,
+            "checkpoint_count": 0,
         }
     grad_step = make_grad_step_fn(model)
     apply_grads = make_apply_grads_fn(model, optimizer)
@@ -571,15 +688,22 @@ def main() -> None:
         raise ValueError("--checkpoint-interval requires --checkpoint-path")
 
     mx.reset_peak_memory()
-    t_start_training = time.time()
     smooth_train_loss = float(restored["smooth_train_loss"])
     total_training_time = float(restored["total_training_time"])
+    resumed_training_time = total_training_time
     step = int(restored["step"])
+    resumed_step = step
+    local_step_index = 0
+    step_telemetry = StepTelemetry.from_dict(restored.get("step_telemetry"))
+    resumed_checkpoint_seconds = float(restored.get("total_checkpoint_time", 0.0))
+    resumed_checkpoint_count = int(restored.get("checkpoint_count", 0))
+    checkpoint_seconds = 0.0
+    checkpoint_count = 0
     last_checkpoint_time = total_training_time
     checkpoint_run_config = asdict(replace(args, resume_from=None))
 
     def maybe_save_checkpoint(*, force: bool = False) -> None:
-        nonlocal last_checkpoint_time
+        nonlocal last_checkpoint_time, checkpoint_seconds, checkpoint_count
         if args.checkpoint_path is None:
             return
         if force and total_training_time == last_checkpoint_time:
@@ -589,7 +713,7 @@ def main() -> None:
                 return
             if (total_training_time - last_checkpoint_time) < args.checkpoint_interval:
                 return
-        save_checkpoint(
+        elapsed = save_checkpoint(
             args.checkpoint_path,
             run_config=checkpoint_run_config,
             model_config=asdict(config),
@@ -599,7 +723,12 @@ def main() -> None:
             step=step,
             total_training_time=total_training_time,
             smooth_train_loss=smooth_train_loss,
+            step_telemetry=asdict(step_telemetry),
+            total_checkpoint_time=resumed_checkpoint_seconds + checkpoint_seconds,
+            checkpoint_count=resumed_checkpoint_count + checkpoint_count,
         )
+        checkpoint_seconds += elapsed
+        checkpoint_count += 1
         last_checkpoint_time = total_training_time
         print(f"\nCheckpoint saved to {args.checkpoint_path} at step {step}.")
 
@@ -614,8 +743,7 @@ def main() -> None:
             muon_weight_decay=muon_weight_decay,
         )
 
-        t0 = time.time()
-        loss, epoch = run_train_step(
+        loss, epoch, step_timing = run_train_step(
             train_loader,
             grad_step,
             apply_grads,
@@ -623,14 +751,17 @@ def main() -> None:
             model,
             optimizer,
         )
-        t1 = time.time()
-        dt = t1 - t0
+        dt = step_timing.total_seconds
 
         train_loss = loss.item()
         if train_loss > 100:
             print("FAIL")
             raise SystemExit(1)
 
+        step_telemetry.record_step(
+            step_timing,
+            include_in_steady=local_step_index >= UTILIZATION_WARMUP_STEPS,
+        )
         total_training_time += dt
 
         ema_beta = 0.9
@@ -638,12 +769,14 @@ def main() -> None:
         debiased_smooth_loss = smooth_train_loss / (1 - ema_beta ** (step + 1))
         pct_done = 100 * progress
         tok_per_sec = int(args.total_batch_size / dt)
+        step_tflops = estimate_step_tflops(num_flops_per_token, args.total_batch_size, dt)
         remaining = max(0.0, args.time_budget - total_training_time)
-        mfu = 0.0
+        step_util = percent(step_timing.compute_seconds, dt)
         print(
             f"\rstep {step:05d} ({pct_done:.1f}%) | loss: {debiased_smooth_loss:.6f} | "
             f"lrm: {lrm:.2f} | dt: {dt * 1000:.0f}ms | tok/sec: {tok_per_sec:,} | "
-            f"mfu: {mfu:.1f}% | epoch: {epoch} | remaining: {remaining:.0f}s    ",
+            f"util: {step_util:.1f}% | tflops: {step_tflops:.2f} | "
+            f"epoch: {epoch} | remaining: {remaining:.0f}s    ",
             end="",
             flush=True,
         )
@@ -656,13 +789,16 @@ def main() -> None:
             gc.collect()
 
         step += 1
+        local_step_index += 1
         maybe_save_checkpoint()
 
     print()
     maybe_save_checkpoint(force=True)
 
     total_tokens = step * args.total_batch_size
+    session_tokens = (step - resumed_step) * args.total_batch_size
     model.eval()
+    t_proxy_eval_start = time.perf_counter()
     proxy_val_bpb = evaluate_bpb(
         model,
         tokenizer,
@@ -671,6 +807,8 @@ def main() -> None:
         eval_tokens=args.eval_tokens,
         prefer_prepacked_cache=args.prefer_prepacked_cache,
     )
+    proxy_eval_seconds = time.perf_counter() - t_proxy_eval_start
+    t_canonical_eval_start = time.perf_counter()
     val_bpb = evaluate_bpb(
         model,
         tokenizer,
@@ -679,18 +817,48 @@ def main() -> None:
         eval_tokens=args.canonical_eval_tokens,
         prefer_prepacked_cache=args.prefer_prepacked_cache,
     )
-    t_end = time.time()
-    steady_state_mfu = 0.0
+    canonical_eval_seconds = time.perf_counter() - t_canonical_eval_start
+    total_wall_seconds = time.perf_counter() - t_start
+    telemetry_summary = summarize_step_telemetry(
+        step_telemetry,
+        num_flops_per_token=num_flops_per_token,
+        total_batch_size=args.total_batch_size,
+    )
+    session_training_seconds = total_training_time - resumed_training_time
+    cumulative_training_seconds = total_training_time
+    session_total_seconds = total_wall_seconds
+    session_eval_seconds = proxy_eval_seconds + canonical_eval_seconds
+    session_checkpoint_count = checkpoint_count
+    cumulative_checkpoint_seconds = resumed_checkpoint_seconds + checkpoint_seconds
+    cumulative_checkpoint_count = resumed_checkpoint_count + checkpoint_count
+    eval_percent = percent(session_eval_seconds, session_total_seconds)
+    checkpoint_percent = percent(checkpoint_seconds, session_total_seconds)
     peak_vram_mb = mx.get_peak_memory() / 1024 / 1024
 
     print("---")
     print(f"val_bpb:          {val_bpb:.6f}")
     print(f"proxy_val_bpb:    {proxy_val_bpb:.6f}")
-    print(f"training_seconds: {total_training_time:.1f}")
-    print(f"total_seconds:    {t_end - t_start:.1f}")
+    print(f"training_seconds: {session_training_seconds:.1f}")
+    print(f"total_seconds:    {session_total_seconds:.1f}")
     print(f"peak_vram_mb:     {peak_vram_mb:.1f}")
-    print(f"mfu_percent:      {steady_state_mfu:.2f}")
-    print(f"total_tokens_M:   {total_tokens / 1e6:.1f}")
+    print(f"mfu_percent:      {telemetry_summary['mfu_percent']:.2f}")
+    print(f"train_tflops:     {telemetry_summary['train_tflops']:.3f}")
+    print(f"loader_percent:   {telemetry_summary['loader_percent']:.2f}")
+    print(f"grad_percent:     {telemetry_summary['grad_percent']:.2f}")
+    print(f"accum_percent:    {telemetry_summary['accumulate_percent']:.2f}")
+    print(f"optimizer_percent: {telemetry_summary['optimizer_percent']:.2f}")
+    print(f"other_step_percent: {telemetry_summary['other_step_percent']:.2f}")
+    print(f"checkpoint_percent: {checkpoint_percent:.2f}")
+    print(f"eval_percent:     {eval_percent:.2f}")
+    print(f"util_window_steps: {telemetry_summary['window_steps']}")
+    print(f"util_window:      cumulative {telemetry_summary['window_label']}")
+    print(f"checkpoint_count: {session_checkpoint_count}")
+    print(f"session_tokens_M: {session_tokens / 1e6:.3f}")
+    print(f"session_steps:    {step - resumed_step}")
+    print(f"cumulative_training_seconds: {cumulative_training_seconds:.1f}")
+    print(f"cumulative_checkpoint_seconds: {cumulative_checkpoint_seconds:.3f}")
+    print(f"cumulative_checkpoint_count: {cumulative_checkpoint_count}")
+    print(f"total_tokens_M:   {total_tokens / 1e6:.3f}")
     print(f"num_steps:        {step}")
     print(f"num_params_M:     {num_params / 1e6:.1f}")
     print(f"depth:            {args.depth}")

@@ -1,3 +1,4 @@
+import time
 import json
 from pathlib import Path
 
@@ -73,7 +74,11 @@ def save_checkpoint(
     step: int,
     total_training_time: float,
     smooth_train_loss: float,
-) -> None:
+    step_telemetry: dict | None = None,
+    total_checkpoint_time: float = 0.0,
+    checkpoint_count: int = 0,
+) -> float:
+    t_checkpoint_start = time.perf_counter()
     paths = _checkpoint_paths(checkpoint_dir)
     paths["root"].mkdir(parents=True, exist_ok=True)
 
@@ -84,6 +89,7 @@ def save_checkpoint(
     _save_safetensors(paths["model"], model_arrays)
     _save_safetensors(paths["optimizer"], optimizer_arrays)
     _save_npz(paths["loader"], loader_arrays)
+    elapsed_before_metadata = time.perf_counter() - t_checkpoint_start
     _write_json(
         paths["metadata"],
         {
@@ -94,10 +100,17 @@ def save_checkpoint(
                 "step": step,
                 "total_training_time": total_training_time,
                 "smooth_train_loss": smooth_train_loss,
+                "step_telemetry": step_telemetry,
+                # Include the current save cost up to metadata emission. The returned
+                # checkpoint_seconds includes the metadata write itself.
+                "total_checkpoint_time": total_checkpoint_time + elapsed_before_metadata,
+                "checkpoint_count": checkpoint_count + 1,
             },
             "loader_state": loader_metadata,
         },
     )
+    checkpoint_seconds = time.perf_counter() - t_checkpoint_start
+    return checkpoint_seconds
 
 
 def load_checkpoint_metadata(checkpoint_dir: str | Path) -> dict:

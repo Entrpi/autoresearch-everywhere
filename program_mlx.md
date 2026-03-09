@@ -66,6 +66,22 @@ training_seconds: <float>
 total_seconds:    <float>
 peak_vram_mb:     <float>
 mfu_percent:      <float>
+train_tflops:     <float>
+loader_percent:   <float>
+grad_percent:     <float>
+accum_percent:    <float>
+optimizer_percent: <float>
+other_step_percent: <float>
+checkpoint_percent: <float>
+eval_percent:     <float>
+util_window_steps: <int>
+util_window:      <string>
+checkpoint_count: <int>
+session_tokens_M: <float>
+session_steps:    <int>
+cumulative_training_seconds: <float>
+cumulative_checkpoint_seconds: <float>
+cumulative_checkpoint_count: <int>
 total_tokens_M:   <float>
 num_steps:        <int>
 num_params_M:     <float>
@@ -75,6 +91,8 @@ canonical_seq_len: <int>
 canonical_tokens: <int>
 canonical_batch:  <int>
 ```
+
+`training_seconds`, `total_seconds`, `checkpoint_percent`, `eval_percent`, and `checkpoint_count` are current-invocation metrics, so a resumed run no longer mixes cumulative training time with per-invocation wall-clock time. `mfu_percent` is retained as a backward-compatible alias for measured step compute-share utilization on the MLX path and remains resume-aware because its step telemetry is restored from checkpoints. The more informative new fields are `train_tflops`, the explicit loader/grad/optimizer/checkpoint/eval percentages, and the separate `session_*` / `cumulative_*` counters.
 
 ## Logging results
 
