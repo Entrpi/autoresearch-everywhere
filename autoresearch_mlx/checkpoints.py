@@ -9,11 +9,14 @@ from mlx.utils import tree_flatten, tree_unflatten
 from .data import restore_loader_state, serialize_loader_state
 
 
-CHECKPOINT_VERSION = 1
+CHECKPOINT_VERSION = 2
 CHECKPOINT_METADATA = "checkpoint.json"
 MODEL_WEIGHTS = "model.safetensors"
 OPTIMIZER_STATE = "optimizer.safetensors"
 LOADER_STATE = "loader_state.npz"
+CHECKPOINT_MODE_EXACT = "exact"
+CHECKPOINT_MODE_WEIGHTS_ONLY = "weights_only"
+CHECKPOINT_MODES = (CHECKPOINT_MODE_EXACT, CHECKPOINT_MODE_WEIGHTS_ONLY)
 
 
 def _checkpoint_paths(checkpoint_dir: str | Path) -> dict[str, Path]:
@@ -46,6 +49,11 @@ def _save_safetensors(path: Path, arrays: dict[str, mx.array]) -> None:
     temp.replace(path)
 
 
+def _safe_unlink(path: Path) -> None:
+    if path.exists():
+        path.unlink()
+
+
 def _load_trainable_weights(model, arrays: dict[str, mx.array]) -> None:
     current = tree_flatten(model.trainable_parameters(), destination={})
     if set(arrays) != set(current):
@@ -66,6 +74,7 @@ def _load_trainable_weights(model, arrays: dict[str, mx.array]) -> None:
 def save_checkpoint(
     checkpoint_dir: str | Path,
     *,
+    checkpoint_mode: str = CHECKPOINT_MODE_EXACT,
     run_config: dict,
     model_config: dict,
     model,
@@ -78,22 +87,29 @@ def save_checkpoint(
     total_checkpoint_time: float = 0.0,
     checkpoint_count: int = 0,
 ) -> float:
+    if checkpoint_mode not in CHECKPOINT_MODES:
+        raise ValueError(f"Unsupported checkpoint_mode {checkpoint_mode!r}. Expected one of {CHECKPOINT_MODES}.")
     t_checkpoint_start = time.perf_counter()
     paths = _checkpoint_paths(checkpoint_dir)
     paths["root"].mkdir(parents=True, exist_ok=True)
 
     model_arrays = tree_flatten(model.trainable_parameters(), destination={})
-    optimizer_arrays = tree_flatten(optimizer.state, destination={})
-    loader_metadata, loader_arrays = serialize_loader_state(train_loader)
-
     _save_safetensors(paths["model"], model_arrays)
-    _save_safetensors(paths["optimizer"], optimizer_arrays)
-    _save_npz(paths["loader"], loader_arrays)
+    if checkpoint_mode == CHECKPOINT_MODE_EXACT:
+        optimizer_arrays = tree_flatten(optimizer.state, destination={})
+        loader_metadata, loader_arrays = serialize_loader_state(train_loader)
+        _save_safetensors(paths["optimizer"], optimizer_arrays)
+        _save_npz(paths["loader"], loader_arrays)
+    else:
+        loader_metadata = None
+        _safe_unlink(paths["optimizer"])
+        _safe_unlink(paths["loader"])
     elapsed_before_metadata = time.perf_counter() - t_checkpoint_start
     _write_json(
         paths["metadata"],
         {
             "version": CHECKPOINT_VERSION,
+            "checkpoint_mode": checkpoint_mode,
             "run_config": run_config,
             "model_config": model_config,
             "training_state": {
@@ -118,10 +134,12 @@ def load_checkpoint_metadata(checkpoint_dir: str | Path) -> dict:
     if not paths["metadata"].exists():
         raise RuntimeError(f"Missing checkpoint metadata: {paths['metadata']}")
     payload = json.loads(paths["metadata"].read_text())
-    if int(payload.get("version", -1)) != CHECKPOINT_VERSION:
+    version = int(payload.get("version", -1))
+    if version not in {1, CHECKPOINT_VERSION}:
         raise RuntimeError(
-            f"Unsupported checkpoint version {payload.get('version')}, expected {CHECKPOINT_VERSION}."
+            f"Unsupported checkpoint version {payload.get('version')}, expected one of [1, {CHECKPOINT_VERSION}]."
         )
+    payload.setdefault("checkpoint_mode", CHECKPOINT_MODE_EXACT)
     return payload
 
 
@@ -134,14 +152,22 @@ def restore_checkpoint(
 ) -> dict:
     paths = _checkpoint_paths(checkpoint_dir)
     metadata = load_checkpoint_metadata(checkpoint_dir)
+    checkpoint_mode = metadata["checkpoint_mode"]
 
     model_arrays = mx.load(str(paths["model"]))
-    optimizer_arrays = mx.load(str(paths["optimizer"]))
-    with np.load(paths["loader"]) as loader_arrays:
-        loader_arrays_dict = {key: loader_arrays[key] for key in loader_arrays.files}
-
     _load_trainable_weights(model, model_arrays)
-    optimizer.state = tree_unflatten(optimizer_arrays)
-    restore_loader_state(train_loader, metadata["loader_state"], loader_arrays_dict)
+    restored_optimizer_state = checkpoint_mode == CHECKPOINT_MODE_EXACT
+    restored_loader_state = checkpoint_mode == CHECKPOINT_MODE_EXACT
+    if restored_optimizer_state:
+        optimizer_arrays = mx.load(str(paths["optimizer"]))
+        optimizer.state = tree_unflatten(optimizer_arrays)
+    if restored_loader_state:
+        with np.load(paths["loader"]) as loader_arrays:
+            loader_arrays_dict = {key: loader_arrays[key] for key in loader_arrays.files}
+        restore_loader_state(train_loader, metadata["loader_state"], loader_arrays_dict)
     mx.eval(model.state, optimizer.state)
-    return metadata["training_state"]
+    training_state = dict(metadata["training_state"])
+    training_state["loaded_checkpoint_mode"] = checkpoint_mode
+    training_state["restored_optimizer_state"] = restored_optimizer_state
+    training_state["restored_loader_state"] = restored_loader_state
+    return training_state

@@ -18,7 +18,12 @@ if str(REPO_ROOT) not in sys.path:
 
 import mlx.core as mx
 
-from autoresearch_mlx.checkpoints import restore_checkpoint, save_checkpoint
+from autoresearch_mlx.checkpoints import (
+    CHECKPOINT_MODE_EXACT,
+    CHECKPOINT_MODES,
+    restore_checkpoint,
+    save_checkpoint,
+)
 from autoresearch_mlx.data import Tokenizer, make_dataloader
 from autoresearch_mlx.model import GPT
 from autoresearch_mlx.optim import MuonAdamW
@@ -58,6 +63,12 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=1,
         help="Number of independent checkpoint-and-resume trials to run.",
+    )
+    parser.add_argument(
+        "--checkpoint-mode",
+        choices=CHECKPOINT_MODES,
+        default=CHECKPOINT_MODE_EXACT,
+        help="Checkpoint semantics to benchmark.",
     )
     parser.add_argument(
         "--no-prepacked-cache",
@@ -196,6 +207,7 @@ def measure_once(args: argparse.Namespace, *, repeat_index: int) -> dict:
 
     save_seconds = save_checkpoint(
         checkpoint_root,
+        checkpoint_mode=args.checkpoint_mode,
         run_config={"preset": args.preset},
         model_config=asdict(config),
         model=model,
@@ -272,6 +284,7 @@ def measure_once(args: argparse.Namespace, *, repeat_index: int) -> dict:
         "repeat_index": repeat_index,
         "preset": args.preset,
         "prefer_prepacked_cache": prefer_prepacked_cache,
+        "checkpoint_mode": args.checkpoint_mode,
         "loader_type": type(restore_loader).__name__,
         "seq_len": preset.seq_len,
         "total_batch_size": preset.total_batch_size,
@@ -333,6 +346,7 @@ def main() -> None:
     summary = {
         "preset": args.preset,
         "prefer_prepacked_cache": not args.no_prepacked_cache,
+        "checkpoint_mode": args.checkpoint_mode,
         "repeats": args.repeats,
         "trials": trials,
         "aggregate": aggregate_trials(trials),

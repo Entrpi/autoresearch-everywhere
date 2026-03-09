@@ -42,7 +42,7 @@ Use `uv run train_mlx.py --benchmark-skip-eval` when you want a warmup-aware com
 
 `uv run prepare_mlx.py` now builds the shipped prepacked row caches by default so `m5-fast`, `m5-balanced`, `m5-large`, and `m5-xlarge` all have a prepared fast path. Use `uv run prepare_mlx.py --skip-prepacked-cache` only when you intentionally want the live packing fallback.
 
-For runs above 5 minutes, `train_mlx.py` now enables resumable checkpoints by default using the repo's conservative checkpoint-frequency selector. Use `--checkpoint-path` to choose the checkpoint directory while keeping that selector, `--checkpoint-interval` to pin the cadence, or `--no-checkpoint` to disable it.
+For runs above 5 minutes, `train_mlx.py` now enables exact full-state checkpoints by default using the repo's conservative checkpoint-frequency selector. Use `--checkpoint-path` to choose the checkpoint directory while keeping that selector, `--checkpoint-interval` to pin the cadence, `--checkpoint-mode weights_only` when cheaper approximate resume is acceptable, or `--no-checkpoint` to disable it. `weights_only` restores model weights but starts from a fresh optimizer and train-loader state, so exact full-state resume remains the default and the selector remains conservatively calibrated from exact save costs.
 
 What you CAN do:
 - Modify `train_mlx.py`.

@@ -51,7 +51,7 @@ The current MLX port and preset defaults were developed on and tested against an
 
 The prepacked caches are keyed by split and sequence length. `train_mlx.py` and evaluation will prefer them automatically when they are present; use `uv run train_mlx.py --no-prepacked-cache` to force the live packing path for debugging or ablations.
 
-`train_mlx.py` also supports resumable checkpoints. For runs longer than 5 minutes, the MLX path now enables checkpoints by default using a conservative interval selector grounded in the measured exact-resume save costs on this machine. Use `--checkpoint-path` to choose the directory explicitly while keeping the default cadence selector, `--checkpoint-interval` to pin the cadence, `--resume-from` to continue the exact run state later, or `--no-checkpoint` to disable checkpointing entirely.
+`train_mlx.py` also supports resumable checkpoints. For runs longer than 5 minutes, the MLX path now enables exact full-state checkpoints by default using a conservative interval selector grounded in the measured exact-resume save costs on this machine. Use `--checkpoint-path` to choose the directory explicitly while keeping the default cadence selector, `--checkpoint-interval` to pin the cadence, `--resume-from` to continue later, `--checkpoint-mode weights_only` to save only model weights and resume approximately with a fresh optimizer/loader state, or `--no-checkpoint` to disable checkpointing entirely. The auto cadence remains conservatively calibrated from exact full-state save costs even when you pick `weights_only`.
 
 ```bash
 # save checkpoints every 5 minutes
@@ -59,6 +59,9 @@ uv run train_mlx.py --checkpoint-path /tmp/autoresearch-m5-balanced --checkpoint
 
 # resume later with a larger total training budget
 uv run train_mlx.py --resume-from /tmp/autoresearch-m5-balanced --time-budget 900
+
+# cheaper approximate resume that only restores model weights
+uv run train_mlx.py --checkpoint-mode weights_only --checkpoint-path /tmp/autoresearch-m5-balanced-lite
 ```
 
 ## Presets

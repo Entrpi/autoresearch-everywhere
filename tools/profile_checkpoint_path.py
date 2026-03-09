@@ -21,6 +21,9 @@ import numpy as np
 from mlx.utils import tree_flatten, tree_map, tree_unflatten
 
 from autoresearch_mlx.checkpoints import (
+    CHECKPOINT_VERSION,
+    CHECKPOINT_MODE_EXACT,
+    CHECKPOINT_MODES,
     _checkpoint_paths,
     _load_trainable_weights,
     _save_npz,
@@ -50,6 +53,12 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--preset", choices=tuple(PRESETS), default="m5-large")
     parser.add_argument("--train-steps", type=int, default=5, help="Optimizer steps to run before profiling save/load.")
+    parser.add_argument(
+        "--checkpoint-mode",
+        choices=CHECKPOINT_MODES,
+        default=CHECKPOINT_MODE_EXACT,
+        help="Checkpoint semantics to profile.",
+    )
     parser.add_argument(
         "--no-prepacked-cache",
         action="store_true",
@@ -177,16 +186,28 @@ def main() -> None:
     paths["root"].mkdir(parents=True, exist_ok=True)
 
     (model_arrays, flatten_model_seconds) = timed(lambda: tree_flatten(model.trainable_parameters(), destination={}))
-    (optimizer_arrays, flatten_optimizer_seconds) = timed(lambda: tree_flatten(optimizer.state, destination={}))
-    ((loader_metadata, loader_arrays), serialize_loader_seconds) = timed(lambda: serialize_loader_state(train_loader))
+    if args.checkpoint_mode == CHECKPOINT_MODE_EXACT:
+        (optimizer_arrays, flatten_optimizer_seconds) = timed(lambda: tree_flatten(optimizer.state, destination={}))
+        ((loader_metadata, loader_arrays), serialize_loader_seconds) = timed(lambda: serialize_loader_state(train_loader))
+    else:
+        optimizer_arrays = {}
+        flatten_optimizer_seconds = 0.0
+        loader_metadata = None
+        loader_arrays = {}
+        serialize_loader_seconds = 0.0
     (_, model_write_seconds) = timed(lambda: _save_safetensors(paths["model"], model_arrays))
-    (_, optimizer_write_seconds) = timed(lambda: _save_safetensors(paths["optimizer"], optimizer_arrays))
-    (_, loader_write_seconds) = timed(lambda: _save_npz(paths["loader"], loader_arrays))
+    if args.checkpoint_mode == CHECKPOINT_MODE_EXACT:
+        (_, optimizer_write_seconds) = timed(lambda: _save_safetensors(paths["optimizer"], optimizer_arrays))
+        (_, loader_write_seconds) = timed(lambda: _save_npz(paths["loader"], loader_arrays))
+    else:
+        optimizer_write_seconds = 0.0
+        loader_write_seconds = 0.0
     (_, metadata_write_seconds) = timed(
         lambda: _write_json(
             paths["metadata"],
             {
-                "version": 1,
+                "version": CHECKPOINT_VERSION,
+                "checkpoint_mode": args.checkpoint_mode,
                 "run_config": {"preset": args.preset},
                 "model_config": asdict(config),
                 "training_state": {
@@ -235,18 +256,28 @@ def main() -> None:
 
     (metadata, metadata_read_seconds) = timed(lambda: load_checkpoint_metadata(checkpoint_root))
     (restored_model_arrays, model_load_seconds) = timed(lambda: mx.load(str(paths["model"])))
-    (restored_optimizer_arrays, optimizer_load_seconds) = timed(lambda: mx.load(str(paths["optimizer"])))
+    if args.checkpoint_mode == CHECKPOINT_MODE_EXACT:
+        (restored_optimizer_arrays, optimizer_load_seconds) = timed(lambda: mx.load(str(paths["optimizer"])))
 
-    def load_loader_arrays():
-        with np.load(paths["loader"]) as loader_npz:
-            return {key: loader_npz[key] for key in loader_npz.files}
+        def load_loader_arrays():
+            with np.load(paths["loader"]) as loader_npz:
+                return {key: loader_npz[key] for key in loader_npz.files}
 
-    (loader_arrays_dict, loader_load_seconds) = timed(load_loader_arrays)
+        (loader_arrays_dict, loader_load_seconds) = timed(load_loader_arrays)
+    else:
+        restored_optimizer_arrays = {}
+        optimizer_load_seconds = 0.0
+        loader_arrays_dict = {}
+        loader_load_seconds = 0.0
     (_, apply_model_seconds) = timed(lambda: _load_trainable_weights(restore_model, restored_model_arrays))
-    (_, apply_optimizer_seconds) = timed(lambda: setattr(restore_optimizer, "state", tree_unflatten(restored_optimizer_arrays)))
-    (_, restore_loader_seconds) = timed(
-        lambda: restore_loader_state(restore_loader, metadata["loader_state"], loader_arrays_dict)
-    )
+    if args.checkpoint_mode == CHECKPOINT_MODE_EXACT:
+        (_, apply_optimizer_seconds) = timed(lambda: setattr(restore_optimizer, "state", tree_unflatten(restored_optimizer_arrays)))
+        (_, restore_loader_seconds) = timed(
+            lambda: restore_loader_state(restore_loader, metadata["loader_state"], loader_arrays_dict)
+        )
+    else:
+        apply_optimizer_seconds = 0.0
+        restore_loader_seconds = 0.0
     (_, eval_restore_seconds) = timed(lambda: mx.eval(restore_model.state, restore_optimizer.state))
     (_, post_restore_step_seconds) = timed(
         lambda: run_training_steps(
@@ -280,6 +311,7 @@ def main() -> None:
 
     summary = {
         "preset": args.preset,
+        "checkpoint_mode": args.checkpoint_mode,
         "prefer_prepacked_cache": prefer_prepacked_cache,
         "loader_type": type(train_loader).__name__,
         "train_steps": args.train_steps,

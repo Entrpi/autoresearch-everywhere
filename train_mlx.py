@@ -28,7 +28,13 @@ from autoresearch_mlx.checkpoint_policy import (
     choose_auto_checkpoint_decision,
     default_auto_checkpoint_path,
 )
-from autoresearch_mlx.checkpoints import load_checkpoint_metadata, restore_checkpoint, save_checkpoint
+from autoresearch_mlx.checkpoints import (
+    CHECKPOINT_MODE_EXACT,
+    CHECKPOINT_MODES,
+    load_checkpoint_metadata,
+    restore_checkpoint,
+    save_checkpoint,
+)
 from autoresearch_mlx.data import Tokenizer, evaluate_bpb, make_dataloader
 from autoresearch_mlx.model import GPT, GPTConfig
 from autoresearch_mlx.optim import MuonAdamW
@@ -67,6 +73,7 @@ class RunConfig:
     benchmark_skip_eval: bool
     prefer_prepacked_cache: bool
     no_checkpoint: bool
+    checkpoint_mode: str
     checkpoint_path: str | None
     checkpoint_interval: float | None
     resume_from: str | None
@@ -431,6 +438,7 @@ def resolve_run_config(args: argparse.Namespace) -> RunConfig:
         benchmark_skip_eval=args.benchmark_skip_eval,
         prefer_prepacked_cache=not args.no_prepacked_cache,
         no_checkpoint=args.no_checkpoint,
+        checkpoint_mode=CHECKPOINT_MODE_EXACT if args.checkpoint_mode is None else args.checkpoint_mode,
         checkpoint_path=args.checkpoint_path,
         checkpoint_interval=args.checkpoint_interval,
         resume_from=args.resume_from,
@@ -513,10 +521,16 @@ def resolve_resume_config(args: argparse.Namespace) -> RunConfig:
     run_config.setdefault("benchmark_warmup_steps", None)
     run_config.setdefault("benchmark_skip_eval", False)
     run_config.setdefault("no_checkpoint", False)
+    run_config.setdefault("checkpoint_mode", CHECKPOINT_MODE_EXACT)
     run_config.setdefault("checkpoint_path", None)
     run_config.setdefault("checkpoint_interval", None)
     run_config["time_budget"] = args.time_budget if args.time_budget is not None else run_config["time_budget"]
     run_config["no_checkpoint"] = args.no_checkpoint
+    run_config["checkpoint_mode"] = (
+        args.checkpoint_mode
+        if args.checkpoint_mode is not None
+        else run_config["checkpoint_mode"]
+    )
     if args.no_checkpoint:
         run_config["checkpoint_path"] = None
         run_config["checkpoint_interval"] = None
@@ -602,6 +616,11 @@ def parse_args() -> RunConfig:
         help="Disable resumable checkpoints, including the automatic defaults for longer runs.",
     )
     parser.add_argument(
+        "--checkpoint-mode",
+        choices=CHECKPOINT_MODES,
+        help="Checkpoint semantics. 'exact' restores optimizer and loader state; 'weights_only' restores only model weights and resumes approximately.",
+    )
+    parser.add_argument(
         "--checkpoint-path",
         help="Directory to save a resumable training checkpoint.",
     )
@@ -630,6 +649,7 @@ def resolve_checkpoint_settings(args: RunConfig, num_params: int) -> tuple[RunCo
         depth=args.depth,
         total_batch_size=args.total_batch_size,
         window_pattern=args.window_pattern,
+        checkpoint_mode=args.checkpoint_mode,
     )
 
     if args.checkpoint_interval is not None:
@@ -652,9 +672,11 @@ def resolve_checkpoint_settings(args: RunConfig, num_params: int) -> tuple[RunCo
         f"auto-enabled for time_budget>{AUTO_CHECKPOINT_MIN_TIME_BUDGET_SEC:.0f}s using "
         f"{decision.calibration.label}; selected {decision.recommendation.interval_label} "
         f"at {decision.recommendation.save_only_overhead_fraction * 100.0:.4f}% save-only overhead "
-        f"with {path_source}; measured resume-ready penalty "
+        f"with {path_source}; checkpoint_mode={args.checkpoint_mode}; measured resume-ready penalty "
         f"{decision.calibration.resume_ready_penalty_sec:.3f}s"
     )
+    if args.checkpoint_mode != CHECKPOINT_MODE_EXACT:
+        reason += " (interval remains conservatively calibrated from exact full-state save costs)"
     return resolved, reason
 
 
@@ -702,7 +724,7 @@ def main() -> None:
         f"device_batch_size={args.device_batch_size}, total_batch_size={args.total_batch_size}, "
         f"smoke={args.smoke}, benchmark_warmup_steps={args.benchmark_warmup_steps if args.benchmark_warmup_steps is not None else 'auto'}, "
         f"benchmark_skip_eval={args.benchmark_skip_eval}, prefer_prepacked_cache={args.prefer_prepacked_cache}, "
-        f"no_checkpoint={args.no_checkpoint}, checkpoint_path={args.checkpoint_path}, "
+        f"no_checkpoint={args.no_checkpoint}, checkpoint_mode={args.checkpoint_mode}, checkpoint_path={args.checkpoint_path}, "
         f"checkpoint_interval={args.checkpoint_interval}, resume_from={args.resume_from}"
     )
     num_flops_per_token = model.estimate_flops()
@@ -739,9 +761,14 @@ def main() -> None:
             optimizer=optimizer,
             train_loader=train_loader,
         )
+        resume_mode = restored["loaded_checkpoint_mode"]
+        resume_semantics = "exact step-boundary state restored"
+        if not restored["restored_optimizer_state"] or not restored["restored_loader_state"]:
+            resume_semantics = "approximate resume: optimizer and/or loader state reset"
         print(
             f"Resumed from {args.resume_from}: step={restored['step']}, "
-            f"cumulative_training_seconds={restored['total_training_time']:.1f}"
+            f"cumulative_training_seconds={restored['total_training_time']:.1f}, "
+            f"checkpoint_mode={resume_mode} ({resume_semantics})"
         )
     else:
         restored = {
@@ -790,6 +817,7 @@ def main() -> None:
                 return
         elapsed = save_checkpoint(
             args.checkpoint_path,
+            checkpoint_mode=args.checkpoint_mode,
             run_config=checkpoint_run_config,
             model_config=asdict(config),
             model=model,

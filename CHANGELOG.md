@@ -24,7 +24,64 @@ On this hardware, the default canonical matched benchmark window for optimizatio
 
 ## Unreleased
 
-### New commit — Calibrate tradeoff analysis with resume-ready penalty — score `2`
+### New commit — Add approximate weights-only checkpoint mode — score `4`
+
+**Human-directed, AI-shaped (4)**
+
+- Requested checkpoint semantic optimization, while leaving the concrete mechanism to the agent.
+  - Added an explicit `weights_only` checkpoint mode alongside exact full-state resume.
+  - Threaded the new mode through the trainer, checkpoint metadata, auto checkpoint path selection, and both checkpoint profiling tools.
+  - Kept exact full-state resume as the default, and kept the auto cadence conservatively calibrated from the existing exact-resume measurements.
+
+**Grounding**
+
+- Files:
+  - `README.md`
+  - `program_mlx.md`
+  - `docs/mlx-port-architecture.md`
+  - `autoresearch_mlx/checkpoint_policy.py`
+  - `autoresearch_mlx/checkpoints.py`
+  - `tools/checkpoint_tradeoff.py`
+  - `tools/profile_checkpoint_path.py`
+  - `tools/profile_resume_ready.py`
+  - `train_mlx.py`
+  - `CHANGELOG.md`
+- Validation:
+  - `python3 -m py_compile autoresearch_mlx/checkpoint_policy.py autoresearch_mlx/checkpoints.py tools/checkpoint_tradeoff.py tools/profile_checkpoint_path.py tools/profile_resume_ready.py train_mlx.py`
+  - `./.venv/bin/python train_mlx.py --smoke --checkpoint-mode weights_only --checkpoint-path /tmp/autoresearch_weights_only_smoke --checkpoint-interval 0.5`
+  - `./.venv/bin/python train_mlx.py --resume-from /tmp/autoresearch_weights_only_smoke --time-budget 1.5 --checkpoint-mode weights_only`
+  - `./.venv/bin/python tools/profile_resume_ready.py --preset m5-large --checkpoint-mode exact --resume-steps 2 --repeats 3 --json-out results/analysis/m5_large_exact_resume_ready_v2.json`
+  - `./.venv/bin/python tools/profile_resume_ready.py --preset m5-large --checkpoint-mode weights_only --resume-steps 2 --repeats 3 --json-out results/analysis/m5_large_weights_only_resume_ready_v2.json`
+  - `./.venv/bin/python tools/profile_resume_ready.py --preset m5-xlarge --checkpoint-mode exact --resume-steps 2 --repeats 3 --json-out results/analysis/m5_xlarge_exact_resume_ready_v2.json`
+  - `./.venv/bin/python tools/profile_resume_ready.py --preset m5-xlarge --checkpoint-mode weights_only --resume-steps 2 --repeats 3 --json-out results/analysis/m5_xlarge_weights_only_resume_ready_v2.json`
+  - `./.venv/bin/python tools/profile_checkpoint_path.py --preset m5-xlarge --checkpoint-mode exact --json-out results/analysis/xlarge_exact_checkpoint_profile.json`
+  - `./.venv/bin/python tools/profile_checkpoint_path.py --preset m5-xlarge --checkpoint-mode weights_only --json-out results/analysis/xlarge_weights_only_checkpoint_profile.json`
+- Measurements:
+  - Exact vs `weights_only` resume-ready medians (`3` trials each, prepacked path, `5` seed train steps before save):
+
+    | Preset | Mode | median save (s) | median restore (s) | median resume-ready (s) | median first resumed step wall (s) |
+    | --- | --- | ---: | ---: | ---: | ---: |
+    | `m5-large` | `exact` | `0.057` | `0.017` | `1.129` | `1.033` |
+    | `m5-large` | `weights_only` | `0.023` | `0.010` | `1.176` | `1.104` |
+    | `m5-xlarge` | `exact` | `0.084` | `0.028` | `1.215` | `1.125` |
+    | `m5-xlarge` | `weights_only` | `0.042` | `0.015` | `1.236` | `1.152` |
+
+  - Direct `m5-xlarge` save-path attribution:
+
+    | Mode | save total (s) | model bytes | optimizer bytes | loader bytes |
+    | --- | ---: | ---: | ---: | ---: |
+    | `exact` | `0.497` | `159.4M` | `218.3M` | `22` |
+    | `weights_only` | `0.432` | `159.4M` | `0` | `0` |
+
+  - Interpretation:
+    - `weights_only` materially reduces save cost: about `-60%` on `m5-large` median save time and about `-50%` on `m5-xlarge`.
+    - Resume-ready latency does not improve in the current measurements. The first resumed optimizer step still dominates the path back to productive training, and `weights_only` resumes approximately with a fresh optimizer and train-loader state.
+    - The direct `m5-xlarge` save-path profile explains why the save win is bounded: omitting optimizer state removes about `218 MB` of writes, but the model weights still dominate the checkpoint payload.
+    - This makes `weights_only` a useful cheaper approximate snapshot mode, not a replacement for exact step-boundary resume when continuity matters.
+
+## Committed History
+
+### March 9, 2026 — `39c9055` — Calibrate tradeoff analysis with resume-ready penalty — score `2`
 
 **AI-identified within brief, human-approved (2)**
 
@@ -56,8 +113,6 @@ On this hardware, the default canonical matched benchmark window for optimizatio
     - Young/Daly-style optimal intervals are unchanged because the resume penalty is interval-independent, but the projected total waste curves are now more honest about restart cost.
     - At realistic interruption rates, the measured resume penalty is not large enough to overturn the current human-factors `2m` recommendation, but it does materially raise the modeled waste percentage for frequent-resume scenarios.
     - This keeps the tradeoff tooling aligned with the stronger resume-ready benchmark without silently changing the runtime auto-checkpoint behavior.
-
-## Committed History
 
 ### March 9, 2026 — `07a0707` — Benchmark resume-ready checkpoint latency — score `2`
 
