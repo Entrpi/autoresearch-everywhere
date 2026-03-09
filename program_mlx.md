@@ -46,7 +46,7 @@ What you CANNOT do:
 - Add new dependencies unless the human explicitly asks for that.
 - Change the BPB metric or the fixed time budget.
 
-The goal is the same as upstream: minimize `val_bpb`.
+The goal is the same as upstream: minimize canonical `val_bpb`. Treat `proxy_val_bpb` as a fast local signal, not the promotion metric.
 
 ## Output format
 
@@ -55,6 +55,7 @@ When the script finishes it prints:
 ```text
 ---
 val_bpb:          <float>
+proxy_val_bpb:    <float>
 training_seconds: <float>
 total_seconds:    <float>
 peak_vram_mb:     <float>
@@ -63,6 +64,10 @@ total_tokens_M:   <float>
 num_steps:        <int>
 num_params_M:     <float>
 depth:            <int>
+proxy_eval_tokens: <int>
+canonical_seq_len: <int>
+canonical_tokens: <int>
+canonical_batch:  <int>
 ```
 
 ## Logging results
@@ -73,7 +78,7 @@ Use a TSV file with these columns:
 commit	val_bpb	memory_gb	status	description
 ```
 
-The status is one of `keep`, `discard`, or `crash`.
+The status is one of `keep`, `discard`, or `crash`. `keep` and `discard` are based on canonical `val_bpb`.
 
 ## Loop
 
@@ -84,6 +89,6 @@ The status is one of `keep`, `discard`, or `crash`.
 5. Extract the results from `run.log`.
 6. If the run crashes, inspect the traceback, fix obvious bugs, and retry a small number of times.
 7. Record the result in `results.tsv`.
-8. Keep only improvements.
+8. Keep only improvements on canonical `val_bpb`.
 
 Do not stop and ask whether to continue once the loop starts unless the human explicitly interrupts you.

@@ -14,7 +14,14 @@ import mlx.core as mx
 import mlx.nn as nn
 from mlx.utils import tree_map
 
-from autoresearch_mlx.constants import EVAL_TOKENS, MAX_SEQ_LEN, TIME_BUDGET
+from autoresearch_mlx.constants import (
+    CANONICAL_EVAL_BATCH_SIZE,
+    CANONICAL_EVAL_SEQ_LEN,
+    CANONICAL_EVAL_TOKENS,
+    MAX_SEQ_LEN,
+    PROXY_EVAL_TOKENS,
+    TIME_BUDGET,
+)
 from autoresearch_mlx.data import Tokenizer, evaluate_bpb, make_dataloader
 from autoresearch_mlx.model import GPT, GPTConfig
 from autoresearch_mlx.optim import MuonAdamW
@@ -25,6 +32,9 @@ class RunPreset:
     description: str
     seq_len: int
     eval_tokens: int
+    canonical_eval_seq_len: int
+    canonical_eval_tokens: int
+    canonical_eval_batch_size: int
     depth: int
     window_pattern: str
     device_batch_size: int
@@ -37,6 +47,9 @@ class RunConfig:
     time_budget: float
     seq_len: int
     eval_tokens: int
+    canonical_eval_seq_len: int
+    canonical_eval_tokens: int
+    canonical_eval_batch_size: int
     depth: int
     window_pattern: str
     device_batch_size: int
@@ -144,7 +157,10 @@ PRESETS = {
     "m5-fast": RunPreset(
         description="Fast local iteration on Apple Silicon.",
         seq_len=256,
-        eval_tokens=EVAL_TOKENS,
+        eval_tokens=PROXY_EVAL_TOKENS,
+        canonical_eval_seq_len=CANONICAL_EVAL_SEQ_LEN,
+        canonical_eval_tokens=CANONICAL_EVAL_TOKENS,
+        canonical_eval_batch_size=CANONICAL_EVAL_BATCH_SIZE,
         depth=2,
         window_pattern="L",
         device_batch_size=2,
@@ -153,7 +169,10 @@ PRESETS = {
     "m5-balanced": RunPreset(
         description="Default M5 baseline with materially better throughput than the upstream shape.",
         seq_len=512,
-        eval_tokens=EVAL_TOKENS,
+        eval_tokens=PROXY_EVAL_TOKENS,
+        canonical_eval_seq_len=CANONICAL_EVAL_SEQ_LEN,
+        canonical_eval_tokens=CANONICAL_EVAL_TOKENS,
+        canonical_eval_batch_size=CANONICAL_EVAL_BATCH_SIZE,
         depth=4,
         window_pattern="L",
         device_batch_size=4,
@@ -162,7 +181,10 @@ PRESETS = {
     "m5-large": RunPreset(
         description="Larger M5 run when you want more model capacity and can accept slower updates.",
         seq_len=1024,
-        eval_tokens=EVAL_TOKENS,
+        eval_tokens=PROXY_EVAL_TOKENS,
+        canonical_eval_seq_len=CANONICAL_EVAL_SEQ_LEN,
+        canonical_eval_tokens=CANONICAL_EVAL_TOKENS,
+        canonical_eval_batch_size=CANONICAL_EVAL_BATCH_SIZE,
         depth=6,
         window_pattern="L",
         device_batch_size=2,
@@ -171,7 +193,10 @@ PRESETS = {
     "upstream": RunPreset(
         description="Original upstream-shaped MLX port for reference, closest to the H100-oriented defaults.",
         seq_len=MAX_SEQ_LEN,
-        eval_tokens=EVAL_TOKENS,
+        eval_tokens=PROXY_EVAL_TOKENS,
+        canonical_eval_seq_len=CANONICAL_EVAL_SEQ_LEN,
+        canonical_eval_tokens=CANONICAL_EVAL_TOKENS,
+        canonical_eval_batch_size=CANONICAL_EVAL_BATCH_SIZE,
         depth=8,
         window_pattern="SSSL",
         device_batch_size=8,
@@ -188,6 +213,9 @@ def resolve_run_config(args: argparse.Namespace) -> RunConfig:
         time_budget=TIME_BUDGET,
         seq_len=preset.seq_len,
         eval_tokens=preset.eval_tokens,
+        canonical_eval_seq_len=preset.canonical_eval_seq_len,
+        canonical_eval_tokens=preset.canonical_eval_tokens,
+        canonical_eval_batch_size=preset.canonical_eval_batch_size,
         depth=preset.depth,
         window_pattern=preset.window_pattern,
         device_batch_size=preset.device_batch_size,
@@ -205,6 +233,9 @@ def resolve_run_config(args: argparse.Namespace) -> RunConfig:
             time_budget=1.0,
             seq_len=smoke_seq_len,
             eval_tokens=smoke_seq_len * smoke_device_batch_size,
+            canonical_eval_seq_len=smoke_seq_len,
+            canonical_eval_tokens=smoke_seq_len * smoke_device_batch_size,
+            canonical_eval_batch_size=smoke_device_batch_size,
             depth=smoke_depth,
             window_pattern="L",
             device_batch_size=smoke_device_batch_size,
@@ -216,6 +247,9 @@ def resolve_run_config(args: argparse.Namespace) -> RunConfig:
         "time_budget",
         "seq_len",
         "eval_tokens",
+        "canonical_eval_seq_len",
+        "canonical_eval_tokens",
+        "canonical_eval_batch_size",
         "depth",
         "window_pattern",
         "device_batch_size",
@@ -239,8 +273,23 @@ def parse_args() -> RunConfig:
         help="Named runtime preset. Defaults to the M5-friendly balanced preset.",
     )
     parser.add_argument("--time-budget", type=float, help="Training budget in seconds.")
-    parser.add_argument("--seq-len", type=int, help="Sequence length for training and eval.")
-    parser.add_argument("--eval-tokens", type=int, help="Validation token budget.")
+    parser.add_argument("--seq-len", type=int, help="Sequence length for training and proxy evaluation.")
+    parser.add_argument("--eval-tokens", type=int, help="Proxy validation token budget.")
+    parser.add_argument(
+        "--canonical-eval-seq-len",
+        type=int,
+        help="Fixed evaluation sequence length used for cross-preset comparisons.",
+    )
+    parser.add_argument(
+        "--canonical-eval-tokens",
+        type=int,
+        help="Fixed evaluation token budget used for cross-preset comparisons.",
+    )
+    parser.add_argument(
+        "--canonical-eval-batch-size",
+        type=int,
+        help="Batch size for fixed canonical evaluation.",
+    )
     parser.add_argument("--depth", type=int, help="Number of transformer blocks.")
     parser.add_argument(
         "--window-pattern",
@@ -268,6 +317,11 @@ def parse_args() -> RunConfig:
 
 def main() -> None:
     args = parse_args()
+    if args.canonical_eval_seq_len > args.seq_len:
+        raise ValueError(
+            "canonical_eval_seq_len cannot exceed training seq_len. "
+            "Lower --canonical-eval-seq-len or increase --seq-len."
+        )
     verify_mlx_env()
     t_start = time.time()
     mx.random.seed(args.seed)
@@ -287,6 +341,9 @@ def main() -> None:
     print(
         "Run config: "
         f"time_budget={args.time_budget}s, seq_len={args.seq_len}, eval_tokens={args.eval_tokens}, "
+        f"canonical_eval_seq_len={args.canonical_eval_seq_len}, "
+        f"canonical_eval_tokens={args.canonical_eval_tokens}, "
+        f"canonical_eval_batch_size={args.canonical_eval_batch_size}, "
         f"device_batch_size={args.device_batch_size}, total_batch_size={args.total_batch_size}, "
         f"smoke={args.smoke}"
     )
@@ -387,12 +444,19 @@ def main() -> None:
 
     total_tokens = step * args.total_batch_size
     model.eval()
-    val_bpb = evaluate_bpb(
+    proxy_val_bpb = evaluate_bpb(
         model,
         tokenizer,
         args.device_batch_size,
         seq_len=args.seq_len,
         eval_tokens=args.eval_tokens,
+    )
+    val_bpb = evaluate_bpb(
+        model,
+        tokenizer,
+        args.canonical_eval_batch_size,
+        seq_len=args.canonical_eval_seq_len,
+        eval_tokens=args.canonical_eval_tokens,
     )
     t_end = time.time()
     steady_state_mfu = 0.0
@@ -400,6 +464,7 @@ def main() -> None:
 
     print("---")
     print(f"val_bpb:          {val_bpb:.6f}")
+    print(f"proxy_val_bpb:    {proxy_val_bpb:.6f}")
     print(f"training_seconds: {total_training_time:.1f}")
     print(f"total_seconds:    {t_end - t_start:.1f}")
     print(f"peak_vram_mb:     {peak_vram_mb:.1f}")
@@ -408,6 +473,10 @@ def main() -> None:
     print(f"num_steps:        {step}")
     print(f"num_params_M:     {num_params / 1e6:.1f}")
     print(f"depth:            {args.depth}")
+    print(f"proxy_eval_tokens: {args.eval_tokens}")
+    print(f"canonical_seq_len: {args.canonical_eval_seq_len}")
+    print(f"canonical_tokens: {args.canonical_eval_tokens}")
+    print(f"canonical_batch:  {args.canonical_eval_batch_size}")
 
 
 if __name__ == "__main__":

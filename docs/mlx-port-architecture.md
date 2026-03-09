@@ -13,9 +13,9 @@ It is based on the current repo state, specifically:
 - `autoresearch_mlx/model.py`
 - `autoresearch_mlx/optim.py`
 - `program_mlx.md`
-- `overnight_mlx.py`
-- `launch_overnight_mlx.sh`
-- `detach_exec.py`
+- `tools/overnight_mlx.py`
+- `tools/launch_overnight_mlx.sh`
+- `tools/detach_exec.py`
 - the upstream reference path in `prepare.py` and `train.py`
 
 No major architectural unknowns remain after comparing the MLX path against the upstream CUDA path. The main unresolved items are not hidden system relationships; they are explicit feature gaps and caveats listed in the matrix below.
@@ -34,7 +34,7 @@ The MLX port is therefore not a compatibility shim around the CUDA code. It is a
 
 1. The backend is Apple-native MLX instead of PyTorch + CUDA + FlashAttention 3.
 2. The implementation is split across `autoresearch_mlx/` instead of forcing everything into one mutable file.
-3. The runtime is tuned for experiment throughput on M-class Macs, including presets and repeatable sweep tooling.
+3. The runtime is tuned for experiment throughput on M-class Macs, including presets and a small amount of optional workstation automation.
 
 ## Architectural Intent
 
@@ -63,15 +63,15 @@ The MLX port responds by:
 - replacing CUDA-specific runtime code with MLX primitives;
 - using MLX arrays and compiled training steps instead of PyTorch CUDA tensors and `torch.compile(model)`;
 - introducing M5-oriented presets to keep runs tractable;
-- adding sweep tooling so the machine can iterate without a human driving each experiment manually.
+- keeping any unattended sweep tooling outside the core training path.
 
 ## System Boundaries
 
-The MLX path is easiest to understand as three coupled subsystems:
+The MLX path is easiest to understand as two core subsystems plus one optional local tooling layer:
 
 - data preparation and evaluation;
 - model training;
-- experiment orchestration.
+- optional local sweep tooling.
 
 ```mermaid
 flowchart LR
@@ -90,10 +90,10 @@ flowchart LR
         J["MLX Metal runtime"]
     end
 
-    subgraph S3["Experiment Orchestration"]
-        K["overnight_mlx.py"]
-        L["launch_overnight_mlx.sh"]
-        M["detach_exec.py"]
+    subgraph S3["Optional Local Tooling"]
+        K["tools/overnight_mlx.py"]
+        L["tools/launch_overnight_mlx.sh"]
+        M["tools/detach_exec.py"]
         N["results.tsv"]
         O["results/overnight/<run-tag>/"]
     end
@@ -202,6 +202,10 @@ The MLX path diverges sharply from upstream here. Upstream edits constants in-pl
 
 This makes the port operable on smaller GPUs without forcing constant source edits just to change batch shape or sequence length.
 
+The important calibration detail is that these presets were developed on and tested against an Apple M5 MacBook Pro with 32 GB unified memory and a 10-core GPU. They should be read as machine-specific defaults for that workstation class, not as settled universal defaults for every M5-family machine.
+
+In particular, the preset table is expected to remain somewhat fluid until the port has been profiled on newly released M5 Pro and M5 Max systems.
+
 ### Training loop flow
 
 ```mermaid
@@ -266,22 +270,21 @@ Instead of subclassing `torch.optim.Optimizer`, the MLX version:
 
 This is an idiomatic MLX translation of the upstream optimizer split, not a line-by-line port.
 
-## Subsystem 3: Experiment Orchestration
+## Optional Local Tooling
 
 ### Purpose
 
-This subsystem makes repeated MLX runs manageable on a local machine without adding a full orchestration service.
+This layer makes repeated MLX runs manageable on a local machine without adding a full orchestration service. It is intentionally non-core: the MLX port remains coherent without it.
 
 ### Components
 
-- `program_mlx.md` defines the agent-facing contract.
-- `overnight_mlx.py` performs repeatable, round-robin experiment sweeps.
-- `launch_overnight_mlx.sh` starts a detached long-lived run.
-- `detach_exec.py` double-forks and redirects logs so the process survives session exit.
+- `tools/overnight_mlx.py` performs repeatable, round-robin experiment sweeps.
+- `tools/launch_overnight_mlx.sh` starts a detached long-lived run.
+- `tools/detach_exec.py` double-forks and redirects logs so the process survives session exit.
 
 ### Responsibilities
 
-`overnight_mlx.py` is intentionally simple:
+`tools/overnight_mlx.py` is intentionally simple:
 
 - choose a sweep plan;
 - stamp metadata with branch, commit, and timing;
@@ -295,15 +298,15 @@ This subsystem makes repeated MLX runs manageable on a local machine without add
 ```mermaid
 sequenceDiagram
     participant User
-    participant Launcher as launch_overnight_mlx.sh
-    participant Detach as detach_exec.py
-    participant Sweep as overnight_mlx.py
+    participant Launcher as "tools/launch_overnight_mlx.sh"
+    participant Detach as "tools/detach_exec.py"
+    participant Sweep as "tools/overnight_mlx.py"
     participant Train as train_mlx.py
     participant Results as results.tsv / results/overnight
 
     User->>Launcher: start sweep
     Launcher->>Detach: request detached execution
-    Detach->>Sweep: exec overnight_mlx.py
+    Detach->>Sweep: exec tools/overnight_mlx.py
     loop per experiment
         Sweep->>Train: run preset + seed
         Train-->>Sweep: summary block
@@ -314,7 +317,7 @@ sequenceDiagram
 
 ### Important meaning of the sweep tooling
 
-This tooling is not yet a full autonomous code-editing research swarm. It does not mutate `train_mlx.py` or open pull requests. It is currently a repeatable benchmarking and search harness over runtime configurations. That makes it operationally useful, but conceptually it is still one step below the full upstream dream.
+This tooling is not yet a full autonomous code-editing research swarm. It does not mutate `train_mlx.py` or open pull requests. It is currently a repeatable benchmarking and search harness over runtime configurations. That makes it operationally useful, but it should be understood as optional workstation automation, not part of the core MLX port.
 
 ## Relationships to the Upstream CUDA Path
 
@@ -334,7 +337,7 @@ The upstream code is still present for reference, but the MLX port is not struct
 - upstream uses a single mutable `train.py`; the MLX path is split into `data`, `model`, `optim`, and entrypoints;
 - upstream bakes hyperparameters into source constants; the MLX path uses presets and CLI overrides;
 - upstream is designed around CUDA and direct FA3 kernels; the MLX path is designed around Metal and MLX primitives;
-- upstream leaves orchestration to the human/agent loop; this fork adds sweep tooling for unattended local runs.
+- upstream leaves orchestration to the human/agent loop; this fork keeps that core loop and adds optional sweep tooling under `tools/` for unattended local runs.
 
 These departures are not accidents. They are the core meaning of the fork: portability and maintainability are being prioritized over single-file minimalism.
 
@@ -346,7 +349,7 @@ These departures are not accidents. They are the core meaning of the fork: porta
 | Tokenizer training | `rustbpe` -> `tiktoken`, token bytes in `torch` tensor | Same tokenizer flow, token bytes in `.npy` | Parity | Serialization differs but semantics match. |
 | BOS-packed best-fit dataloader | CUDA-oriented generator with pinned CPU/GPU buffers | Same packing logic with NumPy -> MLX arrays | Near parity | Backend mechanics differ, packing semantics are preserved. |
 | Validation BPB formula | Fixed BPB formula, fixed `MAX_SEQ_LEN`, fixed `EVAL_TOKENS` | Same BPB formula | Partial parity | Formula is preserved. |
-| Fixed evaluation invariance across configs | Yes | No, by default | Gap | `train_mlx.py` passes `seq_len=args.seq_len` and `eval_tokens=args.eval_tokens` into `evaluate_bpb`, so cross-preset BPB is not directly comparable to upstream or to other presets with different eval settings. |
+| Fixed evaluation invariance across configs | Yes | Yes, via canonical `val_bpb` | Near parity | The MLX path now reports a fixed canonical `val_bpb` plus a preset-shaped `proxy_val_bpb` for local inspection. |
 | GPT family | RoPE, VE, residual scalars, softcapped logits, sliding windows | Same conceptual architecture | Near parity | Implemented natively in MLX. |
 | Attention backend | FlashAttention 3 kernel | `mx.fast.scaled_dot_product_attention` | Intentional divergence | Necessary backend change. Kernel behavior and performance differ. |
 | Optimizer family | Custom Muon + AdamW in PyTorch optimizer | Custom Muon + AdamW in MLX tree/state form | Near parity | Parameter grouping intent is preserved. API shape is different. |
@@ -358,16 +361,16 @@ These departures are not accidents. They are the core meaning of the fork: porta
 | Autonomous code mutation | Human/agent edits `train.py` directly | Human/agent edits `train_mlx.py` and/or package modules | Partial parity | The loop exists, but the MLX path is multi-file by design. |
 | Resume/checkpoint support | Not present | Not present | Parity | Neither path currently addresses long-run resumability. |
 
-## The Most Important Architectural Caveat
+## The Most Important Metric Caveat
 
-The single biggest caveat is metric comparability.
+The biggest remaining caveat is no longer mixed-shape ranking inside the MLX sweep. That part is fixed by separating canonical `val_bpb` from `proxy_val_bpb`.
 
-The upstream repo treats validation BPB as a fixed metric partly because evaluation always runs at fixed context length and token budget. The MLX port preserves the BPB computation itself, but the current `train_mlx.py` default path ties evaluation shape to the selected preset. That has two consequences:
+The remaining caveat is that the canonical MLX metric is not a byte-for-byte replica of upstream evaluation:
 
-1. `m5-fast`, `m5-balanced`, `m5-large`, and `upstream` are not automatically apples-to-apples if their evaluation settings differ.
-2. `overnight_mlx.py` currently records `keep` and `discard` decisions across a sweep plan that mixes shapes, so those judgments are operationally useful but not fully metric-pure.
+1. The MLX path uses a fixed local canonical context length chosen to be valid across the M5-oriented presets.
+2. The upstream repo uses a larger fixed evaluation shape tied to its CUDA/H100 assumptions.
 
-This does not make the port unusable. It does mean that the fork currently optimizes for practical local search before it fully restores the upstream comparability invariant.
+That means the fork now has strong internal comparability across its own sweep shapes, but only approximate comparability to the original upstream leaderboard.
 
 ## Why the Port Is Still Architecturally Coherent
 
@@ -377,7 +380,7 @@ Despite that caveat, the port is internally coherent for three reasons:
 - The backend adaptation is honest. The implementation does not pretend to be a tiny patch on top of CUDA assumptions.
 - The operational story is complete. There is a real path from setup, to one run, to repeated sweeps, to per-run artifact capture.
 
-In other words, this is already a real system, not a sketch. The main remaining gaps are metric normalization and a few operational polish items, not missing architecture.
+In other words, this is already a real system, not a sketch. The main remaining gaps are dataset/pipeline efficiency, utilization reporting, and operational polish, not missing architecture.
 
 ## Recommended Mental Model
 

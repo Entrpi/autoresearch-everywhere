@@ -22,7 +22,7 @@ from pathlib import Path
 from typing import Iterable
 
 
-ROOT = Path(__file__).resolve().parent
+ROOT = Path(__file__).resolve().parent.parent
 TRAIN_SCRIPT = ROOT / "train_mlx.py"
 PYTHON_BIN = ROOT / ".venv" / "bin" / "python"
 RESULTS_FILE = ROOT / "results.tsv"
@@ -169,7 +169,14 @@ def experiment_command(experiment: Experiment, seed: int, args: argparse.Namespa
     if args.time_budget_override is not None:
         command.extend(["--time-budget", str(args.time_budget_override)])
     if args.eval_tokens_override is not None:
-        command.extend(["--eval-tokens", str(args.eval_tokens_override)])
+        command.extend(
+            [
+                "--eval-tokens",
+                str(args.eval_tokens_override),
+                "--canonical-eval-tokens",
+                str(args.eval_tokens_override),
+            ]
+        )
     return command
 
 
@@ -273,11 +280,14 @@ def main() -> None:
 
         status = "crash"
         val_bpb = ""
+        proxy_val_bpb = ""
         memory_gb = ""
         if return_code == 0 and "val_bpb" in metrics and "peak_vram_mb" in metrics:
             val = float(metrics["val_bpb"])
+            proxy = float(metrics.get("proxy_val_bpb", metrics["val_bpb"]))
             memory = float(metrics["peak_vram_mb"]) / 1024.0
             val_bpb = f"{val:.6f}"
+            proxy_val_bpb = f"{proxy:.6f}"
             memory_gb = f"{memory:.3f}"
             if state.best_bpb is None or val < state.best_bpb:
                 status = "keep"
@@ -288,7 +298,10 @@ def main() -> None:
 
         description = (
             f"run_tag={run_tag} branch={branch} exp={experiment.name} seed={seed} "
-            f"desc={experiment.description} args=\"{' '.join(experiment.args)}\""
+            f"desc={experiment.description} proxy_val_bpb={proxy_val_bpb or 'n/a'} "
+            f"canonical_seq_len={metrics.get('canonical_seq_len', 'n/a')} "
+            f"canonical_tokens={metrics.get('canonical_tokens', 'n/a')} "
+            f"args=\"{' '.join(experiment.args)}\""
         )
         append_result(RESULTS_FILE, [commit, val_bpb, memory_gb, status, description])
 
@@ -299,6 +312,7 @@ def main() -> None:
         else:
             print(
                 f"[{state.completed:03d}] {experiment.name} -> val_bpb={val_bpb} "
+                f"proxy_val_bpb={proxy_val_bpb} "
                 f"memory_gb={memory_gb} status={status}"
             )
 

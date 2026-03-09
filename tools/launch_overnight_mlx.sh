@@ -1,7 +1,8 @@
 #!/bin/zsh
 set -euo pipefail
 
-cd "$(dirname "$0")"
+script_dir="$(cd "$(dirname "$0")" && pwd)"
+cd "${script_dir}/.."
 
 run_tag="${1:-overnight-$(date +%Y%m%d-%H%M%S)}"
 duration_hours="${2:-8}"
@@ -12,8 +13,8 @@ mkdir -p results/overnight
 launcher_log="results/overnight/${run_tag}.launcher.log"
 pid_file="results/overnight/${run_tag}.pid"
 
-./detach_exec.py "$pid_file" "$launcher_log" \
-  ./.venv/bin/python -u overnight_mlx.py \
+./tools/detach_exec.py "$pid_file" "$launcher_log" \
+  ./.venv/bin/python -u ./tools/overnight_mlx.py \
   --run-tag "$run_tag" \
   --duration-hours "$duration_hours" \
   "$@"

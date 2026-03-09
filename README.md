@@ -2,7 +2,7 @@
 
 ## About this fork
 
-This fork is an Apple Silicon-first continuation of [karpathy/autoresearch](https://github.com/karpathy/autoresearch). It keeps the original CUDA/PyTorch path in-tree for reference, but the primary path here is a clean MLX implementation for macOS, tuned for smaller unified-memory GPUs like the M5 and paired with lightweight overnight sweep tooling.
+This fork is an Apple Silicon-first continuation of [karpathy/autoresearch](https://github.com/karpathy/autoresearch). It keeps the original CUDA/PyTorch path in-tree for reference, but the primary path here is a clean MLX implementation for macOS, tuned for smaller unified-memory GPUs like the M5.
 
 ![teaser](progress.png)
 
@@ -21,7 +21,7 @@ The MLX workflow is built around four files:
 
 For the full architecture, subsystem boundaries, feature-gap matrix, and flow diagrams, see [docs/mlx-port-architecture.md](docs/mlx-port-architecture.md).
 
-Training still uses a **fixed 5-minute training budget** and reports **validation BPB** (`val_bpb`), but cross-preset comparisons are only directly comparable when evaluation settings are held constant.
+Training still uses a **fixed 5-minute training budget**. `val_bpb` is now a fixed canonical BPB used for cross-preset comparisons, while `proxy_val_bpb` reports the same-shape local evaluation used for quick inspection.
 
 ## Quick Start
 
@@ -43,6 +43,8 @@ uv run train_mlx.py
 
 If that works, the MLX environment is ready.
 
+The current MLX port and preset defaults were developed on and tested against an Apple M5 MacBook Pro with 32 GB unified memory and a 10-core GPU. They are a calibrated starting point for that machine, not a promise of universal optimality across the whole M5 family.
+
 ## Presets
 
 `train_mlx.py` supports named presets so the default shape is reasonable for Apple Silicon instead of mirroring an H100-oriented baseline.
@@ -61,25 +63,23 @@ uv run train_mlx.py --preset m5-large
 uv run train_mlx.py --preset upstream
 ```
 
-## Overnight Sweeps
+These presets may be revised after profiling on newly released M5 Pro and M5 Max systems.
 
-This fork includes a small runner for repeated MLX experiments:
+## Optional Local Tooling
 
-- `overnight_mlx.py`: round-robin sweep runner that logs per-run outputs and appends summaries to `results.tsv`.
-- `launch_overnight_mlx.sh`: detached launcher for long-running sweeps.
-- `detach_exec.py`: helper used by the launcher to survive terminal/session exit.
+This repo also includes optional local automation under `tools/` for slower Apple Silicon machines. It is not part of the core MLX port, but it can be useful when you want unattended preset sweeps on a workstation.
 
 Examples:
 
 ```bash
 # 30-minute test
-./launch_overnight_mlx.sh test30 0.5
+./tools/launch_overnight_mlx.sh test30 0.5
 
 # 8-hour overnight run
-./launch_overnight_mlx.sh overnight 8
+./tools/launch_overnight_mlx.sh overnight 8
 ```
 
-Artifacts are written under `results/overnight/<run-tag>/`, and the summary ledger is appended to `results.tsv`.
+Artifacts are written under `results/overnight/<run-tag>/`, and the summary ledger is appended to `results.tsv`. The sweep runner keeps or discards experiments using canonical `val_bpb`, not the preset-shaped proxy metric.
 
 ## Running an Agent
 
@@ -98,9 +98,7 @@ prepare_mlx.py        — MLX data prep entrypoint
 train_mlx.py          — MLX training entrypoint
 autoresearch_mlx/     — MLX data/model/optimizer implementation
 program_mlx.md        — MLX agent instructions
-overnight_mlx.py      — repeatable MLX sweep runner
-launch_overnight_mlx.sh — detached overnight launcher
-detach_exec.py        — detach helper used by the launcher
+tools/               — optional local sweep tooling
 pyproject.toml        — dependencies
 ```
 
