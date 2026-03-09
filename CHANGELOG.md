@@ -1,71 +1,70 @@
 # Changelog
 
-This changelog is intended to be useful for research, not just release bookkeeping.
+This changelog is intended to be useful for research and engineering governance, not just release bookkeeping.
 Each entry records:
 
+- `Fully human (6)`: the change was identified and authored by a human, with the agent absent or limited to review and minor revisions.
 - `Human-driven (5)`: the human identified the change and specified it tightly enough that the agent mostly executed.
 - `Human-directed, AI-shaped (4)`: the human set the direction or requirement, but the agent designed the concrete mechanism, structure, or validation plan.
 - `AI-identified within brief, human-shaped (3)`: inside a broad human-scoped workstream, the agent surfaced the opportunity, and the human materially shaped the exact target, scope, or framing before implementation.
 - `AI-identified within brief, human-approved (2)`: inside a broad human-scoped workstream, the agent surfaced the opportunity and the human approved it with little additional shaping.
 - `Self-initiated, human-approved (1)`: the agent initiated the change outside explicit human direction in the thread, but still got human approval before landing it.
 - `Fully autonomous (0)`: changes or experiments the agent initiated without explicit human direction or approval in the thread.
-- `Grounding`: the files changed, the checks run, and any measured effects.
+- `Grounding`: the files changed, the checks run, and any measured effects. It is intentionally unscored because it measures validation strength rather than autonomy level.
 
-If an entry has no measurements yet, it should say so explicitly.
-Entries should omit empty provenance sections rather than spelling out `None in this entry.`
-Each entry should describe not just what changed, but also the change's meaning, motivation, and intended purpose, especially when the code change introduces a new semantic mode, workflow, or policy.
-Each commit entry should also show an autonomy golf score in the header. Score each provenance bullet as `Human-driven = 5`, `Human-directed, AI-shaped = 4`, `AI-identified within brief, human-shaped = 3`, `AI-identified within brief, human-approved = 2`, `Self-initiated, human-approved = 1`, and `Fully autonomous = 0`. `Grounding` does not contribute to the score.
-Each commit header should use a Linux-kernel-style subsystem prefix: `subsystem: summary`. Use the dominant subsystem rather than a file inventory. Only use a combined prefix such as `train/checkpoints:` when the change is genuinely cross-cutting and one subsystem label would be misleading. The parser treats this prefix as required so autonomy golf can be tallied by subsystem as well as by day.
-Top-level provenance bullets are the scored units. If a point is directly derivative of a main bullet and stays at the same autonomy level, record it as a nested sub-bullet so it remains visible without adding score.
-When provenance is ambiguous, prefer `Human-directed, AI-shaped` over `AI-identified within brief, human-shaped`, prefer `AI-identified within brief, human-shaped` over `AI-identified within brief, human-approved`, prefer `AI-identified within brief, human-approved` over `Self-initiated, human-approved`, and prefer `Self-initiated, human-approved` over `Fully autonomous`.
 This changelog should bias toward under-claiming rather than over-claiming successful autonomy. When specific provenance attributions are corrected, prefer the more conservative tiering if there is real ambiguity. The long-term goal remains to push as much work as possible into the `Fully autonomous` category over time.
+Each entry should describe not just what changed, but also the change's meaning, motivation, and intended purpose. A short nested `Meaning:`, `Motivation:`, `Purpose:` trio is a good default way to make that explicit when an entry would otherwise read like a task list.
+Top-level provenance bullets are the scored units. If a point is directly derivative of a main bullet and stays at the same autonomy level, record it as a nested sub-bullet so it remains visible without changing `score`.
+Each commit header should use a Linux-kernel-style subsystem prefix: `subsystem: summary`. Use the dominant subsystem rather than a file inventory. Only use a combined prefix such as `train/checkpoints:` when the change is genuinely cross-cutting and one subsystem label would be misleading. The parser treats this prefix as required so autonomy golf can be tallied by subsystem as well as by day.
+Each commit entry should also show an autonomy golf score in the header. Score each provenance bullet as `Fully human = 6`, `Human-driven = 5`, `Human-directed, AI-shaped = 4`, `AI-identified within brief, human-shaped = 3`, `AI-identified within brief, human-approved = 2`, `Self-initiated, human-approved = 1`, and `Fully autonomous = 0`. `Grounding` does not contribute to the score. The header `score` is the arithmetic mean of the top-level provenance bullet weights for that entry, rounded to two decimals, so each commit stays on a bounded `0..6` spectrum.
+Preserve the summed provenance surface separately as `complexity`. Compute it as the sum of top-level provenance weights, plus `+1` for each nested sub-bullet under provenance items scored `3` or higher, excluding `Meaning:`, `Motivation:`, and `Purpose:` narrative lines. When `complexity` is numerically identical to the bounded `score`, omit it from the header as redundant; the parser treats omission as an implicit equality.
+Entries should omit empty provenance sections rather than spelling out `None in this entry.`
+If an entry has no measurements yet, it should say so explicitly.
+When provenance is ambiguous, prefer `Human-directed, AI-shaped` over `AI-identified within brief, human-shaped`, prefer `AI-identified within brief, human-shaped` over `AI-identified within brief, human-approved`, prefer `AI-identified within brief, human-approved` over `Self-initiated, human-approved`, and prefer `Self-initiated, human-approved` over `Fully autonomous`.
 This branch does not admit fully human-authored code changes. If a change must be authored entirely by a human, it belongs in a fork rather than this branch's mainline history.
 Grounding should also be conservative. When a claim is about performance, stability, or behavioral improvement, prefer the strongest practical evidence over the quickest smoke pass, and record the actual strength of that evidence rather than the intended standard.
 For benchmarked changes, "strong enough" means long enough and heavy enough to produce a high-signal result on the changed behavior. Choose a run shape where the affected path executes enough times to matter. For example, checkpoint-overhead claims should usually be grounded with a run that produces many checkpoint saves rather than only one or two, and scaling claims should prefer a model/preset large enough for the bottleneck to show up clearly.
 For checkpoint semantic changes, save/restore cost is not enough by itself. Prefer a convergence benchmark that compares uninterrupted training, exact midpoint resume, and approximate midpoint resume under the same total optimizer-step budget, then records the end-state differences in loss, validation BPB, and parameter drift.
 On this hardware, the default canonical matched benchmark window for optimization grounding is `60s`, not `30s`. Use shorter runs for smoke checks or when the changed path cannot practically support a longer benchmark, and say so explicitly when you do.
 
-## Unreleased
+## Latest
 
-### New commit — changelog: Add subsystem-scoped commit headers — score `4`
+## Committed History
+
+### March 10, 2026 — `fb3c53e` — changelog: Sync autonomy-golf resources from canonical repo — score `4` — complexity `8`
 
 **Human-directed, AI-shaped (4)**
 
-- Requested Linux-kernel-style subsystem discipline for commit headers so autonomy golf can be tracked by subsystem rather than only by day or by whole commit history.
-  - Required `subsystem: summary` headers in changelog entries and future commit subjects, using one dominant subsystem where possible.
-  - Backfilled subsystem prefixes across the existing changelog history so current scoring data becomes analyzable immediately instead of only after future commits.
-  - Extended the changelog parser to verify that entries are scoped and to emit `subsystem` and `day-subsystem` rollups for plotting or reporting.
+- Requested that `autoresearch` pull in the newer autonomy-golf resources from the canonical repo instead of carrying an older local copy.
+  - Meaning: the repo should use the same manifesto, agent brief, checklist, parser, and badge flow as the canonical autonomy-golf bundle, while still keeping its local branch policy and MLX-specific guidance.
+  - Motivation: the local copy had drifted behind the canonical `0..6` scale, maintenance checklist, README snapshot generation, and house-term badge language.
+  - Purpose: keep `autoresearch` on the maintained autonomy-golf path so its scorekeeping and local docs stay compatible with the shared tooling.
+  - Replaced the local autonomy-golf docs bundle with the current canonical manifesto and agent brief, and added the missing checklist.
+  - Upgraded the local changelog parser and badge renderer to the canonical versions, including the generated README snapshot block and the house-term golf badge.
+  - Aligned the local README, MLX agent prompt, and changelog headers to the canonical scoring and complexity model while preserving the branch rule that fully human-authored code changes belong in a fork.
+  - Renamed the active changelog section to `Latest` and aligned the local parser, renderer, and guidance commands to `--include-latest`, so the wording reads more naturally while staying consistent with the synced tooling.
 
 **Grounding**
 
 - Files:
   - `CHANGELOG.md`
+  - `README.md`
+  - `docs/autonomy-golf.md`
+  - `docs/autonomy-golf-agent.md`
+  - `docs/autonomy-golf-checklist.md`
   - `program_mlx.md`
   - `tools/changelog_scores.py`
+  - `tools/render_autonomy_badge.py`
+  - `docs/autonomy-golf-badge.svg`
 - Validation:
-  - `python3 -m py_compile tools/changelog_scores.py`
-  - `python3 tools/changelog_scores.py --group-by entry --format csv --include-unreleased --verify`
-  - `python3 tools/changelog_scores.py --group-by subsystem --format csv --include-unreleased`
-  - `python3 tools/changelog_scores.py --group-by day-subsystem --format csv --include-unreleased`
+  - `python3 -m py_compile tools/changelog_scores.py tools/render_autonomy_badge.py`
+  - `python3 tools/changelog_scores.py --group-by entry --format csv --include-latest --verify`
+  - `python3 tools/changelog_scores.py --group-by overall --format csv --include-latest`
+  - `python3 tools/render_autonomy_badge.py`
 - Measurements:
-  - This is workflow and scoring tooling work, not a runtime optimization, so there are no performance measurements.
-  - Current subsystem autonomy-golf rollup (`python3 tools/changelog_scores.py --group-by subsystem --format csv --include-unreleased`):
+  - This is governance and scoring-tooling work, not a runtime optimization, so there are no performance measurements.
 
-    | Subsystem | commits | total score | score / commit |
-    | --- | ---: | ---: | ---: |
-    | `changelog` | `3` | `25` | `8.33` |
-    | `checkpoints` | `10` | `39` | `3.90` |
-    | `data` | `4` | `29` | `7.25` |
-    | `mlx` | `1` | `4` | `4.00` |
-    | `model` | `1` | `2` | `2.00` |
-    | `optim` | `1` | `3` | `3.00` |
-    | `train` | `6` | `28` | `4.67` |
-- Interpretation:
-  - The point of this change is discipline and analysis, not aesthetics. A commit header should now identify the subsystem up front, and the autonomy score tooling can aggregate by that same subsystem without manual relabeling later.
-
-## Committed History
-
-### March 9, 2026 — `518a595` — train: Add train and wall time budget modes — score `4`
+### March 9, 2026 — `518a595` — train: Add train and wall time budget modes — score `4` — complexity `8`
 
 **Human-directed, AI-shaped (4)**
 
@@ -102,7 +101,7 @@ On this hardware, the default canonical matched benchmark window for optimizatio
   - The meaning of this change is not “make wall clock the new objective.” It is to make the objective explicit. `train` mode remains the core research default, while `wall` mode is now available when reduced elapsed blocking is itself the thing being measured.
   - The wall-mode resume check confirms that the new mode is a real runtime override, not just a fresh-run flag, while the distinct auto checkpoint slugs keep train-budget and wall-budget runs from clobbering each other.
 
-### March 9, 2026 — `b68b750` — checkpoints: Benchmark checkpoint convergence and keep sync default — score `4`
+### March 9, 2026 — `b68b750` — checkpoints: Benchmark checkpoint convergence and keep sync default — score `4` — complexity `7`
 
 **Human-directed, AI-shaped (4)**
 
@@ -150,7 +149,7 @@ On this hardware, the default canonical matched benchmark window for optimizatio
     - So the current evidence does not justify calling exact resume a standalone checkpoint-correctness bug. The tighter conclusion is that exact resume is metric-stable but not parameter-identical, which matches the underlying trainer's existing nondeterministic behavior on this machine.
     - This is the benchmark the checkpoint work was missing. Save cost and resume-ready latency tell you whether a checkpoint is cheap; they do not tell you whether it preserves the training trajectory.
 
-### March 9, 2026 — `8359b0c` — checkpoints: Add async exact checkpoint writes — score `4`
+### March 9, 2026 — `8359b0c` — checkpoints: Add async exact checkpoint writes — score `4` — complexity `8`
 
 **Human-directed, AI-shaped (4)**
 
@@ -269,7 +268,7 @@ On this hardware, the default canonical matched benchmark window for optimizatio
     - Exact remains at `2m` because its measured save cost still pushes `1m` above the current `0.1%` save-only overhead target on the calibrated M5 shapes.
     - `weights_only` now resolves to `1m` because its repeated-save overhead is materially lower, while exact still remains the default when exact optimizer/loader continuity matters.
 
-### March 9, 2026 — `1b6887f` — checkpoints: Add approximate weights-only checkpoint mode — score `4`
+### March 9, 2026 — `1b6887f` — checkpoints: Add approximate weights-only checkpoint mode — score `4` — complexity `8`
 
 **Human-directed, AI-shaped (4)**
 
@@ -390,7 +389,7 @@ On this hardware, the default canonical matched benchmark window for optimizatio
     - `m5-xlarge` is centered closer to about `0.68s`, and one of the three trials again had a much slower first resumed step. That makes the median much more trustworthy than the mean for policy work at this shape.
     - This is the right benchmark to use for future checkpoint-mode comparisons, because it measures "time until the resumed run is productive again" directly instead of inferring from lazy file-load timings.
 
-### March 9, 2026 — `26e4c64` — train: Auto-detect benchmark warmup cutoff — score `4`
+### March 9, 2026 — `26e4c64` — train: Auto-detect benchmark warmup cutoff — score `4` — complexity `7`
 
 **Human-directed, AI-shaped (4)**
 
@@ -407,7 +406,7 @@ On this hardware, the default canonical matched benchmark window for optimizatio
   - `CHANGELOG.md`
 - Validation:
   - `python3 -m py_compile train_mlx.py`
-  - `python3 tools/changelog_scores.py --group-by entry --format csv --include-unreleased --verify`
+  - `python3 tools/changelog_scores.py --group-by entry --format csv --include-latest --verify`
   - `./.venv/bin/python train_mlx.py --preset m5-fast --time-budget 5 --benchmark-skip-eval --no-checkpoint`
   - `./.venv/bin/python train_mlx.py --preset m5-fast --time-budget 5 --benchmark-warmup-steps 62 --benchmark-skip-eval --no-checkpoint`
 - Measurements:
@@ -490,7 +489,7 @@ On this hardware, the default canonical matched benchmark window for optimizatio
     - The end-to-end win is real but modest because these steps are still compute-dominated: about `+3.1% tok/s` on `m5-balanced` and `+0.5% tok/s` on `m5-large`.
     - This is worth keeping as a fallback-path cleanup, but the grounded effect is much smaller than the raw loader-time drop might suggest.
 
-### March 9, 2026 — `8c6ed4f` — train: Add warmup-aware MLX benchmark tooling — score `4`
+### March 9, 2026 — `8c6ed4f` — train: Add warmup-aware MLX benchmark tooling — score `4` — complexity `7`
 
 **Human-directed, AI-shaped (4)**
 
@@ -612,7 +611,7 @@ On this hardware, the default canonical matched benchmark window for optimizatio
     - `m5-large` shows a real fast-path win from prepacking: `224` vs `213` steps in the same `60s`, `0.918M` vs `0.872M` session tokens (`+5.3%`), and `loader_percent` dropped from `0.51` to `0.13`.
     - `m5-xlarge` showed lower `loader_percent` but a small single-run loss on total tokens; later dedicated profiling suggests that negative result was likely run-level variance rather than a structural steady-state fast-path regression.
 
-### March 9, 2026 — `b2b08df` — train: Add robust MLX utilization instrumentation — score `4`
+### March 9, 2026 — `b2b08df` — train: Add robust MLX utilization instrumentation — score `4` — complexity `8`
 
 **Human-directed, AI-shaped (4)**
 
@@ -673,7 +672,7 @@ On this hardware, the default canonical matched benchmark window for optimizatio
   - across the shipped M5 presets, utilization stays near saturation while `train_tflops` rises with model size and the larger presets still reveal the token-cache/live-pack fallback in their train-loader path
   - no performance-improvement claim is attached to this change; the grounding here is instrumentation correctness and observability
 
-### March 9, 2026 — `62f2f9c` — checkpoints: Auto-enable checkpoint cadence for longer runs — score `4`
+### March 9, 2026 — `62f2f9c` — checkpoints: Auto-enable checkpoint cadence for longer runs — score `4` — complexity `7`
 
 **Human-directed, AI-shaped (4)**
 
@@ -691,7 +690,7 @@ On this hardware, the default canonical matched benchmark window for optimizatio
   - `CHANGELOG.md`
 - Validation:
   - `python3 -m py_compile train_mlx.py autoresearch_mlx/checkpoint_policy.py tools/checkpoint_tradeoff.py`
-  - `python3 tools/changelog_scores.py --group-by entry --format csv --include-unreleased --verify`
+  - `python3 tools/changelog_scores.py --group-by entry --format csv --include-latest --verify`
   - interrupted startup probe: `.venv/bin/python train_mlx.py --preset m5-balanced --time-budget 301 --eval-tokens 512 --canonical-eval-tokens 512`
   - interrupted startup probe: `.venv/bin/python train_mlx.py --preset m5-balanced --time-budget 301 --checkpoint-path /tmp/autoresearch-policy-existing-path --eval-tokens 512 --canonical-eval-tokens 512`
   - interrupted startup probe: `.venv/bin/python train_mlx.py --preset m5-balanced --time-budget 301 --no-checkpoint --eval-tokens 512 --canonical-eval-tokens 512`
@@ -703,7 +702,7 @@ On this hardware, the default canonical matched benchmark window for optimizatio
   - an explicit `--checkpoint-interval` without `--checkpoint-path` now auto-selects the checkpoint directory and reached a real checkpoint-save attempt during the smoke probe.
   - no performance claim is attached to this change; the grounding here is behavioral rather than benchmark-driven.
 
-### March 9, 2026 — `1c67475` — checkpoints: Add checkpoint interval tradeoff tooling — score `4`
+### March 9, 2026 — `1c67475` — checkpoints: Add checkpoint interval tradeoff tooling — score `4` — complexity `5`
 
 **Human-directed, AI-shaped (4)**
 
@@ -764,7 +763,7 @@ On this hardware, the default canonical matched benchmark window for optimizatio
   - The current `2s` benchmark interval is intentionally much more aggressive than the modeled optimum for realistic interruption rates; it remains useful for stress-testing checkpoint overhead, not as the recommended steady-state policy.
   - The tool is structured for multiple robustness profiles, but today only the exact step-boundary full-state resume profile is grounded well enough to include by default.
 
-### March 9, 2026 — `a0d765d` — checkpoints: Add MLX checkpoints and benchmark grounding — score `11`
+### March 9, 2026 — `a0d765d` — checkpoints: Add MLX checkpoints and benchmark grounding — score `3.67` — complexity `11`
 
 **Human-driven (5)**
 
@@ -853,7 +852,7 @@ On this hardware, the default canonical matched benchmark window for optimizatio
   - the smoke path still trains and evaluates end-to-end
   - the `m5-xlarge` path completed with the lazily prewarmed `2048`-token cache setup instead of relying on the old eager `10x` RoPE allocation strategy
 
-### March 9, 2026 — `2be14fe` — changelog: Add changelog score parser — score `4`
+### March 9, 2026 — `2be14fe` — changelog: Add changelog score parser — score `4` — complexity `7`
 
 **Human-directed, AI-shaped (4)**
 
@@ -871,13 +870,13 @@ On this hardware, the default canonical matched benchmark window for optimizatio
   - `program_mlx.md`
 - Validation:
   - `python3 -m py_compile tools/changelog_scores.py`
-  - `python3 tools/changelog_scores.py --group-by entry --format csv --include-unreleased --verify`
-  - `python3 tools/changelog_scores.py --group-by day --format csv --include-unreleased`
+  - `python3 tools/changelog_scores.py --group-by entry --format csv --include-latest --verify`
+  - `python3 tools/changelog_scores.py --group-by day --format csv --include-latest`
 - Historical score corrections surfaced by the parser:
   - `9a4ef79`: `39 -> 40`
   - `e06f85c`: `35 -> 36`
 
-### March 9, 2026 — `2bcdc0c` — data: Add optional prepacked row caches — score `6`
+### March 9, 2026 — `2bcdc0c` — data: Add optional prepacked row caches — score `3` — complexity `6`
 
 **Human-directed, AI-shaped (4)**
 
@@ -910,7 +909,7 @@ On this hardware, the default canonical matched benchmark window for optimizatio
   - validation metrics: effectively unchanged within short-run noise
   - confirmed runtime behavior: train and val loaders both switched to `prepacked cache` when the matching cache existed
 
-### March 9, 2026 — `137ba69` — optim: Remove optimizer tree churn — score `3`
+### March 9, 2026 — `137ba69` — optim: Remove optimizer tree churn — score `3` — complexity `6`
 
 **AI-identified within brief, human-shaped (3)**
 
@@ -933,7 +932,7 @@ On this hardware, the default canonical matched benchmark window for optimizatio
   - peak memory: `1946.6 MB -> 1946.6 MB` (flat)
   - steady-state per-step throughput: roughly flat within run-to-run noise
 
-### March 9, 2026 — `9a4ef79` — changelog: Add changelog and provenance policy — score `17`
+### March 9, 2026 — `9a4ef79` — changelog: Add changelog and provenance policy — score `4.25` — complexity `20`
 
 **Human-driven (5)**
 
@@ -960,7 +959,7 @@ On this hardware, the default canonical matched benchmark window for optimizatio
 - Validation:
   - docs/process only; no code-path tests were needed
 
-### March 9, 2026 — `077a187` — train: Stream gradient accumulation in MLX trainer — score `3`
+### March 9, 2026 — `077a187` — train: Stream gradient accumulation in MLX trainer — score `3` — complexity `5`
 
 **AI-identified within brief, human-shaped (3)**
 
@@ -983,7 +982,7 @@ On this hardware, the default canonical matched benchmark window for optimizatio
   - steps completed in budget: `18 -> 19`
   - canonical `val_bpb`: `2.373981 -> 2.368727`
 
-### March 9, 2026 — `e06f85c` — data: Add token caching and calibrate M5 presets — score `19`
+### March 9, 2026 — `e06f85c` — data: Add token caching and calibrate M5 presets — score `3.8` — complexity `19`
 
 **Human-driven (5)**
 
@@ -1034,7 +1033,7 @@ On this hardware, the default canonical matched benchmark window for optimizatio
   - literal `upstream` preset ran at roughly `1.1k-1.9k tok/s`
   - the same `50.3M` / `2048` architecture with M5-sized batch (`m5-xlarge`) ran at roughly `7.4k-8.0k tok/s`
 
-### March 9, 2026 — `eee26f5` — train: Separate canonical eval and demote local tooling — score `9`
+### March 9, 2026 — `eee26f5` — train: Separate canonical eval and demote local tooling — score `3` — complexity `9`
 
 **Human-directed, AI-shaped (4)**
 
@@ -1069,7 +1068,7 @@ On this hardware, the default canonical matched benchmark window for optimizatio
     - proxy `val_bpb`: `2.473907`
   - the sweep runner kept or discarded runs based on canonical `val_bpb`, not the proxy metric
 
-### March 9, 2026 — `c3b3d8d` — mlx: Add initial MLX port for Apple Silicon — score `4`
+### March 9, 2026 — `c3b3d8d` — mlx: Add initial MLX port for Apple Silicon — score `4` — complexity `7`
 
 **Human-directed, AI-shaped (4)**
 

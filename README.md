@@ -4,6 +4,8 @@
 
 This fork is an Apple Silicon-first continuation of [karpathy/autoresearch](https://github.com/karpathy/autoresearch). It keeps the original CUDA/PyTorch path in-tree for reference, but the primary path here is a clean MLX implementation for macOS, tuned for smaller unified-memory GPUs like the M5.
 
+[![Autonomy Golf Badge](docs/autonomy-golf-badge.svg)](#autonomy-golf)
+
 ![teaser](progress.png)
 
 *One day, frontier AI research used to be done by meat computers in between eating, sleeping, having other fun, and synchronizing once in a while using sound wave interconnect in the ritual of "group meeting". That era is long gone. Research is now entirely the domain of autonomous swarms of AI agents running across compute cluster megastructures in the skies. The agents claim that we are now in the 10,205th generation of the code base, in any case no one could tell if that's right or wrong as the "code" is now a self-modifying binary that has grown beyond human comprehension. This repo is the story of how it all began. -@karpathy, March 2026*.
@@ -129,6 +131,49 @@ Example prompt:
 
 ```text
 Read program_mlx.md, verify the MLX setup, and start a new experiment loop.
+```
+
+## Autonomy Golf
+
+[![Autonomy Golf Badge](docs/autonomy-golf-badge.svg)](https://github.com/Entrpi/autonomy-golf)
+
+This repo is playing autonomy golf. We use [CHANGELOG.md](CHANGELOG.md), a parser, and a badge to keep score as we try to drive the project down toward total autonomy, or hole-in-one games, without getting sloppy about evidence.
+
+Canonical GitHub home: [Entrpi/autonomy-golf](https://github.com/Entrpi/autonomy-golf)
+
+This repo already has the full bundle installed:
+
+- [CHANGELOG.md](CHANGELOG.md): local autonomy-golf history and parser source of truth
+- [docs/autonomy-golf.md](docs/autonomy-golf.md): the portable manifesto
+- [docs/autonomy-golf-agent.md](docs/autonomy-golf-agent.md): reusable integration brief
+- [docs/autonomy-golf-checklist.md](docs/autonomy-golf-checklist.md): the maintenance loop for future updates
+- [tools/changelog_scores.py](tools/changelog_scores.py): rollups and verification
+- [tools/render_autonomy_badge.py](tools/render_autonomy_badge.py): badge and README snapshot refresh
+
+Autonomy golf works here because the Score and its Grounding are managed with agent integration and tooling in a gamified loop that also helps clarify project purpose and change motivation:
+
+- `score`: how autonomous a change really was
+- `Grounding`: how well the change was validated
+
+Lower is better, and this branch is reserved for AI-shaped or AI-authored code changes; fully human-authored code changes should happen in a fork rather than this mainline history.
+
+For the full scoring model, the meaning of the game, and the reusable adoption docs, see [docs/autonomy-golf.md](docs/autonomy-golf.md).
+
+<!-- autonomy-golf-snapshot:start -->
+Current project snapshot from [CHANGELOG.md](CHANGELOG.md):
+
+| Metric | Value |
+| --- | --- |
+| Mean autonomy score | `3.30 / 6` |
+| Mean complexity | `6.81 / commit` |
+| Mean score per top-level bullet | `3.42 / 6` |
+| History covered | `26` commits across `7` subsystems |
+<!-- autonomy-golf-snapshot:end -->
+
+Refresh with:
+
+```bash
+python3 tools/render_autonomy_badge.py
 ```
 
 ## Project Structure
