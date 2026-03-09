@@ -220,13 +220,16 @@ flowchart TD
     A --> D["GPT.init_weights()"]
     A --> E["MuonAdamW(...)"]
     A --> F["make_dataloader(split='train')"]
-    A --> G["make_step_fn(...)"]
-    G --> H["mx.compile(train_step)"]
-    A --> I["gather_micro_batches()"]
-    I --> J["compiled train_step"]
-    J --> K["optimizer.update(model, grads)"]
-    A --> L["evaluate_bpb(...)"]
-    L --> M["summary block"]
+    A --> G["make_grad_step_fn(...)"]
+    G --> H["mx.compile(grad_step)"]
+    A --> I["make_apply_grads_fn(...)"]
+    I --> J["mx.compile(apply_grads)"]
+    F --> K["stream microbatches one at a time"]
+    K --> H
+    H --> L["accumulate scaled grads in outer loop"]
+    L --> J
+    A --> N["evaluate_bpb(...)"]
+    N --> M["summary block"]
 ```
 
 ### Model architecture preserved by the port

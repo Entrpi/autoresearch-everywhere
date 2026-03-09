@@ -102,40 +102,54 @@ def get_weight_decay(progress: float) -> float:
     return WEIGHT_DECAY * (1.0 - progress)
 
 
-def make_step_fn(model, optimizer, grad_accum_steps: int):
+def make_grad_step_fn(model):
     def loss_fn(model, inputs, targets):
         return model(inputs, targets)
 
     loss_and_grad = nn.value_and_grad(model, loss_fn)
+    state = [model.state]
+
+    @partial(mx.compile, inputs=state, outputs=state)
+    def grad_step(inputs, targets):
+        return loss_and_grad(model, inputs, targets)
+
+    return grad_step
+
+
+def make_apply_grads_fn(model, optimizer):
     state = [model.state, optimizer.state]
 
     @partial(mx.compile, inputs=state, outputs=state)
-    def train_step(inputs, targets):
-        total_loss = mx.array(0.0, dtype=mx.float32)
-        total_grads = None
-        for micro_step in range(grad_accum_steps):
-            loss, grads = loss_and_grad(model, inputs[micro_step], targets[micro_step])
-            total_loss = total_loss + loss
-            grads = tree_map(lambda grad: grad / grad_accum_steps, grads)
-            if total_grads is None:
-                total_grads = grads
-            else:
-                total_grads = tree_map(lambda left, right: left + right, total_grads, grads)
-        optimizer.update(model, total_grads)
-        return total_loss / grad_accum_steps
+    def apply_grads(grads):
+        optimizer.update(model, grads)
+        return optimizer.state["step"]
 
-    return train_step
+    return apply_grads
 
 
-def gather_micro_batches(loader, grad_accum_steps: int):
-    inputs = []
-    targets = []
+def run_train_step(loader, grad_step, apply_grads, grad_accum_steps: int, model, optimizer):
+    total_loss = None
+    total_grads = None
     epoch = 1
+
     for _ in range(grad_accum_steps):
         batch_inputs, batch_targets, epoch = next(loader)
-        inputs.append(batch_inputs)
-        targets.append(batch_targets)
-    return mx.stack(inputs, axis=0), mx.stack(targets, axis=0), epoch
+        loss, grads = grad_step(batch_inputs, batch_targets)
+        mx.eval(loss, grads)
+
+        scaled_loss = loss / grad_accum_steps
+        scaled_grads = tree_map(lambda grad: grad / grad_accum_steps, grads)
+        if total_grads is None:
+            total_loss = scaled_loss
+            total_grads = scaled_grads
+        else:
+            total_loss = total_loss + scaled_loss
+            total_grads = tree_map(lambda left, right: left + right, total_grads, scaled_grads)
+        mx.eval(total_loss, total_grads)
+
+    optimizer_step = apply_grads(total_grads)
+    mx.eval(optimizer_step, model.state, optimizer.state)
+    return total_loss, epoch
 
 
 # Model architecture
@@ -388,7 +402,8 @@ def main() -> None:
     )
 
     train_loader = make_dataloader(tokenizer, args.device_batch_size, args.seq_len, "train")
-    train_step = make_step_fn(model, optimizer, grad_accum_steps)
+    grad_step = make_grad_step_fn(model)
+    apply_grads = make_apply_grads_fn(model, optimizer)
 
     print(f"Time budget: {args.time_budget}s")
     print(f"Gradient accumulation steps: {grad_accum_steps}")
@@ -400,8 +415,6 @@ def main() -> None:
     step = 0
 
     while True:
-        batch_inputs, batch_targets, epoch = gather_micro_batches(train_loader, grad_accum_steps)
-
         progress = min(total_training_time / args.time_budget, 1.0)
         lrm = get_lr_multiplier(progress)
         muon_momentum = get_muon_momentum(step)
@@ -413,8 +426,14 @@ def main() -> None:
         )
 
         t0 = time.time()
-        loss = train_step(batch_inputs, batch_targets)
-        mx.eval(loss, model.state, optimizer.state)
+        loss, epoch = run_train_step(
+            train_loader,
+            grad_step,
+            apply_grads,
+            grad_accum_steps,
+            model,
+            optimizer,
+        )
         t1 = time.time()
         dt = t1 - t0
 
