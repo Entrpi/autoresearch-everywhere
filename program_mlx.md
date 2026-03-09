@@ -42,7 +42,7 @@ Use `uv run train_mlx.py --benchmark-skip-eval` when you want a warmup-aware com
 
 `uv run prepare_mlx.py` now builds the shipped prepacked row caches by default so `m5-fast`, `m5-balanced`, `m5-large`, and `m5-xlarge` all have a prepared fast path. Use `uv run prepare_mlx.py --skip-prepacked-cache` only when you intentionally want the live packing fallback.
 
-For runs above 5 minutes, `train_mlx.py` now enables exact full-state checkpoints by default using the repo's conservative checkpoint-frequency selector. Use `--checkpoint-path` to choose the checkpoint directory while keeping that selector, `--checkpoint-interval` to pin the cadence, `--checkpoint-mode weights_only` when cheaper approximate resume is acceptable, or `--no-checkpoint` to disable it. `weights_only` restores model weights but starts from a fresh optimizer and train-loader state. The selector is mode-aware: on the calibrated M5 profiles, exact currently resolves to `2m` while `weights_only` resolves to `1m`.
+For runs above 5 minutes, `train_mlx.py` now enables exact full-state checkpoints by default using the repo's conservative checkpoint-frequency selector. Use `--checkpoint-path` to choose the checkpoint directory while keeping that selector, `--checkpoint-interval` to pin the cadence, or `--no-checkpoint` to disable it. Exact sync remains the default checkpoint path. `weights_only` remains in-tree only as a failed approximate-resume experiment for historical comparison and targeted ablations. `--checkpoint-save-mode async` is available for exact background writes when wall-clock deadline behavior matters, but it is still an optional experimental variant rather than the default path.
 
 What you CAN do:
 - Modify `train_mlx.py`.
@@ -76,6 +76,7 @@ accum_percent:    <float>
 optimizer_percent: <float>
 other_step_percent: <float>
 checkpoint_percent: <float>
+checkpoint_write_percent: <float>
 eval_percent:     <float>
 util_window_steps: <int>
 util_window:      <string>
@@ -93,6 +94,7 @@ steady_state_steps: <int>
 steady_state_tok_per_sec: <float>
 cumulative_training_seconds: <float>
 cumulative_checkpoint_seconds: <float>
+cumulative_checkpoint_write_seconds: <float>
 cumulative_checkpoint_count: <int>
 total_tokens_M:   <float>
 num_steps:        <int>
@@ -127,11 +129,13 @@ Also keep `CHANGELOG.md` current for meaningful changes. Each changelog entry sh
 - `Grounding`: the files changed, the checks run, and any measured effects.
 
 Omit empty provenance sections instead of adding `None in this entry.`
+Do not stop at "what changed." Each entry should also explain the change's meaning, motivation, and intended purpose. For example: what semantic behavior changed, why the old behavior was insufficient, and what operational or research goal the new behavior is supposed to serve.
 Show an autonomy golf score in each commit header. Score each provenance bullet as `Human-driven = 5`, `Human-directed, AI-shaped = 4`, `AI-identified within brief, human-shaped = 3`, `AI-identified within brief, human-approved = 2`, `Self-initiated, human-approved = 1`, and `Fully autonomous = 0`; `Grounding` is not scored.
 Treat top-level provenance bullets as the scored units. If a point is directly derivative of a main bullet and stays at the same autonomy level, record it as a nested sub-bullet so it remains visible without adding score.
 Use `python3 tools/changelog_scores.py --group-by day --format csv` when you want a plotting-friendly daily autonomy summary, or `--group-by entry --verify` to sanity-check header totals against the parsed bullets.
 When provenance is ambiguous, prefer `Human-directed, AI-shaped` over `AI-identified within brief, human-shaped`, prefer `AI-identified within brief, human-shaped` over `AI-identified within brief, human-approved`, prefer `AI-identified within brief, human-approved` over `Self-initiated, human-approved`, and prefer `Self-initiated, human-approved` over `Fully autonomous`.
 When grounding is ambiguous, prefer the stronger practical check if it is feasible in this environment. For performance or optimization claims, try to produce a matched A/B or fixed-budget benchmark instead of relying on smoke tests alone. For stability claims, prefer an end-to-end run that actually exercises the changed path. If only weaker grounding is practical, state that limitation explicitly in both the changelog and the user-facing report.
+For checkpoint semantic changes, do not stop at save cost or resume latency. Prefer a convergence benchmark that compares uninterrupted training, exact midpoint resume, and approximate midpoint resume under the same total optimizer-step budget, then reports the end-state differences in loss, validation BPB, and parameter drift.
 Benchmarks should run long enough to produce a high-signal result on the specific change item. Pick a run shape where the affected path happens enough times to matter. For example, checkpoint-overhead changes should usually be tested with enough runtime to produce many checkpoint saves, not just one or two, and scaling claims should prefer a heavier preset if the smaller ones do not expose the bottleneck clearly.
 On this hardware, the default canonical matched benchmark window for optimization grounding is `60s`, not `30s`. Treat shorter runs as smoke checks or constrained fallbacks, and say so explicitly when you use them.
 Do not describe an optimization as established unless the grounding matches the claim. Correctness-only checks can support “works” or “does not regress obvious behavior,” but not “is faster” or “scales better.”

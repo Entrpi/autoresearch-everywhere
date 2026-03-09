@@ -13,6 +13,7 @@ Each entry records:
 
 If an entry has no measurements yet, it should say so explicitly.
 Entries should omit empty provenance sections rather than spelling out `None in this entry.`
+Each entry should describe not just what changed, but also the change's meaning, motivation, and intended purpose, especially when the code change introduces a new semantic mode, workflow, or policy.
 Each commit entry should also show an autonomy golf score in the header. Score each provenance bullet as `Human-driven = 5`, `Human-directed, AI-shaped = 4`, `AI-identified within brief, human-shaped = 3`, `AI-identified within brief, human-approved = 2`, `Self-initiated, human-approved = 1`, and `Fully autonomous = 0`. `Grounding` does not contribute to the score.
 Top-level provenance bullets are the scored units. If a point is directly derivative of a main bullet and stays at the same autonomy level, record it as a nested sub-bullet so it remains visible without adding score.
 When provenance is ambiguous, prefer `Human-directed, AI-shaped` over `AI-identified within brief, human-shaped`, prefer `AI-identified within brief, human-shaped` over `AI-identified within brief, human-approved`, prefer `AI-identified within brief, human-approved` over `Self-initiated, human-approved`, and prefer `Self-initiated, human-approved` over `Fully autonomous`.
@@ -20,11 +21,134 @@ This changelog should bias toward under-claiming rather than over-claiming succe
 This branch does not admit fully human-authored code changes. If a change must be authored entirely by a human, it belongs in a fork rather than this branch's mainline history.
 Grounding should also be conservative. When a claim is about performance, stability, or behavioral improvement, prefer the strongest practical evidence over the quickest smoke pass, and record the actual strength of that evidence rather than the intended standard.
 For benchmarked changes, "strong enough" means long enough and heavy enough to produce a high-signal result on the changed behavior. Choose a run shape where the affected path executes enough times to matter. For example, checkpoint-overhead claims should usually be grounded with a run that produces many checkpoint saves rather than only one or two, and scaling claims should prefer a model/preset large enough for the bottleneck to show up clearly.
+For checkpoint semantic changes, save/restore cost is not enough by itself. Prefer a convergence benchmark that compares uninterrupted training, exact midpoint resume, and approximate midpoint resume under the same total optimizer-step budget, then records the end-state differences in loss, validation BPB, and parameter drift.
 On this hardware, the default canonical matched benchmark window for optimization grounding is `60s`, not `30s`. Use shorter runs for smoke checks or when the changed path cannot practically support a longer benchmark, and say so explicitly when you do.
 
 ## Unreleased
 
-### New commit — Make auto checkpoint cadence mode-aware — score `2`
+### New commit — Benchmark checkpoint convergence and keep sync default — score `4`
+
+**Human-directed, AI-shaped (4)**
+
+- Requested that checkpoint semantics be judged by convergence, not just save or resume latency, specifically by resuming halfway through training and comparing the end states.
+  - Added a dedicated convergence harness for uninterrupted vs exact-resume vs `weights_only` midpoint resumes under a fixed optimizer-step budget.
+  - Updated the repo guidance so future checkpoint semantic changes are expected to use this kind of end-state comparison.
+  - Carried the checkpoint wrap-up through to an explicit policy conclusion: exact sync remains the default checkpoint mode even after testing async exact.
+
+**Grounding**
+
+- Files:
+  - `tools/profile_resume_convergence.py`
+  - `README.md`
+  - `program_mlx.md`
+  - `docs/mlx-port-architecture.md`
+  - `CHANGELOG.md`
+- Validation:
+  - `python3 -m py_compile tools/profile_resume_convergence.py`
+  - `./.venv/bin/python tools/profile_resume_convergence.py --preset m5-large --total-steps 80 --checkpoint-step 40 --eval-tokens 4096 --json-out results/analysis/m5_large_resume_convergence.json`
+  - `./.venv/bin/python tools/profile_resume_convergence.py --preset m5-balanced --total-steps 200 --checkpoint-step 100 --eval-tokens 4096 --json-out results/analysis/m5_balanced_resume_convergence.json`
+  - `./.venv/bin/python - <<'PY' ... > results/analysis/uninterrupted_repeatability.json`
+- Measurements:
+  - Midpoint resume-convergence comparison:
+
+    | Preset | Trajectory | final loss | trailing loss | canonical `val_bpb` | relative RMS param drift vs uninterrupted |
+    | --- | --- | ---: | ---: | ---: | ---: |
+    | `m5-balanced` | uninterrupted | `5.953065` | `5.795487` | `2.088155` | `0.000e+00` |
+    | `m5-balanced` | exact midpoint resume | `5.945498` | `5.783511` | `2.088881` | `5.009e-01` |
+    | `m5-balanced` | `weights_only` midpoint resume | `6.139996` | `5.601696` | `2.194967` | `7.852e-01` |
+    | `m5-large` | uninterrupted | `5.846727` | `6.018619` | `2.188738` | `0.000e+00` |
+    | `m5-large` | exact midpoint resume | `5.846764` | `6.019718` | `2.188925` | `2.616e-01` |
+    | `m5-large` | `weights_only` midpoint resume | `6.425774` | `5.762017` | `2.318585` | `6.785e-01` |
+
+  - Uninterrupted same-seed repeatability baseline ([artifact](/Users/ent/Codex/autoresearch/results/analysis/uninterrupted_repeatability.json)):
+
+    | Preset | steps | run 1 canonical `val_bpb` | run 2 canonical `val_bpb` | delta | relative RMS param drift |
+    | --- | ---: | ---: | ---: | ---: | ---: |
+    | `m5-balanced` | `200` | `2.089673` | `2.093795` | `+0.004122` | `5.794e-01` |
+    | `m5-large` | `80` | `2.189574` | `2.188915` | `-0.000659` | `2.484e-01` |
+
+  - Interpretation:
+    - `weights_only` is clearly not trajectory-equivalent: on both tested presets it finishes at a worse canonical `val_bpb` and a materially different parameter state after the midpoint resume.
+    - This is enough to treat `weights_only` as a failed experiment, not an active checkpoint direction. It remains useful as historical evidence and for targeted ablations, but it should no longer be recommended as the practical cheap-resume path.
+    - Uninterrupted same-seed runs are not bitwise repeatable on this MLX stack either. On both tested presets, exact midpoint resume stays within the same broad parameter-drift envelope as uninterrupted-repeat baselines while keeping canonical `val_bpb` very close.
+    - So the current evidence does not justify calling exact resume a standalone checkpoint-correctness bug. The tighter conclusion is that exact resume is metric-stable but not parameter-identical, which matches the underlying trainer's existing nondeterministic behavior on this machine.
+    - This is the benchmark the checkpoint work was missing. Save cost and resume-ready latency tell you whether a checkpoint is cheap; they do not tell you whether it preserves the training trajectory.
+
+## Committed History
+
+### March 9, 2026 — `8359b0c` — Add async exact checkpoint writes — score `4`
+
+**Human-directed, AI-shaped (4)**
+
+- Requested a pivot away from the failed `weights_only` path and toward async exact checkpointing instead.
+  - Added an optional async exact write path that captures an exact host-side step-boundary snapshot on the training thread, then writes it in a background worker.
+  - Kept the semantic target as exact resume rather than changing the resume contract again.
+  - Updated the top-level docs to stop recommending `weights_only` and to frame it as a failed experiment retained only for comparison.
+  - Tried a follow-on helper-process writer experiment with background process priority, but backed it out after ABAB runs showed it performed worse than the simpler thread-based async path.
+
+**Grounding**
+
+- Files:
+  - `autoresearch_mlx/checkpoints.py`
+  - `autoresearch_mlx/checkpoint_policy.py`
+  - `train_mlx.py`
+- Validation:
+  - `python3 -m py_compile train_mlx.py autoresearch_mlx/checkpoints.py autoresearch_mlx/checkpoint_policy.py`
+  - `./.venv/bin/python train_mlx.py --smoke --checkpoint-save-mode async --checkpoint-path /tmp/autoresearch_async_smoke --checkpoint-interval 0.5`
+  - `./.venv/bin/python train_mlx.py --resume-from /tmp/autoresearch_async_smoke --time-budget 1.5 --checkpoint-save-mode async`
+  - `./.venv/bin/python train_mlx.py --preset m5-large --time-budget 20 --benchmark-skip-eval --checkpoint-mode exact --checkpoint-save-mode sync --checkpoint-path /tmp/autoresearch_exact_sync_large --checkpoint-interval 2`
+  - `./.venv/bin/python train_mlx.py --preset m5-large --time-budget 20 --benchmark-skip-eval --checkpoint-mode exact --checkpoint-save-mode async --checkpoint-path /tmp/autoresearch_exact_async_large --checkpoint-interval 2`
+  - `./.venv/bin/python train_mlx.py --preset m5-xlarge --time-budget 60 --benchmark-skip-eval --checkpoint-mode exact --checkpoint-save-mode sync --checkpoint-path /tmp/autoresearch_exact_sync_xlarge --checkpoint-interval 2`
+  - `./.venv/bin/python train_mlx.py --preset m5-xlarge --time-budget 60 --benchmark-skip-eval --checkpoint-mode exact --checkpoint-save-mode async --checkpoint-path /tmp/autoresearch_exact_async_xlarge --checkpoint-interval 2`
+  - `./.venv/bin/python - <<'PY' ... > results/analysis/exact_async_abab_summary.json`
+  - `./.venv/bin/python - <<'PY' ... > results/analysis/exact_async_process_abab_summary.json`
+  - `./.venv/bin/python - <<'PY' ... > results/analysis/exact_async_wallclock_60s.json`
+- Measurements:
+  - Exact sync vs async checkpoint benchmark ([artifact](/Users/ent/Codex/autoresearch/results/analysis/exact_async_checkpoint_benchmark.json)):
+
+    | Preset | Save mode | total seconds | blocking checkpoint % | total checkpoint write % | session tokens (M) | session steps | steady-state tok/s |
+    | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+    | `m5-large` | sync | `20.5` | `2.03` | `2.03` | `0.258` | `63` | `12805.5` |
+    | `m5-large` | async | `20.4` | `1.17` | `2.66` | `0.254` | `62` | `12637.7` |
+    | `m5-xlarge` | sync | `62.2` | `3.37` | `3.37` | `0.393` | `96` | `6556.8` |
+    | `m5-xlarge` | async | `61.8` | `1.66` | `6.09` | `0.520` | `127` | `8581.8` |
+
+  - Exact sync vs async ABAB benchmark ([artifact](/Users/ent/Codex/autoresearch/results/analysis/exact_async_abab_summary.json)):
+
+    | Preset | Save mode | mean total seconds | mean blocking checkpoint % | mean total checkpoint write % | mean session tokens (M) | mean steady-state tok/s |
+    | --- | --- | ---: | ---: | ---: | ---: | ---: |
+    | `m5-large` | sync | `20.5` | `1.93` | `1.93` | `0.264` | `13184.4` |
+    | `m5-large` | async | `20.3` | `1.07` | `3.03` | `0.262` | `13080.9` |
+    | `m5-xlarge` | sync | `62.7` | `3.47` | `3.47` | `0.393` | `6309.7` |
+    | `m5-xlarge` | async | `61.1` | `1.33` | `6.53` | `0.381` | `6329.5` |
+
+  - Helper-process async exact ABAB benchmark ([artifact](/Users/ent/Codex/autoresearch/results/analysis/exact_async_process_abab_summary.json)):
+
+    | Preset | Save mode | mean total seconds | mean blocking checkpoint % | mean total checkpoint write % | mean session tokens (M) | mean steady-state tok/s |
+    | --- | --- | ---: | ---: | ---: | ---: | ---: |
+    | `m5-large` | sync | `20.7` | `2.20` | `2.20` | `0.258` | `12821.1` |
+    | `m5-large` | async helper process | `20.7` | `2.02` | `7.73` | `0.254` | `12634.3` |
+    | `m5-xlarge` | sync | `62.3` | `3.41` | `3.41` | `0.389` | `6433.5` |
+    | `m5-xlarge` | async helper process | `62.2` | `2.45` | `15.27` | `0.387` | `6402.9` |
+
+  - Exact sync vs async under a `60s` wall-clock budget ([artifact](/Users/ent/Codex/autoresearch/results/analysis/exact_async_wallclock_60s.json)):
+
+    | Preset | Save mode | steps by cutoff | tokens by cutoff (M) | wall tok/s | blocking checkpoint % of wall | total checkpoint write % of wall |
+    | --- | --- | ---: | ---: | ---: | ---: | ---: |
+    | `m5-large` | sync | `177` | `0.725` | `12015.7` | `2.33` | `2.33` |
+    | `m5-large` | async | `180` | `0.737` | `12255.8` | `0.66` | `3.37` |
+    | `m5-xlarge` | sync | `111` | `0.455` | `7508.4` | `3.88` | `3.88` |
+    | `m5-xlarge` | async | `114` | `0.467` | `7762.6` | `1.13` | `5.91` |
+
+  - Interpretation:
+    - Async exact is viable because it keeps the resume semantics exact while moving the expensive on-disk write out of the training thread. The host snapshot path preserves `bfloat16` tensors exactly by reinterpreting them as `uint16` during transfer and viewing them back on restore.
+    - Under the repo's usual training-time budget, the grounded result is still mixed: async exact reliably lowers blocking checkpoint time, but the matched ABAB runs do not show a stable end-to-end throughput win.
+    - Under a real `60s` wall-clock budget, async exact does help on both tested heavier presets, because lowering blocking time lets the run complete slightly more optimizer steps before the deadline.
+    - That is useful, but it is not enough to flip the default. The current policy conclusion is still to keep synchronous exact checkpoints as the default path, and to treat async exact as an optional wall-clock-oriented variant.
+    - The helper-process follow-up did not help. Running the writer in a forked background process with lower process priority reduced blocking a little, but increased total write share sharply and failed to improve throughput on either preset.
+    - That points away from scheduler isolation as the main bottleneck. The likely limit is still the cost of capturing and moving the exact host snapshot through shared memory, so the simpler thread-based async writer remains the better current implementation.
+
+### March 9, 2026 — `fd5358b` — Make auto checkpoint cadence mode-aware — score `2`
 
 **AI-identified within brief, human-approved (2)**
 
@@ -71,8 +195,6 @@ On this hardware, the default canonical matched benchmark window for optimizatio
     - Exact remains at `2m` because its measured save cost still pushes `1m` above the current `0.1%` save-only overhead target on the calibrated M5 shapes.
     - `weights_only` now resolves to `1m` because its repeated-save overhead is materially lower, while exact still remains the default when exact optimizer/loader continuity matters.
 
-## Committed History
-
 ### March 9, 2026 — `1b6887f` — Add approximate weights-only checkpoint mode — score `4`
 
 **Human-directed, AI-shaped (4)**
@@ -81,6 +203,7 @@ On this hardware, the default canonical matched benchmark window for optimizatio
   - Added an explicit `weights_only` checkpoint mode alongside exact full-state resume.
   - Threaded the new mode through the trainer, checkpoint metadata, auto checkpoint path selection, and both checkpoint profiling tools.
   - Kept exact full-state resume as the default, and kept the auto cadence conservatively calibrated from the existing exact-resume measurements.
+  - Semantically, `weights_only` saves model weights plus checkpoint metadata, intentionally omits optimizer and train-loader state, deletes stale exact-state payloads in the target directory, and resumes approximately from a fresh optimizer and loader stream.
 
 **Grounding**
 
@@ -126,6 +249,7 @@ On this hardware, the default canonical matched benchmark window for optimizatio
     - `weights_only` materially reduces save cost: about `-60%` on `m5-large` median save time and about `-50%` on `m5-xlarge`.
     - Resume-ready latency does not improve in the current measurements. The first resumed optimizer step still dominates the path back to productive training, and `weights_only` resumes approximately with a fresh optimizer and train-loader state.
     - The direct `m5-xlarge` save-path profile explains why the save win is bounded: omitting optimizer state removes about `218 MB` of writes, but the model weights still dominate the checkpoint payload.
+    - The meaning and purpose of the mode are operational rather than numerical: it is a cheaper freshness checkpoint for long local runs when exact optimizer/loader continuity is not worth the extra write cost.
     - This makes `weights_only` a useful cheaper approximate snapshot mode, not a replacement for exact step-boundary resume when continuity matters.
 
 ### March 9, 2026 — `39c9055` — Calibrate tradeoff analysis with resume-ready penalty — score `2`
