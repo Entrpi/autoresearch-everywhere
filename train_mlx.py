@@ -660,7 +660,10 @@ def resolve_checkpoint_settings(args: RunConfig, num_params: int) -> tuple[RunCo
     if args.time_budget <= AUTO_CHECKPOINT_MIN_TIME_BUDGET_SEC:
         return args, None
 
-    decision = choose_auto_checkpoint_decision(num_params / 1e6)
+    decision = choose_auto_checkpoint_decision(
+        num_params / 1e6,
+        checkpoint_mode=args.checkpoint_mode,
+    )
     checkpoint_path = args.checkpoint_path or str(auto_path)
     resolved = replace(
         args,
@@ -675,8 +678,6 @@ def resolve_checkpoint_settings(args: RunConfig, num_params: int) -> tuple[RunCo
         f"with {path_source}; checkpoint_mode={args.checkpoint_mode}; measured resume-ready penalty "
         f"{decision.calibration.resume_ready_penalty_sec:.3f}s"
     )
-    if args.checkpoint_mode != CHECKPOINT_MODE_EXACT:
-        reason += " (interval remains conservatively calibrated from exact full-state save costs)"
     return resolved, reason
 
 

@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .constants import CHECKPOINT_DIR
+from .checkpoints import CHECKPOINT_MODE_EXACT, CHECKPOINT_MODE_WEIGHTS_ONLY
 
 
 AUTO_CHECKPOINT_MIN_TIME_BUDGET_SEC = 300.0
@@ -13,6 +14,7 @@ AUTO_CHECKPOINT_MIN_TIME_BUDGET_SEC = 300.0
 class CheckpointCalibration:
     key: str
     label: str
+    checkpoint_mode: str
     max_params_m: float
     checkpoint_cost_sec: float
     resume_ready_penalty_sec: float
@@ -47,6 +49,7 @@ DEFAULT_CHECKPOINT_CALIBRATIONS = (
     CheckpointCalibration(
         key="exact_full_state_m5_large",
         label="Exact full-state resume (m5-large calibrated)",
+        checkpoint_mode=CHECKPOINT_MODE_EXACT,
         max_params_m=30.0,
         checkpoint_cost_sec=0.07,
         resume_ready_penalty_sec=0.641,
@@ -55,14 +58,37 @@ DEFAULT_CHECKPOINT_CALIBRATIONS = (
         notes="Conservative calibration used for presets up to roughly the 26.3M-parameter m5-large shape.",
     ),
     CheckpointCalibration(
+        key="weights_only_m5_large",
+        label="Weights-only approximate resume (m5-large calibrated)",
+        checkpoint_mode=CHECKPOINT_MODE_WEIGHTS_ONLY,
+        max_params_m=30.0,
+        checkpoint_cost_sec=0.02,
+        resume_ready_penalty_sec=1.176,
+        source="Measured from matched 20s m5-large runs: about +0.2s across 10 weights-only saves.",
+        resume_ready_source="Measured from repeated weights-only resume-ready trials: median 1.176s to first completed resumed optimizer step.",
+        notes="Approximate resume restores model weights only and restarts from a fresh optimizer and train-loader state.",
+    ),
+    CheckpointCalibration(
         key="exact_full_state_m5_xlarge",
         label="Exact full-state resume (m5-xlarge calibrated)",
+        checkpoint_mode=CHECKPOINT_MODE_EXACT,
         max_params_m=float("inf"),
         checkpoint_cost_sec=0.11,
         resume_ready_penalty_sec=0.683,
         source="Measured from 60s matched m5-xlarge runs: +3.3s across 29 saves.",
         resume_ready_source="Measured from repeated resume-ready trials: median 0.683s to first completed resumed optimizer step.",
         notes="Conservative calibration used for the 50.3M-parameter xlarge/upstream model shape.",
+    ),
+    CheckpointCalibration(
+        key="weights_only_m5_xlarge",
+        label="Weights-only approximate resume (m5-xlarge calibrated)",
+        checkpoint_mode=CHECKPOINT_MODE_WEIGHTS_ONLY,
+        max_params_m=float("inf"),
+        checkpoint_cost_sec=0.03,
+        resume_ready_penalty_sec=1.236,
+        source="Measured from matched 60s m5-xlarge runs: about +0.8s across 28 weights-only saves.",
+        resume_ready_source="Measured from repeated weights-only resume-ready trials: median 1.236s to first completed resumed optimizer step.",
+        notes="Approximate resume restores model weights only and restarts from a fresh optimizer and train-loader state.",
     ),
 )
 
@@ -102,12 +128,20 @@ def format_interval_label(interval_sec: float) -> str:
 
 def select_checkpoint_calibration(
     num_params_m: float,
+    checkpoint_mode: str,
     calibrations: tuple[CheckpointCalibration, ...] = DEFAULT_CHECKPOINT_CALIBRATIONS,
 ) -> CheckpointCalibration:
-    for calibration in calibrations:
+    matching = tuple(
+        calibration
+        for calibration in calibrations
+        if calibration.checkpoint_mode == checkpoint_mode
+    )
+    if not matching:
+        raise ValueError(f"No checkpoint calibration registered for checkpoint_mode={checkpoint_mode!r}.")
+    for calibration in matching:
         if num_params_m <= calibration.max_params_m:
             return calibration
-    return calibrations[-1]
+    return matching[-1]
 
 
 def recommend_interval_for_cost(
@@ -139,10 +173,15 @@ def recommend_interval_for_cost(
 
 def choose_auto_checkpoint_decision(
     num_params_m: float,
+    checkpoint_mode: str,
     policy: HumanIntervalPolicy = DEFAULT_HUMAN_INTERVAL_POLICY,
     calibrations: tuple[CheckpointCalibration, ...] = DEFAULT_CHECKPOINT_CALIBRATIONS,
 ) -> AutoCheckpointDecision:
-    calibration = select_checkpoint_calibration(num_params_m, calibrations)
+    calibration = select_checkpoint_calibration(
+        num_params_m,
+        checkpoint_mode,
+        calibrations,
+    )
     recommendation = recommend_interval_for_cost(calibration.checkpoint_cost_sec, policy)
     return AutoCheckpointDecision(calibration=calibration, recommendation=recommendation)
 

@@ -23,9 +23,8 @@ We also compute two separate quantities:
 where R is an optional fixed resume penalty in seconds.
 
 The default profiles are grounded in measured save costs from this repo's
-checkpoint/resume work, including repeated "resume ready" latency trials.
-The tool is structured to accept more profiles later, for example if lighter
-checkpoint modes are added and benchmarked.
+checkpoint/resume work, including repeated "resume ready" latency trials for
+both exact full-state and lighter approximate checkpoint modes.
 """
 
 from __future__ import annotations
@@ -47,6 +46,7 @@ from autoresearch_mlx.checkpoint_policy import (
     format_interval_label,
     save_only_overhead_fraction,
 )
+from autoresearch_mlx.checkpoints import CHECKPOINT_MODE_EXACT
 
 
 @dataclass(frozen=True)
@@ -64,7 +64,11 @@ DEFAULT_PROFILES = tuple(
     CheckpointProfile(
         key=calibration.key,
         label=calibration.label,
-        robustness="exact step-boundary full-state resume",
+        robustness=(
+            "exact step-boundary full-state resume"
+            if calibration.checkpoint_mode == CHECKPOINT_MODE_EXACT
+            else "approximate weights-only resume"
+        ),
         checkpoint_cost_sec=calibration.checkpoint_cost_sec,
         resume_penalty_sec=calibration.resume_ready_penalty_sec,
         source=calibration.source,

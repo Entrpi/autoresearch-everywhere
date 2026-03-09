@@ -24,7 +24,56 @@ On this hardware, the default canonical matched benchmark window for optimizatio
 
 ## Unreleased
 
-### New commit — Add approximate weights-only checkpoint mode — score `4`
+### New commit — Make auto checkpoint cadence mode-aware — score `2`
+
+**AI-identified within brief, human-approved (2)**
+
+- Followed the new checkpoint-mode work by teaching the automatic cadence selector and tradeoff tool about `weights_only` as its own measured profile instead of making it inherit the exact full-state interval.
+  - Replaced the earlier provisional `weights_only` save-cost estimates with stronger repeated-save matched-run measurements on `m5-large` and `m5-xlarge`.
+  - Updated the runtime selector, runtime policy message, and tradeoff analysis so exact and `weights_only` now produce different default intervals on the calibrated M5 shapes.
+
+**Grounding**
+
+- Files:
+  - `README.md`
+  - `program_mlx.md`
+  - `docs/mlx-port-architecture.md`
+  - `autoresearch_mlx/checkpoint_policy.py`
+  - `tools/checkpoint_tradeoff.py`
+  - `train_mlx.py`
+  - `CHANGELOG.md`
+- Validation:
+  - `python3 -m py_compile autoresearch_mlx/checkpoint_policy.py tools/checkpoint_tradeoff.py train_mlx.py`
+  - `./.venv/bin/python train_mlx.py --preset m5-large --time-budget 20 --benchmark-skip-eval --no-checkpoint`
+  - `./.venv/bin/python train_mlx.py --preset m5-large --time-budget 20 --benchmark-skip-eval --checkpoint-mode weights_only --checkpoint-path /tmp/autoresearch_m5_large_weights_only --checkpoint-interval 2`
+  - `./.venv/bin/python train_mlx.py --preset m5-xlarge --time-budget 60 --benchmark-skip-eval --no-checkpoint`
+  - `./.venv/bin/python train_mlx.py --preset m5-xlarge --time-budget 60 --benchmark-skip-eval --checkpoint-mode weights_only --checkpoint-path /tmp/autoresearch_m5_xlarge_weights_only --checkpoint-interval 2`
+  - Verified via `.venv` Python snippet that `choose_auto_checkpoint_decision(...)` now resolves exact to `2m` and `weights_only` to `1m` on both calibrated parameter bands.
+  - Verified via `.venv` Python snippet that `resolve_checkpoint_settings(...)` prints the same mode-aware `2m` vs `1m` result for `m5-large`, including distinct auto checkpoint paths per mode.
+  - `env PYTHONPATH=/Users/ent/Codex/autoresearch ./.venv/bin/python tools/checkpoint_tradeoff.py`
+- Measurements:
+  - Repeated-save `weights_only` overhead from matched long-window runs:
+
+    | Preset | time budget (s) | saves | non-training overhead baseline (s) | non-training overhead with `weights_only` (s) | added wall overhead (s) | approx. save cost (ms/save) |
+    | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+    | `m5-large` | `20` | `10` | `0.0` | `0.2` | `0.2` | `20` |
+    | `m5-xlarge` | `60` | `28` | `0.1` | `0.9` | `0.8` | `29` |
+
+  - Mode-aware default interval outcomes on the calibrated M5 profiles:
+
+    | Preset band | exact default | `weights_only` default |
+    | --- | --- | --- |
+    | up to `m5-large` | `2m` at `0.0583%` save-only overhead | `1m` at `0.0333%` save-only overhead |
+    | `m5-xlarge` / upstream-scale | `2m` at `0.0917%` save-only overhead | `1m` at `0.0500%` save-only overhead |
+
+  - Interpretation:
+    - The stronger repeated-save measurements confirm that `weights_only` is cheap enough to justify a shorter default interval than exact full-state resume under the same fixed-overhead cap.
+    - Exact remains at `2m` because its measured save cost still pushes `1m` above the current `0.1%` save-only overhead target on the calibrated M5 shapes.
+    - `weights_only` now resolves to `1m` because its repeated-save overhead is materially lower, while exact still remains the default when exact optimizer/loader continuity matters.
+
+## Committed History
+
+### March 9, 2026 — `1b6887f` — Add approximate weights-only checkpoint mode — score `4`
 
 **Human-directed, AI-shaped (4)**
 
@@ -78,8 +127,6 @@ On this hardware, the default canonical matched benchmark window for optimizatio
     - Resume-ready latency does not improve in the current measurements. The first resumed optimizer step still dominates the path back to productive training, and `weights_only` resumes approximately with a fresh optimizer and train-loader state.
     - The direct `m5-xlarge` save-path profile explains why the save win is bounded: omitting optimizer state removes about `218 MB` of writes, but the model weights still dominate the checkpoint payload.
     - This makes `weights_only` a useful cheaper approximate snapshot mode, not a replacement for exact step-boundary resume when continuity matters.
-
-## Committed History
 
 ### March 9, 2026 — `39c9055` — Calibrate tradeoff analysis with resume-ready penalty — score `2`
 
