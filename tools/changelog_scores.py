@@ -4,6 +4,8 @@ Parse CHANGELOG.md autonomy scores into plotting-friendly rows.
 
 Examples:
     python3 tools/changelog_scores.py --group-by day --format csv
+    python3 tools/changelog_scores.py --group-by subsystem --format csv
+    python3 tools/changelog_scores.py --group-by day-subsystem --format csv
     python3 tools/changelog_scores.py --group-by entry --format json --include-unreleased --verify
 """
 
@@ -39,6 +41,7 @@ CATEGORY_WEIGHTS = {
 }
 
 CATEGORY_HEADING_RE = re.compile(r"^(?P<label>.+?)(?: \((?P<score>\d+)\))?$")
+SUBSYSTEM_TITLE_RE = re.compile(r"^(?P<subsystem>[a-z0-9][a-z0-9_./-]*): (?P<summary>.+)$")
 
 EM_DASH = "\u2014"
 HEADER_RE = re.compile(rf"^### (?P<prefix>.+?) {EM_DASH} score `(?P<score>\d+)`$")
@@ -52,6 +55,8 @@ class Entry:
     section: str
     raw_header: str
     title: str
+    subsystem: str | None
+    summary: str
     header_score: int
     commit: str | None
     date_label: str | None
@@ -75,6 +80,10 @@ class Entry:
         return self.section == "Unreleased"
 
     @property
+    def missing_subsystem_prefix(self) -> bool:
+        return self.subsystem is None
+
+    @property
     def iso_date(self) -> str | None:
         if self.date_label is None:
             return None
@@ -86,7 +95,9 @@ class Entry:
             "date": self.iso_date,
             "date_label": self.date_label,
             "commit": self.commit,
+            "subsystem": self.subsystem,
             "title": self.title,
+            "summary": self.summary,
             "header_score": self.header_score,
             "computed_score": self.computed_score,
             "score_delta": self.score_delta,
@@ -129,22 +140,26 @@ def parse_entry_header(line: str, current_section: str) -> Entry:
     header_score = int(match.group("score"))
     committed = COMMITTED_PREFIX_RE.match(prefix)
     if committed:
-        return Entry(
-            section=current_section,
-            raw_header=line,
-            title=committed.group("title"),
-            header_score=header_score,
-            commit=committed.group("commit"),
-            date_label=committed.group("date"),
-        )
+        title = committed.group("title")
+        commit = committed.group("commit")
+        date_label = committed.group("date")
+    else:
+        title = prefix.split(f" {EM_DASH} ", 1)[1] if f" {EM_DASH} " in prefix else prefix
+        commit = None
+        date_label = None
 
+    subsystem_match = SUBSYSTEM_TITLE_RE.match(title)
+    subsystem = subsystem_match.group("subsystem") if subsystem_match else None
+    summary = subsystem_match.group("summary") if subsystem_match else title
     return Entry(
         section=current_section,
         raw_header=line,
-        title=prefix.split(f" {EM_DASH} ", 1)[1] if f" {EM_DASH} " in prefix else prefix,
+        title=title,
+        subsystem=subsystem,
+        summary=summary,
         header_score=header_score,
-        commit=None,
-        date_label=None,
+        commit=commit,
+        date_label=date_label,
     )
 
 
@@ -219,6 +234,72 @@ def build_daily_rows(entries: list[Entry], include_unreleased: bool) -> list[dic
     return rows
 
 
+def init_grouped_score_row(**fields: object) -> dict[str, object]:
+    row = {
+        "commit_count": 0,
+        "total_header_score": 0,
+        "total_computed_score": 0,
+        "total_score_delta": 0,
+        **fields,
+    }
+    for category in CATEGORY_ORDER:
+        slug = slugify(category)
+        row[f"{slug}_count"] = 0
+        row[f"{slug}_points"] = 0
+    return row
+
+
+def accumulate_grouped_score_row(row: dict[str, object], entry: Entry) -> None:
+    row["commit_count"] += 1
+    row["total_header_score"] += entry.header_score
+    row["total_computed_score"] += entry.computed_score
+    row["total_score_delta"] += entry.score_delta
+    for category in CATEGORY_ORDER:
+        slug = slugify(category)
+        count = entry.category_counts[category]
+        row[f"{slug}_count"] += count
+        row[f"{slug}_points"] += count * CATEGORY_WEIGHTS[category]
+
+
+def finalize_grouped_rows(grouped: dict[object, dict[str, object]], sort_keys: list[object]) -> list[dict[str, object]]:
+    rows = []
+    for key in sort_keys:
+        row = grouped[key]
+        commit_count = row["commit_count"]
+        row["header_score_per_commit"] = row["total_header_score"] / commit_count
+        row["computed_score_per_commit"] = row["total_computed_score"] / commit_count
+        rows.append(row)
+    return rows
+
+
+def build_subsystem_rows(entries: list[Entry], include_unreleased: bool) -> list[dict[str, object]]:
+    grouped: dict[str, dict[str, object]] = {}
+    for entry in entries:
+        if entry.is_unreleased and not include_unreleased:
+            continue
+        key = entry.subsystem or "unscoped"
+        if key not in grouped:
+            grouped[key] = init_grouped_score_row(subsystem=key)
+        accumulate_grouped_score_row(grouped[key], entry)
+    return finalize_grouped_rows(grouped, sorted(grouped))
+
+
+def build_day_subsystem_rows(entries: list[Entry], include_unreleased: bool) -> list[dict[str, object]]:
+    grouped: dict[tuple[str, str], dict[str, object]] = {}
+    for entry in entries:
+        date_key = entry.iso_date
+        if date_key is None:
+            if not include_unreleased:
+                continue
+            date_key = "unreleased"
+        subsystem_key = entry.subsystem or "unscoped"
+        key = (date_key, subsystem_key)
+        if key not in grouped:
+            grouped[key] = init_grouped_score_row(date=date_key, subsystem=subsystem_key)
+        accumulate_grouped_score_row(grouped[key], entry)
+    return finalize_grouped_rows(grouped, sorted(grouped))
+
+
 def emit_rows(rows: list[dict[str, object]], fmt: str) -> None:
     if fmt == "json":
         json.dump(rows, sys.stdout, indent=2)
@@ -254,9 +335,9 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--group-by",
-        choices=("entry", "day"),
+        choices=("entry", "day", "subsystem", "day-subsystem"),
         default="day",
-        help="Emit one row per commit entry or one row per day.",
+        help="Emit one row per commit entry, day, subsystem, or day+subsystem.",
     )
     parser.add_argument(
         "--format",
@@ -283,6 +364,7 @@ def main() -> int:
 
     if args.verify:
         mismatches = [entry for entry in entries if entry.score_delta != 0]
+        unscoped = [entry for entry in entries if entry.missing_subsystem_prefix]
         if mismatches:
             for entry in mismatches:
                 commit = entry.commit or "unreleased"
@@ -290,12 +372,24 @@ def main() -> int:
                     f"score mismatch: {commit} {entry.title!r} header={entry.header_score} computed={entry.computed_score}",
                     file=sys.stderr,
                 )
+        if unscoped:
+            for entry in unscoped:
+                commit = entry.commit or "unreleased"
+                print(f"missing subsystem prefix: {commit} {entry.title!r}", file=sys.stderr)
+        if mismatches or unscoped:
             return 1
 
     if not args.include_unreleased:
         entries = [entry for entry in entries if not entry.is_unreleased]
 
-    rows = [entry.as_row() for entry in entries] if args.group_by == "entry" else build_daily_rows(entries, args.include_unreleased)
+    if args.group_by == "entry":
+        rows = [entry.as_row() for entry in entries]
+    elif args.group_by == "day":
+        rows = build_daily_rows(entries, args.include_unreleased)
+    elif args.group_by == "subsystem":
+        rows = build_subsystem_rows(entries, args.include_unreleased)
+    else:
+        rows = build_day_subsystem_rows(entries, args.include_unreleased)
     emit_rows(rows, args.format)
     return 0
 

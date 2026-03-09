@@ -15,6 +15,7 @@ If an entry has no measurements yet, it should say so explicitly.
 Entries should omit empty provenance sections rather than spelling out `None in this entry.`
 Each entry should describe not just what changed, but also the change's meaning, motivation, and intended purpose, especially when the code change introduces a new semantic mode, workflow, or policy.
 Each commit entry should also show an autonomy golf score in the header. Score each provenance bullet as `Human-driven = 5`, `Human-directed, AI-shaped = 4`, `AI-identified within brief, human-shaped = 3`, `AI-identified within brief, human-approved = 2`, `Self-initiated, human-approved = 1`, and `Fully autonomous = 0`. `Grounding` does not contribute to the score.
+Each commit header should use a Linux-kernel-style subsystem prefix: `subsystem: summary`. Use the dominant subsystem rather than a file inventory. Only use a combined prefix such as `train/checkpoints:` when the change is genuinely cross-cutting and one subsystem label would be misleading. The parser treats this prefix as required so autonomy golf can be tallied by subsystem as well as by day.
 Top-level provenance bullets are the scored units. If a point is directly derivative of a main bullet and stays at the same autonomy level, record it as a nested sub-bullet so it remains visible without adding score.
 When provenance is ambiguous, prefer `Human-directed, AI-shaped` over `AI-identified within brief, human-shaped`, prefer `AI-identified within brief, human-shaped` over `AI-identified within brief, human-approved`, prefer `AI-identified within brief, human-approved` over `Self-initiated, human-approved`, and prefer `Self-initiated, human-approved` over `Fully autonomous`.
 This changelog should bias toward under-claiming rather than over-claiming successful autonomy. When specific provenance attributions are corrected, prefer the more conservative tiering if there is real ambiguity. The long-term goal remains to push as much work as possible into the `Fully autonomous` category over time.
@@ -26,7 +27,45 @@ On this hardware, the default canonical matched benchmark window for optimizatio
 
 ## Unreleased
 
-### New commit — Add train and wall time budget modes — score `4`
+### New commit — changelog: Add subsystem-scoped commit headers — score `4`
+
+**Human-directed, AI-shaped (4)**
+
+- Requested Linux-kernel-style subsystem discipline for commit headers so autonomy golf can be tracked by subsystem rather than only by day or by whole commit history.
+  - Required `subsystem: summary` headers in changelog entries and future commit subjects, using one dominant subsystem where possible.
+  - Backfilled subsystem prefixes across the existing changelog history so current scoring data becomes analyzable immediately instead of only after future commits.
+  - Extended the changelog parser to verify that entries are scoped and to emit `subsystem` and `day-subsystem` rollups for plotting or reporting.
+
+**Grounding**
+
+- Files:
+  - `CHANGELOG.md`
+  - `program_mlx.md`
+  - `tools/changelog_scores.py`
+- Validation:
+  - `python3 -m py_compile tools/changelog_scores.py`
+  - `python3 tools/changelog_scores.py --group-by entry --format csv --include-unreleased --verify`
+  - `python3 tools/changelog_scores.py --group-by subsystem --format csv --include-unreleased`
+  - `python3 tools/changelog_scores.py --group-by day-subsystem --format csv --include-unreleased`
+- Measurements:
+  - This is workflow and scoring tooling work, not a runtime optimization, so there are no performance measurements.
+  - Current subsystem autonomy-golf rollup (`python3 tools/changelog_scores.py --group-by subsystem --format csv --include-unreleased`):
+
+    | Subsystem | commits | total score | score / commit |
+    | --- | ---: | ---: | ---: |
+    | `changelog` | `3` | `25` | `8.33` |
+    | `checkpoints` | `10` | `39` | `3.90` |
+    | `data` | `4` | `29` | `7.25` |
+    | `mlx` | `1` | `4` | `4.00` |
+    | `model` | `1` | `2` | `2.00` |
+    | `optim` | `1` | `3` | `3.00` |
+    | `train` | `6` | `28` | `4.67` |
+- Interpretation:
+  - The point of this change is discipline and analysis, not aesthetics. A commit header should now identify the subsystem up front, and the autonomy score tooling can aggregate by that same subsystem without manual relabeling later.
+
+## Committed History
+
+### March 9, 2026 — `518a595` — train: Add train and wall time budget modes — score `4`
 
 **Human-directed, AI-shaped (4)**
 
@@ -63,9 +102,7 @@ On this hardware, the default canonical matched benchmark window for optimizatio
   - The meaning of this change is not “make wall clock the new objective.” It is to make the objective explicit. `train` mode remains the core research default, while `wall` mode is now available when reduced elapsed blocking is itself the thing being measured.
   - The wall-mode resume check confirms that the new mode is a real runtime override, not just a fresh-run flag, while the distinct auto checkpoint slugs keep train-budget and wall-budget runs from clobbering each other.
 
-## Committed History
-
-### March 9, 2026 — `b68b750` — Benchmark checkpoint convergence and keep sync default — score `4`
+### March 9, 2026 — `b68b750` — checkpoints: Benchmark checkpoint convergence and keep sync default — score `4`
 
 **Human-directed, AI-shaped (4)**
 
@@ -113,7 +150,7 @@ On this hardware, the default canonical matched benchmark window for optimizatio
     - So the current evidence does not justify calling exact resume a standalone checkpoint-correctness bug. The tighter conclusion is that exact resume is metric-stable but not parameter-identical, which matches the underlying trainer's existing nondeterministic behavior on this machine.
     - This is the benchmark the checkpoint work was missing. Save cost and resume-ready latency tell you whether a checkpoint is cheap; they do not tell you whether it preserves the training trajectory.
 
-### March 9, 2026 — `8359b0c` — Add async exact checkpoint writes — score `4`
+### March 9, 2026 — `8359b0c` — checkpoints: Add async exact checkpoint writes — score `4`
 
 **Human-directed, AI-shaped (4)**
 
@@ -185,7 +222,7 @@ On this hardware, the default canonical matched benchmark window for optimizatio
     - The helper-process follow-up did not help. Running the writer in a forked background process with lower process priority reduced blocking a little, but increased total write share sharply and failed to improve throughput on either preset.
     - That points away from scheduler isolation as the main bottleneck. The likely limit is still the cost of capturing and moving the exact host snapshot through shared memory, so the simpler thread-based async writer remains the better current implementation.
 
-### March 9, 2026 — `fd5358b` — Make auto checkpoint cadence mode-aware — score `2`
+### March 9, 2026 — `fd5358b` — checkpoints: Make auto checkpoint cadence mode-aware — score `2`
 
 **AI-identified within brief, human-approved (2)**
 
@@ -232,7 +269,7 @@ On this hardware, the default canonical matched benchmark window for optimizatio
     - Exact remains at `2m` because its measured save cost still pushes `1m` above the current `0.1%` save-only overhead target on the calibrated M5 shapes.
     - `weights_only` now resolves to `1m` because its repeated-save overhead is materially lower, while exact still remains the default when exact optimizer/loader continuity matters.
 
-### March 9, 2026 — `1b6887f` — Add approximate weights-only checkpoint mode — score `4`
+### March 9, 2026 — `1b6887f` — checkpoints: Add approximate weights-only checkpoint mode — score `4`
 
 **Human-directed, AI-shaped (4)**
 
@@ -289,7 +326,7 @@ On this hardware, the default canonical matched benchmark window for optimizatio
     - The meaning and purpose of the mode are operational rather than numerical: it is a cheaper freshness checkpoint for long local runs when exact optimizer/loader continuity is not worth the extra write cost.
     - This makes `weights_only` a useful cheaper approximate snapshot mode, not a replacement for exact step-boundary resume when continuity matters.
 
-### March 9, 2026 — `39c9055` — Calibrate tradeoff analysis with resume-ready penalty — score `2`
+### March 9, 2026 — `39c9055` — checkpoints: Calibrate tradeoff analysis with resume-ready penalty — score `2`
 
 **AI-identified within brief, human-approved (2)**
 
@@ -322,7 +359,7 @@ On this hardware, the default canonical matched benchmark window for optimizatio
     - At realistic interruption rates, the measured resume penalty is not large enough to overturn the current human-factors `2m` recommendation, but it does materially raise the modeled waste percentage for frequent-resume scenarios.
     - This keeps the tradeoff tooling aligned with the stronger resume-ready benchmark without silently changing the runtime auto-checkpoint behavior.
 
-### March 9, 2026 — `07a0707` — Benchmark resume-ready checkpoint latency — score `2`
+### March 9, 2026 — `07a0707` — checkpoints: Benchmark resume-ready checkpoint latency — score `2`
 
 **AI-identified within brief, human-approved (2)**
 
@@ -353,7 +390,7 @@ On this hardware, the default canonical matched benchmark window for optimizatio
     - `m5-xlarge` is centered closer to about `0.68s`, and one of the three trials again had a much slower first resumed step. That makes the median much more trustworthy than the mean for policy work at this shape.
     - This is the right benchmark to use for future checkpoint-mode comparisons, because it measures "time until the resumed run is productive again" directly instead of inferring from lazy file-load timings.
 
-### March 9, 2026 — `26e4c64` — Auto-detect benchmark warmup cutoff — score `4`
+### March 9, 2026 — `26e4c64` — train: Auto-detect benchmark warmup cutoff — score `4`
 
 **Human-directed, AI-shaped (4)**
 
@@ -390,7 +427,7 @@ On this hardware, the default canonical matched benchmark window for optimizatio
     - The detector is responsive to real startup shape, so it should not be expected to pick the same cutoff across materially different warmup profiles.
     - On the final `m5-fast` rerun, the auto and fixed modes still landed in the same steady-state performance band, which is the main practical requirement: the new default is more ergonomic without obscuring the benchmark semantics.
 
-### March 9, 2026 — `9330302` — Profile checkpoint save/load path — score `2`
+### March 9, 2026 — `9330302` — checkpoints: Profile checkpoint save/load path — score `2`
 
 **AI-identified within brief, human-approved (2)**
 
@@ -419,7 +456,7 @@ On this hardware, the default canonical matched benchmark window for optimizatio
     - That means the next meaningful checkpoint optimization is not Python-side cleanup inside the current save path; it would need to change semantics or scheduling, such as lighter resume tiers or asynchronous/background save behavior.
     - The current restore-side numbers from this tool are exploratory only. `mx.load` appears lazy enough that raw file-load timings understate "resume ready" cost, so restore optimization should not be driven from those numbers yet without a stronger resume-readiness benchmark.
 
-### March 9, 2026 — `9a79473` — Optimize live-packed fallback buffer — score `2`
+### March 9, 2026 — `9a79473` — data: Optimize live-packed fallback buffer — score `2`
 
 **AI-identified within brief, human-approved (2)**
 
@@ -453,7 +490,7 @@ On this hardware, the default canonical matched benchmark window for optimizatio
     - The end-to-end win is real but modest because these steps are still compute-dominated: about `+3.1% tok/s` on `m5-balanced` and `+0.5% tok/s` on `m5-large`.
     - This is worth keeping as a fallback-path cleanup, but the grounded effect is much smaller than the raw loader-time drop might suggest.
 
-### March 9, 2026 — `8c6ed4f` — Add warmup-aware MLX benchmark tooling — score `4`
+### March 9, 2026 — `8c6ed4f` — train: Add warmup-aware MLX benchmark tooling — score `4`
 
 **Human-directed, AI-shaped (4)**
 
@@ -514,7 +551,7 @@ On this hardware, the default canonical matched benchmark window for optimizatio
     - That implies a rough xlarge crossover at about `56` steady-state steps, or about `29s`, before the prepacked path amortizes its slower warmup and comes out ahead overall.
     - Under the repo's current `60s` benchmark window, the xlarge prepacked path should now be treated as a small net win, not a regression.
 
-### March 9, 2026 — `d7f4d23` — Make prepacked caches default for shipped presets — score `2`
+### March 9, 2026 — `d7f4d23` — data: Make prepacked caches default for shipped presets — score `2`
 
 **AI-identified within brief, human-approved (2)**
 
@@ -575,7 +612,7 @@ On this hardware, the default canonical matched benchmark window for optimizatio
     - `m5-large` shows a real fast-path win from prepacking: `224` vs `213` steps in the same `60s`, `0.918M` vs `0.872M` session tokens (`+5.3%`), and `loader_percent` dropped from `0.51` to `0.13`.
     - `m5-xlarge` showed lower `loader_percent` but a small single-run loss on total tokens; later dedicated profiling suggests that negative result was likely run-level variance rather than a structural steady-state fast-path regression.
 
-### March 9, 2026 — `b2b08df` — Add robust MLX utilization instrumentation — score `4`
+### March 9, 2026 — `b2b08df` — train: Add robust MLX utilization instrumentation — score `4`
 
 **Human-directed, AI-shaped (4)**
 
@@ -636,7 +673,7 @@ On this hardware, the default canonical matched benchmark window for optimizatio
   - across the shipped M5 presets, utilization stays near saturation while `train_tflops` rises with model size and the larger presets still reveal the token-cache/live-pack fallback in their train-loader path
   - no performance-improvement claim is attached to this change; the grounding here is instrumentation correctness and observability
 
-### March 9, 2026 — `62f2f9c` — Auto-enable checkpoint cadence for longer runs — score `4`
+### March 9, 2026 — `62f2f9c` — checkpoints: Auto-enable checkpoint cadence for longer runs — score `4`
 
 **Human-directed, AI-shaped (4)**
 
@@ -666,7 +703,7 @@ On this hardware, the default canonical matched benchmark window for optimizatio
   - an explicit `--checkpoint-interval` without `--checkpoint-path` now auto-selects the checkpoint directory and reached a real checkpoint-save attempt during the smoke probe.
   - no performance claim is attached to this change; the grounding here is behavioral rather than benchmark-driven.
 
-### March 9, 2026 — `1c67475` — Add checkpoint interval tradeoff tooling — score `4`
+### March 9, 2026 — `1c67475` — checkpoints: Add checkpoint interval tradeoff tooling — score `4`
 
 **Human-directed, AI-shaped (4)**
 
@@ -727,7 +764,7 @@ On this hardware, the default canonical matched benchmark window for optimizatio
   - The current `2s` benchmark interval is intentionally much more aggressive than the modeled optimum for realistic interruption rates; it remains useful for stress-testing checkpoint overhead, not as the recommended steady-state policy.
   - The tool is structured for multiple robustness profiles, but today only the exact step-boundary full-state resume profile is grounded well enough to include by default.
 
-### March 9, 2026 — `a0d765d` — Add MLX checkpoints and benchmark grounding — score `11`
+### March 9, 2026 — `a0d765d` — checkpoints: Add MLX checkpoints and benchmark grounding — score `11`
 
 **Human-driven (5)**
 
@@ -785,7 +822,7 @@ On this hardware, the default canonical matched benchmark window for optimizatio
   - `m5-fast` and `m5-balanced` used the train-side prepacked cache path during the 60-second reruns
   - `m5-large` and `m5-xlarge` used the token-cache plus live-packing path during those reruns, so their throughput figures are conservative relative to a fully prepacked `1024/2048` cache setup
 
-### March 9, 2026 — `f1d14e8` — Lazy-grow model caches — score `2`
+### March 9, 2026 — `f1d14e8` — model: Lazy-grow model caches — score `2`
 
 **AI-identified within brief, human-approved (2)**
 
@@ -816,7 +853,7 @@ On this hardware, the default canonical matched benchmark window for optimizatio
   - the smoke path still trains and evaluates end-to-end
   - the `m5-xlarge` path completed with the lazily prewarmed `2048`-token cache setup instead of relying on the old eager `10x` RoPE allocation strategy
 
-### March 9, 2026 — `2be14fe` — Add changelog score parser — score `4`
+### March 9, 2026 — `2be14fe` — changelog: Add changelog score parser — score `4`
 
 **Human-directed, AI-shaped (4)**
 
@@ -840,7 +877,7 @@ On this hardware, the default canonical matched benchmark window for optimizatio
   - `9a4ef79`: `39 -> 40`
   - `e06f85c`: `35 -> 36`
 
-### March 9, 2026 — `2bcdc0c` — Add optional prepacked row caches — score `6`
+### March 9, 2026 — `2bcdc0c` — data: Add optional prepacked row caches — score `6`
 
 **Human-directed, AI-shaped (4)**
 
@@ -873,7 +910,7 @@ On this hardware, the default canonical matched benchmark window for optimizatio
   - validation metrics: effectively unchanged within short-run noise
   - confirmed runtime behavior: train and val loaders both switched to `prepacked cache` when the matching cache existed
 
-### March 9, 2026 — `137ba69` — Remove optimizer tree churn — score `3`
+### March 9, 2026 — `137ba69` — optim: Remove optimizer tree churn — score `3`
 
 **AI-identified within brief, human-shaped (3)**
 
@@ -896,7 +933,7 @@ On this hardware, the default canonical matched benchmark window for optimizatio
   - peak memory: `1946.6 MB -> 1946.6 MB` (flat)
   - steady-state per-step throughput: roughly flat within run-to-run noise
 
-### March 9, 2026 — `9a4ef79` — Add changelog and provenance policy — score `17`
+### March 9, 2026 — `9a4ef79` — changelog: Add changelog and provenance policy — score `17`
 
 **Human-driven (5)**
 
@@ -923,7 +960,7 @@ On this hardware, the default canonical matched benchmark window for optimizatio
 - Validation:
   - docs/process only; no code-path tests were needed
 
-### March 9, 2026 — `077a187` — Stream gradient accumulation in MLX trainer — score `3`
+### March 9, 2026 — `077a187` — train: Stream gradient accumulation in MLX trainer — score `3`
 
 **AI-identified within brief, human-shaped (3)**
 
@@ -946,7 +983,7 @@ On this hardware, the default canonical matched benchmark window for optimizatio
   - steps completed in budget: `18 -> 19`
   - canonical `val_bpb`: `2.373981 -> 2.368727`
 
-### March 9, 2026 — `e06f85c` — Add token caching and calibrate M5 presets — score `19`
+### March 9, 2026 — `e06f85c` — data: Add token caching and calibrate M5 presets — score `19`
 
 **Human-driven (5)**
 
@@ -997,7 +1034,7 @@ On this hardware, the default canonical matched benchmark window for optimizatio
   - literal `upstream` preset ran at roughly `1.1k-1.9k tok/s`
   - the same `50.3M` / `2048` architecture with M5-sized batch (`m5-xlarge`) ran at roughly `7.4k-8.0k tok/s`
 
-### March 9, 2026 — `eee26f5` — Separate canonical eval and demote local tooling — score `9`
+### March 9, 2026 — `eee26f5` — train: Separate canonical eval and demote local tooling — score `9`
 
 **Human-directed, AI-shaped (4)**
 
@@ -1032,7 +1069,7 @@ On this hardware, the default canonical matched benchmark window for optimizatio
     - proxy `val_bpb`: `2.473907`
   - the sweep runner kept or discarded runs based on canonical `val_bpb`, not the proxy metric
 
-### March 9, 2026 — `c3b3d8d` — Add initial MLX port for Apple Silicon — score `4`
+### March 9, 2026 — `c3b3d8d` — mlx: Add initial MLX port for Apple Silicon — score `4`
 
 **Human-directed, AI-shaped (4)**
 
