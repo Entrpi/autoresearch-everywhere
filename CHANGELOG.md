@@ -24,7 +24,43 @@ On this hardware, the default canonical matched benchmark window for optimizatio
 
 ## Unreleased
 
-### New commit — Add warmup-aware benchmark tooling for xlarge prepacked analysis — score `4`
+### New commit — Optimize live-packing fallback for non-prepacked runs — score `2`
+
+**AI-identified within brief, human-approved (2)**
+
+- Surfaced the live-packing fallback as the next optimization target after the shipped preset fast path and warmup-aware benchmark tooling were in place.
+  - Replaced the linear best-fit scan with a length-indexed FIFO packing buffer for the live-packed training path.
+  - Reused the same packing structure in prepacked-cache construction so the packing behavior stays consistent across both paths.
+
+**Grounding**
+
+- Files:
+  - `autoresearch_mlx/data.py`
+  - `CHANGELOG.md`
+- Validation:
+  - `python3 -m py_compile autoresearch_mlx/data.py train_mlx.py tools/profile_loader_path.py`
+  - `./.venv/bin/python tools/profile_loader_path.py --preset m5-balanced --steps 80 --warmup-steps 5 --no-prepacked-cache`
+  - `./.venv/bin/python /tmp/autoresearch_livepack_before/tools/profile_loader_path.py --preset m5-balanced --steps 80 --warmup-steps 5 --no-prepacked-cache`
+  - `./.venv/bin/python tools/profile_loader_path.py --preset m5-large --steps 80 --warmup-steps 5 --no-prepacked-cache`
+  - `./.venv/bin/python /tmp/autoresearch_livepack_before/tools/profile_loader_path.py --preset m5-large --steps 80 --warmup-steps 5 --no-prepacked-cache`
+- Measurements:
+  - Matched fallback-only before/after profile (`80` measured steps after `5` warmup steps):
+
+    | Preset | version | `tok_per_sec` | total mean (ms) | loader mean (ms) | grad mean (ms) | optimizer mean (ms) |
+    | --- | --- | ---: | ---: | ---: | ---: | ---: |
+    | `m5-balanced` | before | `33306.25` | `61.49` | `0.963` | `45.85` | `13.47` |
+    | `m5-balanced` | after | `34334.42` | `59.65` | `0.174` | `45.14` | `13.28` |
+    | `m5-large` | before | `14456.33` | `283.34` | `1.328` | `222.57` | `52.66` |
+    | `m5-large` | after | `14522.86` | `282.04` | `0.245` | `222.67` | `52.40` |
+
+  - Interpretation:
+    - The new packing buffer removes most of the Python-side fallback cost on both tested presets: loader-call time dropped by about `82%` on `m5-balanced` and `m5-large`.
+    - The end-to-end win is real but modest because these steps are still compute-dominated: about `+3.1% tok/s` on `m5-balanced` and `+0.5% tok/s` on `m5-large`.
+    - This is worth keeping as a fallback-path cleanup, but the grounded effect is much smaller than the raw loader-time drop might suggest.
+
+## Committed History
+
+### March 9, 2026 — `8c6ed4f` — Add warmup-aware MLX benchmark tooling — score `4`
 
 **Human-directed, AI-shaped (4)**
 
@@ -84,8 +120,6 @@ On this hardware, the default canonical matched benchmark window for optimizatio
     - After warmup, prepacked runs about `1.6%` faster in steady-state (`7956 tok/s` average vs `7834 tok/s` average).
     - That implies a rough xlarge crossover at about `56` steady-state steps, or about `29s`, before the prepacked path amortizes its slower warmup and comes out ahead overall.
     - Under the repo's current `60s` benchmark window, the xlarge prepacked path should now be treated as a small net win, not a regression.
-
-## Committed History
 
 ### March 9, 2026 — `d7f4d23` — Make prepacked caches default for shipped presets — score `2`
 

@@ -1,8 +1,10 @@
+import bisect
 import hashlib
 import json
 import math
 import pickle
 import time
+from collections import deque
 from multiprocessing import Pool
 from pathlib import Path
 
@@ -422,7 +424,7 @@ def _build_single_prepacked_cache(split: str, seq_len: int, tokenizer: Tokenizer
     temp_meta = paths["meta"].with_name(paths["meta"].name + ".tmp")
     row_capacity = seq_len + 1
     doc_iter = iter(_iter_cached_documents_once(parquet_paths))
-    doc_buffer: list[np.ndarray] = []
+    doc_buffer = _PackingBuffer()
     source_exhausted = False
     row_count = 0
 
@@ -430,7 +432,7 @@ def _build_single_prepacked_cache(split: str, seq_len: int, tokenizer: Tokenizer
         nonlocal source_exhausted
         while len(doc_buffer) < buffer_size and not source_exhausted:
             try:
-                doc_buffer.append(next(doc_iter))
+                doc_buffer.add(next(doc_iter))
             except StopIteration:
                 source_exhausted = True
 
@@ -449,21 +451,12 @@ def _build_single_prepacked_cache(split: str, seq_len: int, tokenizer: Tokenizer
                     break
 
                 remaining = row_capacity - pos
-                best_idx = -1
-                best_len = 0
-                for idx, doc in enumerate(doc_buffer):
-                    doc_len = len(doc)
-                    if doc_len <= remaining and doc_len > best_len:
-                        best_idx = idx
-                        best_len = doc_len
-
-                if best_idx >= 0:
-                    doc = doc_buffer.pop(best_idx)
+                doc = doc_buffer.pop_best_fit(remaining)
+                if doc is not None:
                     row[pos:pos + len(doc)] = doc
                     pos += len(doc)
                 else:
-                    shortest_idx = min(range(len(doc_buffer)), key=lambda idx: len(doc_buffer[idx]))
-                    doc = doc_buffer.pop(shortest_idx)
+                    doc = doc_buffer.pop_shortest()
                     row[pos:pos + remaining] = doc[:remaining]
                     pos += remaining
 
@@ -707,7 +700,7 @@ class PackedDataLoader:
             source = "token cache" if self.using_token_cache else "parquet + tokenizer fallback"
         print(f"Data loader ({split}): using {source}.")
         self.batch_source = _make_document_batch_source(split, tokenizer, use_cache=self.using_token_cache)
-        self.doc_buffer: list[np.ndarray | list[int]] = []
+        self.doc_buffer = _PackingBuffer()
         self.epoch = 1
         self.row_buffer = np.empty((batch_size, self.row_capacity), dtype=np.int32)
         self.inputs = np.empty((batch_size, seq_len), dtype=np.int32)
@@ -721,7 +714,7 @@ class PackedDataLoader:
         self.doc_buffer.extend(token_batch)
 
     def checkpoint_state(self) -> tuple[dict, dict[str, np.ndarray]]:
-        doc_buffer_tokens, doc_buffer_offsets = _pack_documents(self.doc_buffer)
+        doc_buffer_tokens, doc_buffer_offsets = _pack_documents(self.doc_buffer.documents_for_checkpoint())
         return (
             {
                 "loader_type": "packed",
@@ -742,7 +735,7 @@ class PackedDataLoader:
 
     def load_checkpoint_state(self, metadata: dict, arrays: dict[str, np.ndarray]) -> None:
         self.epoch = int(metadata["epoch"])
-        self.doc_buffer = _unpack_documents(arrays["doc_buffer_tokens"], arrays["doc_buffer_offsets"])
+        self.doc_buffer.load_documents(_unpack_documents(arrays["doc_buffer_tokens"], arrays["doc_buffer_offsets"]))
         self.batch_source.load_state_dict(metadata["batch_source"])
 
     def __next__(self):
@@ -753,22 +746,13 @@ class PackedDataLoader:
                     self.refill_buffer()
 
                 remaining = self.row_capacity - pos
-                best_idx = -1
-                best_len = 0
-                for idx, doc in enumerate(self.doc_buffer):
-                    doc_len = len(doc)
-                    if doc_len <= remaining and doc_len > best_len:
-                        best_idx = idx
-                        best_len = doc_len
-
-                if best_idx >= 0:
-                    doc = self.doc_buffer.pop(best_idx)
-                    self.row_buffer[row_idx, pos:pos + len(doc)] = np.asarray(doc, dtype=np.int32)
+                doc = self.doc_buffer.pop_best_fit(remaining)
+                if doc is not None:
+                    self.row_buffer[row_idx, pos:pos + len(doc)] = doc
                     pos += len(doc)
                 else:
-                    shortest_idx = min(range(len(self.doc_buffer)), key=lambda idx: len(self.doc_buffer[idx]))
-                    doc = self.doc_buffer.pop(shortest_idx)
-                    self.row_buffer[row_idx, pos:pos + remaining] = np.asarray(doc[:remaining], dtype=np.int32)
+                    doc = self.doc_buffer.pop_shortest()
+                    self.row_buffer[row_idx, pos:pos + remaining] = doc[:remaining]
                     pos += remaining
 
         self.inputs[...] = self.row_buffer[:, :-1]
@@ -853,6 +837,65 @@ def _unpack_documents(tokens: np.ndarray, offsets: np.ndarray) -> list[np.ndarra
         np.array(tokens[int(offsets[idx]):int(offsets[idx + 1])], dtype=np.uint16, copy=True)
         for idx in range(len(offsets) - 1)
     ]
+
+
+class _PackingBuffer:
+    def __init__(self):
+        # Bucket by document length so best-fit and shortest-pop stay sublinear
+        # while preserving FIFO tie-breaking within a given length.
+        self._buckets: dict[int, deque[np.ndarray | list[int]]] = {}
+        self._lengths: list[int] = []
+        self._size = 0
+
+    def __len__(self) -> int:
+        return self._size
+
+    def add(self, doc: np.ndarray | list[int]) -> None:
+        doc_len = len(doc)
+        bucket = self._buckets.get(doc_len)
+        if bucket is None:
+            bucket = deque()
+            self._buckets[doc_len] = bucket
+            bisect.insort(self._lengths, doc_len)
+        bucket.append(doc)
+        self._size += 1
+
+    def extend(self, docs) -> None:
+        for doc in docs:
+            self.add(doc)
+
+    def load_documents(self, docs: list[np.ndarray | list[int]]) -> None:
+        self._buckets.clear()
+        self._lengths.clear()
+        self._size = 0
+        self.extend(docs)
+
+    def documents_for_checkpoint(self) -> list[np.ndarray | list[int]]:
+        documents: list[np.ndarray | list[int]] = []
+        for doc_len in self._lengths:
+            documents.extend(self._buckets[doc_len])
+        return documents
+
+    def pop_best_fit(self, max_len: int):
+        idx = bisect.bisect_right(self._lengths, max_len) - 1
+        if idx < 0:
+            return None
+        return self._pop_length(self._lengths[idx])
+
+    def pop_shortest(self):
+        if not self._lengths:
+            raise IndexError("Packing buffer is empty.")
+        return self._pop_length(self._lengths[0])
+
+    def _pop_length(self, doc_len: int):
+        bucket = self._buckets[doc_len]
+        doc = bucket.popleft()
+        self._size -= 1
+        if not bucket:
+            del self._buckets[doc_len]
+            idx = bisect.bisect_left(self._lengths, doc_len)
+            del self._lengths[idx]
+        return doc
 
 
 def serialize_loader_state(loader) -> tuple[dict, dict[str, np.ndarray]]:
