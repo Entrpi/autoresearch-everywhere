@@ -26,7 +26,46 @@ On this hardware, the default canonical matched benchmark window for optimizatio
 
 ## Unreleased
 
-### New commit — Benchmark checkpoint convergence and keep sync default — score `4`
+### New commit — Add train and wall time budget modes — score `4`
+
+**Human-directed, AI-shaped (4)**
+
+- Requested the budget split that had been discussed earlier: keep the original training-time objective for core research changes, but add a separate wall-clock mode for checkpointing and orchestration work.
+  - Added explicit `train` vs `wall` budget accounting to `train_mlx.py` instead of overloading one stop condition to serve both goals.
+  - Kept `train` as the default so the main autoresearch loop still optimizes on actual training time rather than incidental wall-clock blockage.
+  - Added explicit reporting of which budget mode was active and how much budget-counted time elapsed in the invocation.
+  - Included the budget mode in automatic checkpoint directory slugs so train-budget and wall-budget runs do not collide on the same auto checkpoint path.
+
+**Grounding**
+
+- Files:
+  - `train_mlx.py`
+  - `autoresearch_mlx/checkpoint_policy.py`
+  - `README.md`
+  - `program_mlx.md`
+  - `docs/mlx-port-architecture.md`
+  - `CHANGELOG.md`
+- Validation:
+  - `python3 -m py_compile train_mlx.py autoresearch_mlx/checkpoint_policy.py`
+  - `./.venv/bin/python - <<'PY' ...` to verify that automatic checkpoint paths now differ between `time_budget_mode=train` and `time_budget_mode=wall`
+  - `./.venv/bin/python train_mlx.py --smoke`
+  - `./.venv/bin/python train_mlx.py --smoke --time-budget-mode wall --benchmark-skip-eval --no-checkpoint`
+  - `./.venv/bin/python train_mlx.py --resume-from /tmp/autoresearch_budget_mode_resume --time-budget 1.5 --time-budget-mode wall --no-checkpoint`
+- Measurements:
+  - Budget-mode smoke summary:
+
+    | Run shape | `time_budget_mode` | `training_seconds` | `budget_elapsed_seconds` | `total_seconds` | `session_steps` |
+    | --- | --- | ---: | ---: | ---: | ---: |
+    | smoke default | `train` | `1.0` | `1.0` | `1.1` | `92` |
+    | smoke no-checkpoint benchmark | `wall` | `1.0` | `1.0` | `1.0` | `91` |
+    | resume with wall override | `wall` | `1.5` | `1.5` | `1.5` | `159` |
+- Interpretation:
+  - The meaning of this change is not “make wall clock the new objective.” It is to make the objective explicit. `train` mode remains the core research default, while `wall` mode is now available when reduced elapsed blocking is itself the thing being measured.
+  - The wall-mode resume check confirms that the new mode is a real runtime override, not just a fresh-run flag, while the distinct auto checkpoint slugs keep train-budget and wall-budget runs from clobbering each other.
+
+## Committed History
+
+### March 9, 2026 — `b68b750` — Benchmark checkpoint convergence and keep sync default — score `4`
 
 **Human-directed, AI-shaped (4)**
 
@@ -73,8 +112,6 @@ On this hardware, the default canonical matched benchmark window for optimizatio
     - Uninterrupted same-seed runs are not bitwise repeatable on this MLX stack either. On both tested presets, exact midpoint resume stays within the same broad parameter-drift envelope as uninterrupted-repeat baselines while keeping canonical `val_bpb` very close.
     - So the current evidence does not justify calling exact resume a standalone checkpoint-correctness bug. The tighter conclusion is that exact resume is metric-stable but not parameter-identical, which matches the underlying trainer's existing nondeterministic behavior on this machine.
     - This is the benchmark the checkpoint work was missing. Save cost and resume-ready latency tell you whether a checkpoint is cheap; they do not tell you whether it preserves the training trajectory.
-
-## Committed History
 
 ### March 9, 2026 — `8359b0c` — Add async exact checkpoint writes — score `4`
 

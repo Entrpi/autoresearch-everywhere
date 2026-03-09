@@ -22,7 +22,7 @@ To set up a new MLX experiment, work with the user to:
 
 ## Experimentation
 
-Each experiment runs on Apple Silicon using MLX. The training script runs for a fixed 5-minute wall-clock training budget. Launch it with:
+Each experiment runs on Apple Silicon using MLX. The default loop uses a fixed 5-minute training-time budget, not a raw wall-clock budget. Launch it with:
 
 ```bash
 uv run train_mlx.py
@@ -39,6 +39,7 @@ uv run train_mlx.py --preset upstream
 
 Use `uv run train_mlx.py --no-prepacked-cache` when you explicitly want to benchmark or debug the live packing path instead of the optional prepacked row caches.
 Use `uv run train_mlx.py --benchmark-skip-eval` when you want a warmup-aware comparison that separates startup cost from steady-state throughput. By default, the trainer auto-detects the warmup cutoff statistically from step-time stabilization and reports `warmup_done_step`. Use `--benchmark-warmup-steps <N>` only when you need a fixed override for an ablation or apples-to-apples replay.
+Use `--time-budget-mode train` for core training-path changes and `--time-budget-mode wall` for checkpointing or orchestration changes where elapsed wall time is the metric you actually care about. `train` remains the default and preserves the original autoresearch intent.
 
 `uv run prepare_mlx.py` now builds the shipped prepacked row caches by default so `m5-fast`, `m5-balanced`, `m5-large`, and `m5-xlarge` all have a prepared fast path. Use `uv run prepare_mlx.py --skip-prepacked-cache` only when you intentionally want the live packing fallback.
 
@@ -67,6 +68,8 @@ val_bpb:          <float>
 proxy_val_bpb:    <float>
 training_seconds: <float>
 total_seconds:    <float>
+time_budget_mode: <train|wall>
+budget_elapsed_seconds: <float>
 peak_vram_mb:     <float>
 mfu_percent:      <float>
 train_tflops:     <float>
@@ -106,7 +109,7 @@ canonical_tokens: <int>
 canonical_batch:  <int>
 ```
 
-`training_seconds`, `total_seconds`, `checkpoint_percent`, `eval_percent`, and `checkpoint_count` are current-invocation metrics, so a resumed run no longer mixes cumulative training time with per-invocation wall-clock time. `mfu_percent` is retained as a backward-compatible alias for measured step compute-share utilization on the MLX path and remains resume-aware because its step telemetry is restored from checkpoints. The more informative new fields are `train_tflops`, the explicit loader/grad/optimizer/checkpoint/eval percentages, the separate `session_*` / `cumulative_*` counters, and the `benchmark_*` / `steady_state_*` fields when you invoke the warmup-aware benchmark mode. `benchmark_warmup_mode` tells you whether the warmup cutoff came from the default statistical detector or an explicit override, and `warmup_done_step` records the first global step treated as steady-state.
+`training_seconds`, `total_seconds`, `checkpoint_percent`, `eval_percent`, and `checkpoint_count` are current-invocation metrics, so a resumed run no longer mixes cumulative training time with per-invocation wall-clock time. `time_budget_mode` tells you which budget criterion controlled the stop condition, and `budget_elapsed_seconds` reports the value that was actually compared against `time_budget`: cumulative training time in `train` mode, or elapsed training-loop wall time in `wall` mode. `mfu_percent` is retained as a backward-compatible alias for measured step compute-share utilization on the MLX path and remains resume-aware because its step telemetry is restored from checkpoints. The more informative new fields are `train_tflops`, the explicit loader/grad/optimizer/checkpoint/eval percentages, the separate `session_*` / `cumulative_*` counters, and the `benchmark_*` / `steady_state_*` fields when you invoke the warmup-aware benchmark mode. `benchmark_warmup_mode` tells you whether the warmup cutoff came from the default statistical detector or an explicit override, and `warmup_done_step` records the first global step treated as steady-state.
 
 ## Logging results
 

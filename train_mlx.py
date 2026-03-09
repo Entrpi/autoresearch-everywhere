@@ -63,6 +63,7 @@ class RunPreset:
 class RunConfig:
     preset: str
     time_budget: float
+    time_budget_mode: str
     seq_len: int
     eval_tokens: int
     canonical_eval_seq_len: int
@@ -139,6 +140,11 @@ class StepTelemetry:
             return cls()
         valid = {field: payload.get(field, 0) for field in cls.__dataclass_fields__}
         return cls(**valid)
+
+
+TIME_BUDGET_MODE_TRAIN = "train"
+TIME_BUDGET_MODE_WALL = "wall"
+TIME_BUDGET_MODES = (TIME_BUDGET_MODE_TRAIN, TIME_BUDGET_MODE_WALL)
 
 
 def verify_mlx_env() -> None:
@@ -429,6 +435,7 @@ def resolve_run_config(args: argparse.Namespace) -> RunConfig:
     config = RunConfig(
         preset=preset_name,
         time_budget=TIME_BUDGET,
+        time_budget_mode=TIME_BUDGET_MODE_TRAIN if args.time_budget_mode is None else args.time_budget_mode,
         seq_len=preset.seq_len,
         eval_tokens=preset.eval_tokens,
         canonical_eval_seq_len=preset.canonical_eval_seq_len,
@@ -521,7 +528,7 @@ def resolve_resume_config(args: argparse.Namespace) -> RunConfig:
     if disallowed:
         raise ValueError(
             "--resume-from restores the saved run configuration. Only "
-            "--time-budget, --checkpoint-path, --checkpoint-interval, and --no-checkpoint may be overridden. "
+            "--time-budget, --time-budget-mode, --checkpoint-path, --checkpoint-interval, and --no-checkpoint may be overridden. "
             f"Got overrides for: {', '.join(disallowed)}"
         )
 
@@ -530,11 +537,17 @@ def resolve_resume_config(args: argparse.Namespace) -> RunConfig:
     run_config.setdefault("benchmark_warmup_steps", None)
     run_config.setdefault("benchmark_skip_eval", False)
     run_config.setdefault("no_checkpoint", False)
+    run_config.setdefault("time_budget_mode", TIME_BUDGET_MODE_TRAIN)
     run_config.setdefault("checkpoint_mode", CHECKPOINT_MODE_EXACT)
     run_config.setdefault("checkpoint_save_mode", CHECKPOINT_SAVE_MODE_SYNC)
     run_config.setdefault("checkpoint_path", None)
     run_config.setdefault("checkpoint_interval", None)
     run_config["time_budget"] = args.time_budget if args.time_budget is not None else run_config["time_budget"]
+    run_config["time_budget_mode"] = (
+        args.time_budget_mode
+        if args.time_budget_mode is not None
+        else run_config["time_budget_mode"]
+    )
     run_config["no_checkpoint"] = args.no_checkpoint
     run_config["checkpoint_mode"] = (
         args.checkpoint_mode
@@ -572,6 +585,11 @@ def parse_args() -> RunConfig:
         help="Named runtime preset. Defaults to the M5-friendly balanced preset.",
     )
     parser.add_argument("--time-budget", type=float, help="Training budget in seconds.")
+    parser.add_argument(
+        "--time-budget-mode",
+        choices=TIME_BUDGET_MODES,
+        help="Budget accounting mode. 'train' stops on accumulated optimizer-step time; 'wall' stops on elapsed training-loop wall time.",
+    )
     parser.add_argument("--seq-len", type=int, help="Sequence length for training and proxy evaluation.")
     parser.add_argument("--eval-tokens", type=int, help="Proxy validation token budget.")
     parser.add_argument(
@@ -669,6 +687,7 @@ def resolve_checkpoint_settings(args: RunConfig, num_params: int) -> tuple[RunCo
         depth=args.depth,
         total_batch_size=args.total_batch_size,
         window_pattern=args.window_pattern,
+        time_budget_mode=args.time_budget_mode,
         checkpoint_mode=args.checkpoint_mode,
         checkpoint_save_mode=args.checkpoint_save_mode,
     )
@@ -696,7 +715,8 @@ def resolve_checkpoint_settings(args: RunConfig, num_params: int) -> tuple[RunCo
         f"auto-enabled for time_budget>{AUTO_CHECKPOINT_MIN_TIME_BUDGET_SEC:.0f}s using "
         f"{decision.calibration.label}; selected {decision.recommendation.interval_label} "
         f"at {decision.recommendation.save_only_overhead_fraction * 100.0:.4f}% save-only overhead "
-        f"with {path_source}; checkpoint_mode={args.checkpoint_mode}; checkpoint_save_mode={args.checkpoint_save_mode}; measured resume-ready penalty "
+        f"with {path_source}; time_budget_mode={args.time_budget_mode}; checkpoint_mode={args.checkpoint_mode}; "
+        f"checkpoint_save_mode={args.checkpoint_save_mode}; measured resume-ready penalty "
         f"{decision.calibration.resume_ready_penalty_sec:.3f}s"
     )
     return resolved, reason
@@ -741,7 +761,8 @@ def main() -> None:
     print(f"Run preset: {args.preset} ({PRESETS[args.preset].description})")
     print(
         "Run config: "
-        f"time_budget={args.time_budget}s, seq_len={args.seq_len}, eval_tokens={args.eval_tokens}, "
+        f"time_budget={args.time_budget}s, time_budget_mode={args.time_budget_mode}, "
+        f"seq_len={args.seq_len}, eval_tokens={args.eval_tokens}, "
         f"canonical_eval_seq_len={args.canonical_eval_seq_len}, "
         f"canonical_eval_tokens={args.canonical_eval_tokens}, "
         f"canonical_eval_batch_size={args.canonical_eval_batch_size}, "
@@ -807,7 +828,7 @@ def main() -> None:
     grad_step = make_grad_step_fn(model)
     apply_grads = make_apply_grads_fn(model, optimizer)
 
-    print(f"Time budget: {args.time_budget}s")
+    print(f"Time budget: {args.time_budget}s ({args.time_budget_mode})")
     print(f"Gradient accumulation steps: {grad_accum_steps}")
     if args.checkpoint_interval is not None and args.checkpoint_path is None:
         raise ValueError("--checkpoint-interval requires --checkpoint-path")
@@ -830,11 +851,17 @@ def main() -> None:
     checkpoint_run_config = asdict(replace(args, resume_from=None))
     session_step_seconds: list[float] = []
     session_post_step_wall_seconds: list[float] = []
+    t_budget_start = time.perf_counter()
     async_checkpoint_writer = (
         AsyncCheckpointWriter()
         if args.checkpoint_path is not None and args.checkpoint_save_mode == CHECKPOINT_SAVE_MODE_ASYNC
         else None
     )
+
+    def budget_elapsed_seconds() -> float:
+        if args.time_budget_mode == TIME_BUDGET_MODE_TRAIN:
+            return total_training_time
+        return time.perf_counter() - t_budget_start
 
     def maybe_save_checkpoint(*, force: bool = False) -> None:
         nonlocal last_checkpoint_time, checkpoint_seconds, checkpoint_count, checkpoint_write_seconds
@@ -895,8 +922,8 @@ def main() -> None:
             print(f"\nCheckpoint queued to {args.checkpoint_path} at step {step}.")
         last_checkpoint_time = total_training_time
 
-    while total_training_time < args.time_budget:
-        progress = min(total_training_time / args.time_budget, 1.0)
+    while budget_elapsed_seconds() < args.time_budget:
+        progress = min(budget_elapsed_seconds() / args.time_budget, 1.0)
         lrm = get_lr_multiplier(progress)
         muon_momentum = get_muon_momentum(step)
         muon_weight_decay = get_weight_decay(progress)
@@ -934,7 +961,7 @@ def main() -> None:
         pct_done = 100 * progress
         tok_per_sec = int(args.total_batch_size / dt)
         step_tflops = estimate_step_tflops(num_flops_per_token, args.total_batch_size, dt)
-        remaining = max(0.0, args.time_budget - total_training_time)
+        remaining = max(0.0, args.time_budget - budget_elapsed_seconds())
         step_util = percent(step_timing.compute_seconds, dt)
         print(
             f"\rstep {step:05d} ({pct_done:.1f}%) | loss: {debiased_smooth_loss:.6f} | "
@@ -955,8 +982,9 @@ def main() -> None:
         step += 1
         local_step_index += 1
         maybe_save_checkpoint()
-        session_post_step_wall_seconds.append(time.perf_counter() - t_start)
+        session_post_step_wall_seconds.append(time.perf_counter() - t_budget_start)
 
+    budget_elapsed_at_cutoff = budget_elapsed_seconds()
     print()
     maybe_save_checkpoint(force=True)
     if async_checkpoint_writer is not None:
@@ -1042,6 +1070,8 @@ def main() -> None:
         print(f"proxy_val_bpb:    {proxy_val_bpb:.6f}")
     print(f"training_seconds: {session_training_seconds:.1f}")
     print(f"total_seconds:    {session_total_seconds:.1f}")
+    print(f"time_budget_mode: {args.time_budget_mode}")
+    print(f"budget_elapsed_seconds: {budget_elapsed_at_cutoff:.1f}")
     print(f"peak_vram_mb:     {peak_vram_mb:.1f}")
     print(f"mfu_percent:      {telemetry_summary['mfu_percent']:.2f}")
     print(f"train_tflops:     {telemetry_summary['train_tflops']:.3f}")

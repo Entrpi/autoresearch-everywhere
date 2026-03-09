@@ -341,7 +341,7 @@ The upstream code is still present for reference, but the MLX port is not struct
 - same broad model family;
 - same optimizer family;
 - same summary output shape;
-- same 5-minute training-budget concept.
+- same 5-minute training-budget concept by default, with an explicit `train` vs `wall` budget mode split for benchmarking operational changes without changing the core experiment loop.
 
 ### Intentional architectural departures
 

@@ -23,7 +23,7 @@ The MLX workflow is built around four files:
 For the full architecture, subsystem boundaries, feature-gap matrix, and flow diagrams, see [docs/mlx-port-architecture.md](docs/mlx-port-architecture.md).
 For a grounded history of changes, including measured effects and explicit provenance tiers, see [CHANGELOG.md](CHANGELOG.md).
 
-Training still uses a **fixed 5-minute training budget**. `val_bpb` is now a fixed canonical BPB used for cross-preset comparisons, while `proxy_val_bpb` reports the same-shape local evaluation used for quick inspection.
+Training still uses a **fixed 5-minute training budget** by default. `train_mlx.py` now supports `--time-budget-mode train|wall`, but the default `train` mode keeps the original intent: budget is accounted in accumulated optimizer-step time rather than raw elapsed wall time. `val_bpb` is now a fixed canonical BPB used for cross-preset comparisons, while `proxy_val_bpb` reports the same-shape local evaluation used for quick inspection.
 
 ## Quick Start
 
@@ -53,6 +53,11 @@ The prepacked caches are keyed by split and sequence length. `train_mlx.py` and 
 
 `train_mlx.py` also supports resumable checkpoints. For runs longer than 5 minutes, the MLX path enables exact full-state checkpoints by default using a conservative interval selector grounded in the measured exact-resume save costs on this machine. Use `--checkpoint-path` to choose the directory explicitly while keeping the default cadence selector, `--checkpoint-interval` to pin the cadence, `--resume-from` to continue later, or `--no-checkpoint` to disable checkpointing entirely. Exact sync remains the default checkpoint path. `--checkpoint-save-mode async` is available as an optional exact-resume variant for wall-clock-constrained runs, but the current grounded result is still to keep synchronous exact checkpoints as the default.
 
+The trainer also supports two budget accounting modes:
+
+- `--time-budget-mode train`: default; stops on accumulated optimizer-step time and is the right mode for core model, optimizer, and data-path changes.
+- `--time-budget-mode wall`: stops on elapsed training-loop wall time and is the right mode for checkpointing or orchestration changes where reduced blocking is itself the point.
+
 ```bash
 # save checkpoints every 5 minutes
 uv run train_mlx.py --checkpoint-path /tmp/autoresearch-m5-balanced --checkpoint-interval 300
@@ -62,6 +67,9 @@ uv run train_mlx.py --resume-from /tmp/autoresearch-m5-balanced --time-budget 90
 
 # optional exact async writes on the same exact-resume semantics
 uv run train_mlx.py --checkpoint-save-mode async --checkpoint-path /tmp/autoresearch-m5-balanced
+
+# wall-clock-capped checkpoint benchmark
+uv run train_mlx.py --time-budget 60 --time-budget-mode wall --checkpoint-save-mode async --benchmark-skip-eval
 ```
 
 ## Presets
