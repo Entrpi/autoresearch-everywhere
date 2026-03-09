@@ -383,7 +383,8 @@ def main() -> None:
 
     model = GPT(config)
     model.init_weights()
-    mx.eval(model.parameters())
+    model.ensure_runtime_caches(max(args.seq_len, args.canonical_eval_seq_len))
+    mx.eval(model.state)
 
     param_counts = model.num_scaling_params()
     print("Parameter counts:")

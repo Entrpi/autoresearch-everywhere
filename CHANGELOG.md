@@ -21,7 +21,40 @@ This branch does not admit fully human-authored code changes. If a change must b
 
 ## Unreleased
 
-### New commit — Add changelog score parser — score `4`
+### New commit — Lazy-grow model caches — score `2`
+
+**AI-identified within brief, human-approved (2)**
+
+- Requested the next optimization pass on lazy-growing the model caches after the current priority review.
+  - Replaced the fixed `sequence_len * 10` RoPE cache with a smaller startup cache that grows up to the configured model sequence length.
+  - Reworked local-attention mask caching to keep one growable mask per window size and slice it for shorter requests instead of caching separate masks per exact sequence length.
+  - Prewarmed runtime caches in `train_mlx.py` before compiling the train step so cache growth stays out of the compiled hot path.
+
+**Grounding**
+
+- Files:
+  - `autoresearch_mlx/model.py`
+  - `train_mlx.py`
+  - `CHANGELOG.md`
+- Validation:
+  - `python3 -m py_compile train_mlx.py autoresearch_mlx/model.py`
+  - `./.venv/bin/python train_mlx.py --smoke`
+  - `./.venv/bin/python train_mlx.py --preset m5-xlarge --time-budget 0.01 --eval-tokens 512 --canonical-eval-tokens 512`
+  - matched A/B benchmark on `m5-xlarge` against the last committed cache behavior from `2be14fe`
+- Measurements:
+  - matched `m5-xlarge` run (`5s`, `512` eval tokens):
+    - completed updates in budget: `10 -> 11`
+    - fixed-budget throughput: `7.88k tok/s -> 8.34k tok/s` (`+5.9%`)
+    - step-0 latency: `583 ms -> 582 ms` (flat)
+    - peak memory: `4298.7 MB -> 4294.2 MB` (effectively flat)
+  - ultra-short startup probe (`0.01s`) was noisy and favored the baseline in total wall-clock time, so the longer fixed-budget run is the more reliable comparison
+- Confirmed behavior:
+  - the smoke path still trains and evaluates end-to-end
+  - the `m5-xlarge` path completed with the lazily prewarmed `2048`-token cache setup instead of relying on the old eager `10x` RoPE allocation strategy
+
+## Committed History
+
+### March 9, 2026 — `2be14fe` — Add changelog score parser — score `4`
 
 **Human-directed, AI-shaped (4)**
 
@@ -44,8 +77,6 @@ This branch does not admit fully human-authored code changes. If a change must b
 - Historical score corrections surfaced by the parser:
   - `9a4ef79`: `39 -> 40`
   - `e06f85c`: `35 -> 36`
-
-## Committed History
 
 ### March 9, 2026 — `2bcdc0c` — Add optional prepacked row caches — score `6`
 

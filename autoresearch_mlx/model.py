@@ -119,7 +119,9 @@ class GPT(nn.Module):
         super().__init__()
         object.__setattr__(self, "config", config)
         object.__setattr__(self, "window_sizes", self._compute_window_sizes(config))
-        object.__setattr__(self, "rotary_seq_len", config.sequence_len * 10)
+        head_dim = config.n_embd // config.n_head
+        object.__setattr__(self, "_rotary_head_dim", head_dim)
+        object.__setattr__(self, "rotary_seq_len", min(config.sequence_len, 1024))
         object.__setattr__(self, "_mask_cache", {})
 
         self.transformer = {
@@ -129,15 +131,12 @@ class GPT(nn.Module):
         self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
         self.resid_lambdas = mx.ones((config.n_layer,))
         self.x0_lambdas = mx.zeros((config.n_layer,))
-        head_dim = config.n_embd // config.n_head
         kv_dim = config.n_kv_head * head_dim
         self.value_embeds = [
             nn.Embedding(config.vocab_size, kv_dim) if has_ve(layer_idx, config.n_layer) else None
             for layer_idx in range(config.n_layer)
         ]
-        cos, sin = self._precompute_rotary_embeddings(self.rotary_seq_len, head_dim)
-        self.cos = cos
-        self.sin = sin
+        self._set_rotary_cache(self.rotary_seq_len)
         self.freeze(keys=["cos", "sin"], recurse=False, strict=True)
 
     def init_weights(self) -> None:
@@ -163,8 +162,7 @@ class GPT(nn.Module):
             if value_embed is not None:
                 value_embed.weight = mx.random.uniform(low=-scale, high=scale, shape=value_embed.weight.shape)
 
-        head_dim = self.config.n_embd // self.config.n_head
-        self.cos, self.sin = self._precompute_rotary_embeddings(self.rotary_seq_len, head_dim)
+        self._set_rotary_cache(self.rotary_seq_len)
         self.transformer["wte"].weight = self.transformer["wte"].weight.astype(mx.bfloat16)
         for value_embed in self.value_embeds:
             if value_embed is not None:
@@ -178,6 +176,23 @@ class GPT(nn.Module):
         cos = mx.cos(freqs).astype(mx.bfloat16)[None, :, None, :]
         sin = mx.sin(freqs).astype(mx.bfloat16)[None, :, None, :]
         return cos, sin
+
+    def _set_rotary_cache(self, seq_len: int) -> None:
+        cos, sin = self._precompute_rotary_embeddings(seq_len, self._rotary_head_dim)
+        object.__setattr__(self, "rotary_seq_len", seq_len)
+        self.cos = cos
+        self.sin = sin
+
+    def _ensure_rotary_cache(self, seq_len: int) -> None:
+        if seq_len > self.config.sequence_len:
+            raise ValueError(
+                f"Sequence length {seq_len} exceeds model config.sequence_len {self.config.sequence_len}."
+            )
+        current_seq_len = object.__getattribute__(self, "rotary_seq_len")
+        if seq_len <= current_seq_len:
+            return
+        next_seq_len = min(self.config.sequence_len, max(seq_len, current_seq_len * 2))
+        self._set_rotary_cache(next_seq_len)
 
     def _compute_window_sizes(self, config: GPTConfig):
         pattern = config.window_pattern.upper()
@@ -198,16 +213,27 @@ class GPT(nn.Module):
             return "causal"
 
         cache = object.__getattribute__(self, "_mask_cache")
-        key = (seq_len, window_size)
-        if key not in cache:
-            rows = mx.arange(seq_len)[:, None]
-            cols = mx.arange(seq_len)[None, :]
+        mask = cache.get(window_size)
+        cached_seq_len = 0 if mask is None else mask.shape[2]
+        if cached_seq_len < seq_len:
+            next_seq_len = max(seq_len, cached_seq_len * 2) if cached_seq_len else seq_len
+            rows = mx.arange(next_seq_len)[:, None]
+            cols = mx.arange(next_seq_len)[None, :]
             causal = cols <= rows
             local = cols >= (rows - window_size + 1)
             allowed = causal & local
             mask = (~allowed).astype(mx.float32) * mx.finfo(mx.float32).min
-            cache[key] = mask[None, None, :, :]
-        return cache[key]
+            cache[window_size] = mask[None, None, :, :]
+            mask = cache[window_size]
+        if mask.shape[2] == seq_len:
+            return mask
+        return mask[:, :, :seq_len, :seq_len]
+
+    def ensure_runtime_caches(self, seq_len: int) -> None:
+        self._ensure_rotary_cache(seq_len)
+        for window_size, _ in set(self.window_sizes):
+            if 0 < window_size < seq_len:
+                self._get_attention_mask(seq_len, window_size)
 
     def estimate_flops(self) -> int:
         nparams = count_params(self.trainable_parameters())
@@ -245,8 +271,7 @@ class GPT(nn.Module):
 
     def __call__(self, idx: mx.array, targets: mx.array | None = None, reduction: str = "mean"):
         seq_len = idx.shape[1]
-        if seq_len > self.cos.shape[1]:
-            raise ValueError(f"Sequence length {seq_len} exceeds rotary cache {self.cos.shape[1]}.")
+        self._ensure_rotary_cache(seq_len)
 
         cos_sin = (self.cos[:, :seq_len], self.sin[:, :seq_len])
         x = self.transformer["wte"](idx)
