@@ -15,7 +15,9 @@ class CheckpointCalibration:
     label: str
     max_params_m: float
     checkpoint_cost_sec: float
+    resume_ready_penalty_sec: float
     source: str
+    resume_ready_source: str = ""
     notes: str = ""
 
 
@@ -47,7 +49,9 @@ DEFAULT_CHECKPOINT_CALIBRATIONS = (
         label="Exact full-state resume (m5-large calibrated)",
         max_params_m=30.0,
         checkpoint_cost_sec=0.07,
+        resume_ready_penalty_sec=0.641,
         source="Measured from 20s matched m5-large runs: +0.7s across 10 saves.",
+        resume_ready_source="Measured from repeated resume-ready trials: median 0.641s to first completed resumed optimizer step.",
         notes="Conservative calibration used for presets up to roughly the 26.3M-parameter m5-large shape.",
     ),
     CheckpointCalibration(
@@ -55,7 +59,9 @@ DEFAULT_CHECKPOINT_CALIBRATIONS = (
         label="Exact full-state resume (m5-xlarge calibrated)",
         max_params_m=float("inf"),
         checkpoint_cost_sec=0.11,
+        resume_ready_penalty_sec=0.683,
         source="Measured from 60s matched m5-xlarge runs: +3.3s across 29 saves.",
+        resume_ready_source="Measured from repeated resume-ready trials: median 0.683s to first completed resumed optimizer step.",
         notes="Conservative calibration used for the 50.3M-parameter xlarge/upstream model shape.",
     ),
 )

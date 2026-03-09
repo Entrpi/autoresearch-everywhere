@@ -15,15 +15,17 @@ where:
 - C is checkpoint save cost in seconds
 - M is mean time between resume-needed events in seconds
 
-We also compute the corresponding expected waste fraction:
+We also compute two separate quantities:
 
-    waste = C / interval + interval / (2 * M) + R / M
+    fixed_checkpoint_overhead = C / interval
+    projected_total_waste = fixed_checkpoint_overhead + interval / (2 * M) + R / M
 
 where R is an optional fixed resume penalty in seconds.
 
 The default profiles are grounded in measured save costs from this repo's
-checkpoint/resume work. The tool is structured to accept more profiles later,
-for example if lighter checkpoint modes are added and benchmarked.
+checkpoint/resume work, including repeated "resume ready" latency trials.
+The tool is structured to accept more profiles later, for example if lighter
+checkpoint modes are added and benchmarked.
 """
 
 from __future__ import annotations
@@ -64,9 +66,13 @@ DEFAULT_PROFILES = tuple(
         label=calibration.label,
         robustness="exact step-boundary full-state resume",
         checkpoint_cost_sec=calibration.checkpoint_cost_sec,
-        resume_penalty_sec=0.0,
+        resume_penalty_sec=calibration.resume_ready_penalty_sec,
         source=calibration.source,
-        notes=calibration.notes,
+        notes=" ".join(
+            note
+            for note in (calibration.notes, calibration.resume_ready_source)
+            if note
+        ),
     )
     for calibration in DEFAULT_CHECKPOINT_CALIBRATIONS
 )
@@ -115,17 +121,28 @@ def optimal_interval_seconds(checkpoint_cost_sec: float, mean_between_events_sec
     return max(checkpoint_cost_sec, math.sqrt(2.0 * checkpoint_cost_sec * mean_between_events_sec) - checkpoint_cost_sec)
 
 
-def expected_waste_fraction(
+def fixed_checkpoint_overhead_fraction(
+    *,
+    checkpoint_cost_sec: float,
+    interval_sec: float,
+) -> float:
+    return checkpoint_cost_sec / interval_sec
+
+
+def expected_total_waste_fraction(
     *,
     checkpoint_cost_sec: float,
     resume_penalty_sec: float,
     interval_sec: float,
     mean_between_events_sec: float,
 ) -> float:
-    save_fraction = checkpoint_cost_sec / interval_sec
+    fixed_overhead_fraction = fixed_checkpoint_overhead_fraction(
+        checkpoint_cost_sec=checkpoint_cost_sec,
+        interval_sec=interval_sec,
+    )
     lost_work_fraction = interval_sec / (2.0 * mean_between_events_sec)
     resume_penalty_fraction = resume_penalty_sec / mean_between_events_sec
-    return save_fraction + lost_work_fraction + resume_penalty_fraction
+    return fixed_overhead_fraction + lost_work_fraction + resume_penalty_fraction
 
 
 def scenario_rates(raw: str) -> list[float]:
@@ -154,7 +171,11 @@ def compute_grid(
         for events_day in events_per_day:
             mean_between_sec = 86400.0 / float(events_day)
             interval_sec = optimal_interval_seconds(profile.checkpoint_cost_sec, mean_between_sec)
-            waste_fraction = expected_waste_fraction(
+            fixed_overhead_fraction = fixed_checkpoint_overhead_fraction(
+                checkpoint_cost_sec=profile.checkpoint_cost_sec,
+                interval_sec=interval_sec,
+            )
+            total_waste_fraction = expected_total_waste_fraction(
                 checkpoint_cost_sec=profile.checkpoint_cost_sec,
                 resume_penalty_sec=profile.resume_penalty_sec,
                 interval_sec=interval_sec,
@@ -172,8 +193,11 @@ def compute_grid(
                     "resume_penalty_sec": profile.resume_penalty_sec,
                     "optimal_interval_sec": interval_sec,
                     "optimal_interval_min": interval_sec / 60.0,
-                    "expected_waste_fraction": waste_fraction,
-                    "expected_waste_percent": waste_fraction * 100.0,
+                    "fixed_checkpoint_overhead_fraction": fixed_overhead_fraction,
+                    "fixed_checkpoint_overhead_percent": fixed_overhead_fraction * 100.0,
+                    "total_waste_fraction": total_waste_fraction,
+                    "total_waste_percent": total_waste_fraction * 100.0,
+                    "resume_penalty_ms": profile.resume_penalty_sec * 1000.0,
                     "source": profile.source,
                     "notes": profile.notes,
                 }
@@ -187,7 +211,11 @@ def compute_scenarios(profiles: tuple[CheckpointProfile, ...], frequencies_per_d
         for events_day in frequencies_per_day:
             mean_between_sec = 86400.0 / events_day
             interval_sec = optimal_interval_seconds(profile.checkpoint_cost_sec, mean_between_sec)
-            waste_fraction = expected_waste_fraction(
+            fixed_overhead_fraction = fixed_checkpoint_overhead_fraction(
+                checkpoint_cost_sec=profile.checkpoint_cost_sec,
+                interval_sec=interval_sec,
+            )
+            total_waste_fraction = expected_total_waste_fraction(
                 checkpoint_cost_sec=profile.checkpoint_cost_sec,
                 resume_penalty_sec=profile.resume_penalty_sec,
                 interval_sec=interval_sec,
@@ -201,8 +229,10 @@ def compute_scenarios(profiles: tuple[CheckpointProfile, ...], frequencies_per_d
                     "events_per_day": events_day,
                     "mean_hours_between_events": 24.0 / events_day,
                     "optimal_interval_min": interval_sec / 60.0,
-                    "expected_waste_percent": waste_fraction * 100.0,
+                    "fixed_checkpoint_overhead_percent": fixed_overhead_fraction * 100.0,
+                    "total_waste_percent": total_waste_fraction * 100.0,
                     "checkpoint_cost_ms": profile.checkpoint_cost_sec * 1000.0,
+                    "resume_penalty_ms": profile.resume_penalty_sec * 1000.0,
                 }
             )
     return rows
@@ -350,12 +380,12 @@ def write_markdown(
     lines = [
         "# Checkpoint Tradeoff Scenarios",
         "",
-        "| Profile | Robustness | Events/day | Mean hours between resumes | Optimal interval (min) | Expected waste (%) | Save cost (ms) |",
-        "| --- | --- | ---: | ---: | ---: | ---: | ---: |",
+        "| Profile | Robustness | Events/day | Mean hours between resumes | Optimal interval (min) | Fixed checkpoint overhead (%) | Projected total waste (%) | Save cost (ms) | Resume penalty (ms) |",
+        "| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
     ]
     for row in scenarios:
         lines.append(
-            "| {label} | {robustness} | {events_per_day:.2f} | {mean_hours_between_events:.2f} | {optimal_interval_min:.2f} | {expected_waste_percent:.3f} | {checkpoint_cost_ms:.0f} |".format(
+            "| {label} | {robustness} | {events_per_day:.2f} | {mean_hours_between_events:.2f} | {optimal_interval_min:.2f} | {fixed_checkpoint_overhead_percent:.3f} | {total_waste_percent:.3f} | {checkpoint_cost_ms:.0f} | {resume_penalty_ms:.0f} |".format(
                 **row
             )
         )
@@ -401,10 +431,22 @@ def make_plot(path: Path, rows: list[dict], profiles: tuple[CheckpointProfile, .
         series = by_key[profile.key]
         events_per_day = np.array([row["events_per_day"] for row in series])
         optimal_minutes = np.array([row["optimal_interval_min"] for row in series])
-        waste_percent = np.array([row["expected_waste_percent"] for row in series])
-        label = f"{profile.label} ({profile.checkpoint_cost_sec * 1000.0:.0f} ms/save)"
+        fixed_checkpoint_overhead_percent = np.array([row["fixed_checkpoint_overhead_percent"] for row in series])
+        total_waste_percent = np.array([row["total_waste_percent"] for row in series])
+        label = (
+            f"{profile.label} "
+            f"({profile.checkpoint_cost_sec * 1000.0:.0f} ms/save, "
+            f"{profile.resume_penalty_sec * 1000.0:.0f} ms/resume)"
+        )
         axes[0].plot(events_per_day, optimal_minutes, label=label, linewidth=2.0)
-        axes[1].plot(events_per_day, waste_percent, label=label, linewidth=2.0)
+        axes[1].plot(events_per_day, total_waste_percent, label=f"{label} total", linewidth=2.0)
+        axes[1].plot(
+            events_per_day,
+            fixed_checkpoint_overhead_percent,
+            label=f"{label} fixed overhead",
+            linewidth=1.5,
+            linestyle="--",
+        )
 
     for axis in axes:
         axis.set_xscale("log")
@@ -484,12 +526,14 @@ def main() -> None:
     print(f"markdown: {md_path}")
     print(f"json: {json_path}")
     print()
-    print("| Profile | Events/day | Hours between resumes | Optimal interval (min) | Waste (%) |")
-    print("| --- | ---: | ---: | ---: | ---: |")
+    print("| Profile | Events/day | Hours between resumes | Optimal interval (min) | Fixed checkpoint overhead (%) | Projected total waste (%) | Save cost (ms) | Resume penalty (ms) |")
+    print("| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |")
     for row in scenario_rows:
         print(
             f"| {row['label']} | {row['events_per_day']:.2f} | {row['mean_hours_between_events']:.2f} | "
-            f"{row['optimal_interval_min']:.2f} | {row['expected_waste_percent']:.3f} |"
+            f"{row['optimal_interval_min']:.2f} | {row['fixed_checkpoint_overhead_percent']:.3f} | "
+            f"{row['total_waste_percent']:.3f} | "
+            f"{row['checkpoint_cost_ms']:.0f} | {row['resume_penalty_ms']:.0f} |"
         )
     print()
     print("| Profile | Recommended max interval | Reason |")

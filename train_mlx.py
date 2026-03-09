@@ -652,7 +652,8 @@ def resolve_checkpoint_settings(args: RunConfig, num_params: int) -> tuple[RunCo
         f"auto-enabled for time_budget>{AUTO_CHECKPOINT_MIN_TIME_BUDGET_SEC:.0f}s using "
         f"{decision.calibration.label}; selected {decision.recommendation.interval_label} "
         f"at {decision.recommendation.save_only_overhead_fraction * 100.0:.4f}% save-only overhead "
-        f"with {path_source}"
+        f"with {path_source}; measured resume-ready penalty "
+        f"{decision.calibration.resume_ready_penalty_sec:.3f}s"
     )
     return resolved, reason
 

@@ -24,7 +24,42 @@ On this hardware, the default canonical matched benchmark window for optimizatio
 
 ## Unreleased
 
-### New commit — Benchmark resume-ready latency — score `2`
+### New commit — Calibrate tradeoff analysis with resume-ready penalty — score `2`
+
+**AI-identified within brief, human-approved (2)**
+
+- Threaded the new measured resume-ready medians into the checkpoint calibration and tradeoff analysis so the tooling stops treating resume penalty as zero.
+  - Kept the runtime selector itself save-overhead-based for now; this change is about analysis fidelity, not changing the default interval policy yet.
+  - Updated the runtime checkpoint-policy log line to surface the measured resume-ready penalty for the selected calibration.
+
+**Grounding**
+
+- Files:
+  - `autoresearch_mlx/checkpoint_policy.py`
+  - `tools/checkpoint_tradeoff.py`
+  - `train_mlx.py`
+  - `CHANGELOG.md`
+- Validation:
+  - `python3 -m py_compile autoresearch_mlx/checkpoint_policy.py tools/checkpoint_tradeoff.py train_mlx.py`
+  - `env PYTHONPATH=/Users/ent/Codex/autoresearch ./.venv/bin/python tools/checkpoint_tradeoff.py`
+- Measurements:
+  - Updated scenario table with measured resume-ready penalties and a clean split between fixed save overhead and projected total waste:
+
+    | Profile | Events/day | Optimal interval (min) | Fixed checkpoint overhead (%) | Projected total waste (%) | Save cost (ms) | Resume penalty (ms) |
+    | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+    | `m5-large` exact full-state | `1` | `1.83` | `0.064` | `0.128` | `70` | `641` |
+    | `m5-xlarge` exact full-state | `1` | `2.30` | `0.080` | `0.160` | `110` | `683` |
+
+  - Interpretation:
+    - The fixed checkpoint overhead column is now the actual save-time tax from taking checkpoints at the chosen interval. It does not depend on the assumed restart frequency.
+    - The projected total waste column is the modeled all-in waste under the assumed resume-needed event rate, including save overhead, lost work, and measured resume-ready penalty.
+    - Young/Daly-style optimal intervals are unchanged because the resume penalty is interval-independent, but the projected total waste curves are now more honest about restart cost.
+    - At realistic interruption rates, the measured resume penalty is not large enough to overturn the current human-factors `2m` recommendation, but it does materially raise the modeled waste percentage for frequent-resume scenarios.
+    - This keeps the tradeoff tooling aligned with the stronger resume-ready benchmark without silently changing the runtime auto-checkpoint behavior.
+
+## Committed History
+
+### March 9, 2026 — `07a0707` — Benchmark resume-ready checkpoint latency — score `2`
 
 **AI-identified within brief, human-approved (2)**
 
@@ -54,8 +89,6 @@ On this hardware, the default canonical matched benchmark window for optimizatio
     - `m5-large` is reasonably tight across the three trials; the median resume-ready delay is about `0.64s`, with about `73ms` above a steady resumed step.
     - `m5-xlarge` is centered closer to about `0.68s`, and one of the three trials again had a much slower first resumed step. That makes the median much more trustworthy than the mean for policy work at this shape.
     - This is the right benchmark to use for future checkpoint-mode comparisons, because it measures "time until the resumed run is productive again" directly instead of inferring from lazy file-load timings.
-
-## Committed History
 
 ### March 9, 2026 — `26e4c64` — Auto-detect benchmark warmup cutoff — score `4`
 
