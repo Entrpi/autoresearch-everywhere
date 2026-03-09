@@ -9,8 +9,29 @@ Usage:
 
 import argparse
 
-from autoresearch_mlx.constants import CACHE_DIR, MAX_SHARD
-from autoresearch_mlx.data import Tokenizer, build_token_cache, download_data, train_tokenizer
+from autoresearch_mlx.constants import CACHE_DIR, DEFAULT_PREPACKED_SEQ_LENS, MAX_SHARD
+from autoresearch_mlx.data import (
+    Tokenizer,
+    build_prepacked_cache,
+    build_token_cache,
+    download_data,
+    train_tokenizer,
+)
+
+
+def parse_seq_lens(raw: str) -> list[int]:
+    seq_lens = []
+    for token in raw.split(","):
+        token = token.strip()
+        if not token:
+            continue
+        value = int(token)
+        if value <= 0:
+            raise ValueError("Prepacked cache sequence lengths must be positive integers.")
+        seq_lens.append(value)
+    if not seq_lens:
+        raise ValueError("Provide at least one sequence length for prepacked caches.")
+    return seq_lens
 
 
 def main() -> None:
@@ -32,7 +53,20 @@ def main() -> None:
         action="store_true",
         help="Skip building the pretokenized shard cache.",
     )
+    parser.add_argument(
+        "--build-prepacked-cache",
+        action="store_true",
+        help="Build optional prepacked row caches for the requested sequence lengths.",
+    )
+    parser.add_argument(
+        "--prepacked-seq-lens",
+        type=str,
+        default=",".join(str(seq_len) for seq_len in DEFAULT_PREPACKED_SEQ_LENS),
+        help="Comma-separated sequence lengths to prepack when --build-prepacked-cache is set.",
+    )
     args = parser.parse_args()
+    if args.skip_token_cache and args.build_prepacked_cache:
+        raise ValueError("Prepacked cache generation requires token caches; remove --skip-token-cache.")
 
     num_shards = MAX_SHARD if args.num_shards == -1 else args.num_shards
     print(f"Cache directory: {CACHE_DIR}")
@@ -42,7 +76,11 @@ def main() -> None:
     train_tokenizer()
     if not args.skip_token_cache:
         print()
-        build_token_cache(Tokenizer.from_directory())
+        tokenizer = Tokenizer.from_directory()
+        build_token_cache(tokenizer)
+        if args.build_prepacked_cache:
+            print()
+            build_prepacked_cache(tokenizer, parse_seq_lens(args.prepacked_seq_lens))
     print()
     print("Done! Ready to train with MLX.")
 

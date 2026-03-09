@@ -151,6 +151,7 @@ The following concepts are preserved from `prepare.py`:
 
 - Token byte lookups are stored as `token_bytes.npy` instead of PyTorch `token_bytes.pt`.
 - Pretokenized shard caches are stored under `~/.cache/autoresearch/token_cache/` as concatenated token streams plus offsets and metadata.
+- Optional prepacked row caches are stored under `~/.cache/autoresearch/prepacked_cache/` and keyed by split plus sequence length.
 - The MLX dataloader returns `mx.array` batches instead of pinned CPU tensors copied into CUDA buffers.
 - Error handling is stricter than upstream for partial data download and missing train shards.
 
@@ -165,6 +166,8 @@ The loader is not a naive contiguous-token stream. It does all of the following:
 - inputs are `row[:, :-1]`, targets are `row[:, 1:]`.
 
 This design preserves full token utilization without padding and matches the upstream packing semantics closely.
+
+When a matching prepacked cache exists, the MLX path skips live best-fit packing at runtime and streams prebuilt rows directly. When it does not, the loader falls back to the live token-cache path above.
 
 ## Subsystem 2: Model Training
 

@@ -16,6 +16,7 @@ To set up a new MLX experiment, work with the user to:
    - `autoresearch_mlx/model.py`
    - `autoresearch_mlx/optim.py`
 4. Verify that `~/.cache/autoresearch/` contains data shards, `tokenizer.pkl`, `token_bytes.npy`, and the `token_cache/` directory. If not, tell the human to run `uv run prepare_mlx.py`.
+   Optional: if `prepacked_cache/` is present, the runtime will use it automatically for matching sequence lengths.
 5. Initialize `results.tsv` with the header row if it does not exist.
 6. Confirm setup and start experimenting.
 
@@ -35,6 +36,8 @@ uv run train_mlx.py --preset m5-large
 uv run train_mlx.py --preset m5-xlarge
 uv run train_mlx.py --preset upstream
 ```
+
+Use `uv run train_mlx.py --no-prepacked-cache` when you explicitly want to benchmark or debug the live packing path instead of the optional prepacked row caches.
 
 What you CAN do:
 - Modify `train_mlx.py`.

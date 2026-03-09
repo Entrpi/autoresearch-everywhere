@@ -20,6 +20,8 @@ from .constants import (
     EVAL_TOKENS,
     MAX_SEQ_LEN,
     MAX_SHARD,
+    PREPACKED_CACHE_DIR,
+    PREPACKED_CACHE_VERSION,
     SPECIAL_TOKENS,
     SPLIT_PATTERN,
     TOKEN_CACHE_DIR,
@@ -334,6 +336,158 @@ def _build_single_token_cache(parquet_path: Path, tokenizer: Tokenizer, tokenize
     temp_meta.replace(paths["meta"])
 
 
+def _prepacked_cache_paths(split: str, seq_len: int) -> dict[str, Path]:
+    base = PREPACKED_CACHE_DIR / f"{split}_seq{seq_len}"
+    return {
+        "rows": base.with_suffix(".rows.bin"),
+        "meta": base.with_suffix(".meta.json"),
+    }
+
+
+def _load_prepacked_cache_meta(split: str, seq_len: int) -> dict | None:
+    meta_path = _prepacked_cache_paths(split, seq_len)["meta"]
+    if not meta_path.exists():
+        return None
+    return json.loads(meta_path.read_text())
+
+
+def _has_valid_prepacked_cache(split: str, seq_len: int, tokenizer: Tokenizer) -> bool:
+    paths = _prepacked_cache_paths(split, seq_len)
+    if not all(path.exists() for path in paths.values()):
+        return False
+    meta = _load_prepacked_cache_meta(split, seq_len)
+    if meta is None:
+        return False
+    parquet_paths = _split_parquet_paths(split)
+    return (
+        meta.get("version") == PREPACKED_CACHE_VERSION
+        and meta.get("split") == split
+        and meta.get("seq_len") == seq_len
+        and meta.get("row_capacity") == seq_len + 1
+        and meta.get("tokenizer_fingerprint") == tokenizer.fingerprint
+        and meta.get("bos_token_id") == tokenizer.get_bos_token_id()
+        and meta.get("source_parquets") == [path.name for path in parquet_paths]
+        and meta.get("dtype") == "uint16"
+        and int(meta.get("row_count", 0)) > 0
+    )
+
+
+def _split_has_prepacked_cache(split: str, seq_len: int, tokenizer: Tokenizer) -> bool:
+    return _has_valid_prepacked_cache(split, seq_len, tokenizer)
+
+
+def build_prepacked_cache(
+    tokenizer: Tokenizer,
+    seq_lens: list[int] | tuple[int, ...],
+    *,
+    splits: tuple[str, ...] = ("train", "val"),
+    buffer_size: int = 1000,
+) -> None:
+    PREPACKED_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    if tokenizer.fingerprint is None:
+        raise RuntimeError("Tokenizer fingerprint missing; prepacked cache cannot be validated.")
+    if not all(_split_has_token_cache(split, tokenizer) for split in splits):
+        raise RuntimeError("Prepacked cache requires token caches for all requested splits.")
+    if tokenizer.get_vocab_size() > np.iinfo(np.uint16).max:
+        raise RuntimeError("Prepacked cache expects vocab_size <= 65535 for uint16 storage.")
+
+    work = [(split, seq_len) for split in splits for seq_len in seq_lens]
+    ready = sum(1 for split, seq_len in work if _has_valid_prepacked_cache(split, seq_len, tokenizer))
+    if ready == len(work):
+        print(f"Prepacked cache: all {ready} caches already built at {PREPACKED_CACHE_DIR}")
+        return
+
+    print(f"Prepacked cache: building {len(work) - ready} caches at {PREPACKED_CACHE_DIR}...")
+    for split, seq_len in work:
+        if _has_valid_prepacked_cache(split, seq_len, tokenizer):
+            continue
+        _build_single_prepacked_cache(split, seq_len, tokenizer, buffer_size=buffer_size)
+
+
+def _iter_cached_documents_once(parquet_paths: list[Path]):
+    for parquet_path in parquet_paths:
+        paths = _token_cache_paths(parquet_path)
+        offsets = np.load(paths["offsets"], mmap_mode="r")
+        tokens = np.memmap(paths["tokens"], dtype=np.uint16, mode="r")
+        for doc_idx in range(len(offsets) - 1):
+            start = int(offsets[doc_idx])
+            end = int(offsets[doc_idx + 1])
+            yield tokens[start:end]
+
+
+def _build_single_prepacked_cache(split: str, seq_len: int, tokenizer: Tokenizer, *, buffer_size: int = 1000) -> None:
+    parquet_paths = _split_parquet_paths(split)
+    paths = _prepacked_cache_paths(split, seq_len)
+    temp_rows = paths["rows"].with_name(paths["rows"].name + ".tmp")
+    temp_meta = paths["meta"].with_name(paths["meta"].name + ".tmp")
+    row_capacity = seq_len + 1
+    doc_iter = iter(_iter_cached_documents_once(parquet_paths))
+    doc_buffer: list[np.ndarray] = []
+    source_exhausted = False
+    row_count = 0
+
+    def refill_buffer() -> None:
+        nonlocal source_exhausted
+        while len(doc_buffer) < buffer_size and not source_exhausted:
+            try:
+                doc_buffer.append(next(doc_iter))
+            except StopIteration:
+                source_exhausted = True
+
+    print(f"  Prepacking {split} seq_len={seq_len}")
+    with temp_rows.open("wb") as handle:
+        while True:
+            refill_buffer()
+            if not doc_buffer:
+                break
+
+            row = np.empty((row_capacity,), dtype=np.uint16)
+            pos = 0
+            while pos < row_capacity:
+                refill_buffer()
+                if not doc_buffer:
+                    break
+
+                remaining = row_capacity - pos
+                best_idx = -1
+                best_len = 0
+                for idx, doc in enumerate(doc_buffer):
+                    doc_len = len(doc)
+                    if doc_len <= remaining and doc_len > best_len:
+                        best_idx = idx
+                        best_len = doc_len
+
+                if best_idx >= 0:
+                    doc = doc_buffer.pop(best_idx)
+                    row[pos:pos + len(doc)] = doc
+                    pos += len(doc)
+                else:
+                    shortest_idx = min(range(len(doc_buffer)), key=lambda idx: len(doc_buffer[idx]))
+                    doc = doc_buffer.pop(shortest_idx)
+                    row[pos:pos + remaining] = doc[:remaining]
+                    pos += remaining
+
+            if pos == row_capacity:
+                row.tofile(handle)
+                row_count += 1
+
+    meta = {
+        "version": PREPACKED_CACHE_VERSION,
+        "split": split,
+        "seq_len": seq_len,
+        "row_capacity": row_capacity,
+        "buffer_size": buffer_size,
+        "tokenizer_fingerprint": tokenizer.fingerprint,
+        "bos_token_id": tokenizer.get_bos_token_id(),
+        "source_parquets": [path.name for path in parquet_paths],
+        "row_count": row_count,
+        "dtype": "uint16",
+    }
+    temp_meta.write_text(json.dumps(meta, indent=2, sort_keys=True) + "\n")
+    temp_rows.replace(paths["rows"])
+    temp_meta.replace(paths["meta"])
+
+
 def _document_text_batches(parquet_paths: list[Path], tokenizer_batch_size: int = 128):
     epoch = 1
     while True:
@@ -441,9 +595,61 @@ class PackedDataLoader:
         return mx.array(self.inputs), mx.array(self.targets), self.epoch
 
 
-def make_dataloader(tokenizer: Tokenizer, batch_size: int, seq_len: int, split: str, buffer_size: int = 1000) -> PackedDataLoader:
+class PrepackedDataLoader:
+    def __init__(self, tokenizer: Tokenizer, batch_size: int, seq_len: int, split: str):
+        self.tokenizer = tokenizer
+        self.batch_size = batch_size
+        self.seq_len = seq_len
+        self.row_capacity = seq_len + 1
+        self.epoch = 1
+        self.row_index = 0
+
+        paths = _prepacked_cache_paths(split, seq_len)
+        meta = _load_prepacked_cache_meta(split, seq_len)
+        if meta is None:
+            raise RuntimeError(f"Missing prepacked cache metadata for {split} seq_len={seq_len}.")
+
+        self.row_count = int(meta["row_count"])
+        if self.row_count <= 0:
+            raise RuntimeError(f"Invalid prepacked cache row count for {split} seq_len={seq_len}.")
+
+        self.rows = np.memmap(
+            paths["rows"],
+            dtype=np.uint16,
+            mode="r",
+            shape=(self.row_count, self.row_capacity),
+        )
+        self.inputs = np.empty((batch_size, seq_len), dtype=np.int32)
+        self.targets = np.empty((batch_size, seq_len), dtype=np.int32)
+        print(f"Data loader ({split}): using prepacked cache.")
+
+    def __iter__(self) -> "PrepackedDataLoader":
+        return self
+
+    def __next__(self):
+        for row_idx in range(self.batch_size):
+            self.inputs[row_idx, :] = self.rows[self.row_index, :-1]
+            self.targets[row_idx, :] = self.rows[self.row_index, 1:]
+            self.row_index += 1
+            if self.row_index >= self.row_count:
+                self.row_index = 0
+                self.epoch += 1
+        return mx.array(self.inputs), mx.array(self.targets), self.epoch
+
+
+def make_dataloader(
+    tokenizer: Tokenizer,
+    batch_size: int,
+    seq_len: int,
+    split: str,
+    buffer_size: int = 1000,
+    *,
+    prefer_prepacked_cache: bool = True,
+):
     if split not in {"train", "val"}:
         raise ValueError(f"Invalid split: {split}")
+    if prefer_prepacked_cache and _split_has_prepacked_cache(split, seq_len, tokenizer):
+        return PrepackedDataLoader(tokenizer, batch_size, seq_len, split)
     return PackedDataLoader(tokenizer, batch_size, seq_len, split, buffer_size=buffer_size)
 
 
@@ -461,9 +667,16 @@ def evaluate_bpb(
     *,
     seq_len: int = MAX_SEQ_LEN,
     eval_tokens: int = EVAL_TOKENS,
+    prefer_prepacked_cache: bool = True,
 ) -> float:
     token_bytes = mx.array(load_token_bytes())
-    val_loader = make_dataloader(tokenizer, batch_size, seq_len, "val")
+    val_loader = make_dataloader(
+        tokenizer,
+        batch_size,
+        seq_len,
+        "val",
+        prefer_prepacked_cache=prefer_prepacked_cache,
+    )
     steps = max(1, eval_tokens // (batch_size * seq_len))
     total_nats = 0.0
     total_bytes = 0

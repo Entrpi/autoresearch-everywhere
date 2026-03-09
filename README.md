@@ -49,6 +49,8 @@ The current MLX port and preset defaults were developed on and tested against an
 
 `prepare_mlx.py` now builds a reusable shard token cache under `~/.cache/autoresearch/token_cache/` by default so training does not need to re-tokenize parquet text on every run. Use `uv run prepare_mlx.py --skip-token-cache` if you only want the raw data and tokenizer artifacts.
 
+If you want to precompute the row-packing step as well, run `uv run prepare_mlx.py --build-prepacked-cache`. That builds reusable packed-row caches under `~/.cache/autoresearch/prepacked_cache/`, keyed by split and sequence length. `train_mlx.py` and evaluation will prefer those caches automatically when they are present; use `uv run train_mlx.py --no-prepacked-cache` to force the live packing path for debugging or ablations.
+
 ## Presets
 
 `train_mlx.py` supports named presets so the default shape is reasonable for Apple Silicon instead of mirroring an H100-oriented baseline.

@@ -56,6 +56,7 @@ class RunConfig:
     total_batch_size: int
     seed: int
     smoke: bool
+    prefer_prepacked_cache: bool
 
 
 def verify_mlx_env() -> None:
@@ -248,6 +249,7 @@ def resolve_run_config(args: argparse.Namespace) -> RunConfig:
         total_batch_size=preset.total_batch_size,
         seed=args.seed,
         smoke=args.smoke,
+        prefer_prepacked_cache=not args.no_prepacked_cache,
     )
 
     if args.smoke:
@@ -337,6 +339,11 @@ def parse_args() -> RunConfig:
         action="store_true",
         help="Run a short end-to-end sanity check with smaller defaults.",
     )
+    parser.add_argument(
+        "--no-prepacked-cache",
+        action="store_true",
+        help="Disable optional prepacked row caches and use the live packing path instead.",
+    )
     args = parser.parse_args()
     return resolve_run_config(args)
 
@@ -371,7 +378,7 @@ def main() -> None:
         f"canonical_eval_tokens={args.canonical_eval_tokens}, "
         f"canonical_eval_batch_size={args.canonical_eval_batch_size}, "
         f"device_batch_size={args.device_batch_size}, total_batch_size={args.total_batch_size}, "
-        f"smoke={args.smoke}"
+        f"smoke={args.smoke}, prefer_prepacked_cache={args.prefer_prepacked_cache}"
     )
 
     model = GPT(config)
@@ -401,7 +408,13 @@ def main() -> None:
         weight_decay=WEIGHT_DECAY,
     )
 
-    train_loader = make_dataloader(tokenizer, args.device_batch_size, args.seq_len, "train")
+    train_loader = make_dataloader(
+        tokenizer,
+        args.device_batch_size,
+        args.seq_len,
+        "train",
+        prefer_prepacked_cache=args.prefer_prepacked_cache,
+    )
     grad_step = make_grad_step_fn(model)
     apply_grads = make_apply_grads_fn(model, optimizer)
 
@@ -480,6 +493,7 @@ def main() -> None:
         args.device_batch_size,
         seq_len=args.seq_len,
         eval_tokens=args.eval_tokens,
+        prefer_prepacked_cache=args.prefer_prepacked_cache,
     )
     val_bpb = evaluate_bpb(
         model,
@@ -487,6 +501,7 @@ def main() -> None:
         args.canonical_eval_batch_size,
         seq_len=args.canonical_eval_seq_len,
         eval_tokens=args.canonical_eval_tokens,
+        prefer_prepacked_cache=args.prefer_prepacked_cache,
     )
     t_end = time.time()
     steady_state_mfu = 0.0
