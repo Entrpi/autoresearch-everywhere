@@ -15,7 +15,7 @@ To set up a new MLX experiment, work with the user to:
    - `autoresearch_mlx/data.py`
    - `autoresearch_mlx/model.py`
    - `autoresearch_mlx/optim.py`
-4. Verify that `~/.cache/autoresearch/` contains data shards, `tokenizer.pkl`, and `token_bytes.npy`. If not, tell the human to run `uv run prepare_mlx.py`.
+4. Verify that `~/.cache/autoresearch/` contains data shards, `tokenizer.pkl`, `token_bytes.npy`, and the `token_cache/` directory. If not, tell the human to run `uv run prepare_mlx.py`.
 5. Initialize `results.tsv` with the header row if it does not exist.
 6. Confirm setup and start experimenting.
 
@@ -32,6 +32,7 @@ The default preset in `train_mlx.py` is `m5-balanced`. Useful alternatives:
 ```bash
 uv run train_mlx.py --preset m5-fast
 uv run train_mlx.py --preset m5-large
+uv run train_mlx.py --preset m5-xlarge
 uv run train_mlx.py --preset upstream
 ```
 

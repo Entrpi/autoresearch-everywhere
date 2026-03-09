@@ -190,6 +190,18 @@ PRESETS = {
         device_batch_size=2,
         total_batch_size=4096,
     ),
+    "m5-xlarge": RunPreset(
+        description="Upstream-scale model shape with an M5-sized batch and dense attention.",
+        seq_len=2048,
+        eval_tokens=PROXY_EVAL_TOKENS,
+        canonical_eval_seq_len=CANONICAL_EVAL_SEQ_LEN,
+        canonical_eval_tokens=CANONICAL_EVAL_TOKENS,
+        canonical_eval_batch_size=CANONICAL_EVAL_BATCH_SIZE,
+        depth=8,
+        window_pattern="L",
+        device_batch_size=2,
+        total_batch_size=4096,
+    ),
     "upstream": RunPreset(
         description="Original upstream-shaped MLX port for reference, closest to the H100-oriented defaults.",
         seq_len=MAX_SEQ_LEN,
@@ -411,8 +423,7 @@ def main() -> None:
             print("FAIL")
             raise SystemExit(1)
 
-        if step > 10:
-            total_training_time += dt
+        total_training_time += dt
 
         ema_beta = 0.9
         smooth_train_loss = ema_beta * smooth_train_loss + (1 - ema_beta) * train_loss
@@ -437,7 +448,7 @@ def main() -> None:
             gc.collect()
 
         step += 1
-        if step > 10 and total_training_time >= args.time_budget:
+        if total_training_time >= args.time_budget:
             break
 
     print()

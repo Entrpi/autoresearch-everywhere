@@ -10,7 +10,7 @@ Usage:
 import argparse
 
 from autoresearch_mlx.constants import CACHE_DIR, MAX_SHARD
-from autoresearch_mlx.data import download_data, train_tokenizer
+from autoresearch_mlx.data import Tokenizer, build_token_cache, download_data, train_tokenizer
 
 
 def main() -> None:
@@ -27,6 +27,11 @@ def main() -> None:
         default=8,
         help="Number of parallel download workers",
     )
+    parser.add_argument(
+        "--skip-token-cache",
+        action="store_true",
+        help="Skip building the pretokenized shard cache.",
+    )
     args = parser.parse_args()
 
     num_shards = MAX_SHARD if args.num_shards == -1 else args.num_shards
@@ -35,6 +40,9 @@ def main() -> None:
     download_data(num_shards, download_workers=args.download_workers)
     print()
     train_tokenizer()
+    if not args.skip_token_cache:
+        print()
+        build_token_cache(Tokenizer.from_directory())
     print()
     print("Done! Ready to train with MLX.")
 

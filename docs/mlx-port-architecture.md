@@ -129,6 +129,7 @@ This subsystem gives the MLX training path a reproducible input corpus and a rep
 - shard download with retries;
 - pinned validation shard handling;
 - tokenizer training from training shards only;
+- pretokenized shard cache generation for reusable training inputs;
 - special token layout and BOS token choice;
 - token byte lookup generation for BPB evaluation;
 - BOS-packed best-fit dataloader generation;
@@ -149,6 +150,7 @@ The following concepts are preserved from `prepare.py`:
 ### Intentional implementation changes
 
 - Token byte lookups are stored as `token_bytes.npy` instead of PyTorch `token_bytes.pt`.
+- Pretokenized shard caches are stored under `~/.cache/autoresearch/token_cache/` as concatenated token streams plus offsets and metadata.
 - The MLX dataloader returns `mx.array` batches instead of pinned CPU tensors copied into CUDA buffers.
 - Error handling is stricter than upstream for partial data download and missing train shards.
 
@@ -198,9 +200,12 @@ The MLX path diverges sharply from upstream here. Upstream edits constants in-pl
 - `m5-fast`
 - `m5-balanced`
 - `m5-large`
+- `m5-xlarge`
 - `upstream`
 
 This makes the port operable on smaller GPUs without forcing constant source edits just to change batch shape or sequence length.
+
+`m5-xlarge` is the M5-practical version of the upstream-scale architecture: it keeps the `2048`-token, `8`-layer, `512`-wide dense model shape, but pairs it with an M5-sized batch. The `upstream` preset remains the literal reference port, including its original `SSSL` attention pattern and much larger batch shape.
 
 The important calibration detail is that these presets were developed on and tested against an Apple M5 MacBook Pro with 32 GB unified memory and a 10-core GPU. They should be read as machine-specific defaults for that workstation class, not as settled universal defaults for every M5-family machine.
 

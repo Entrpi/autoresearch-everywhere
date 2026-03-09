@@ -1,3 +1,5 @@
+import hashlib
+import json
 import math
 import pickle
 import time
@@ -20,6 +22,8 @@ from .constants import (
     MAX_SHARD,
     SPECIAL_TOKENS,
     SPLIT_PATTERN,
+    TOKEN_CACHE_DIR,
+    TOKEN_CACHE_VERSION,
     TOKENIZER_DIR,
     VAL_FILENAME,
     VAL_SHARD,
@@ -170,14 +174,17 @@ def train_tokenizer() -> None:
 
 
 class Tokenizer:
-    def __init__(self, encoding: tiktoken.Encoding):
+    def __init__(self, encoding: tiktoken.Encoding, *, fingerprint: str | None = None):
         self.enc = encoding
         self.bos_token_id = encoding.encode_single_token(BOS_TOKEN)
+        self.fingerprint = fingerprint
 
     @classmethod
     def from_directory(cls, tokenizer_dir: Path = TOKENIZER_DIR) -> "Tokenizer":
-        with (tokenizer_dir / "tokenizer.pkl").open("rb") as handle:
-            return cls(pickle.load(handle))
+        tokenizer_pkl = tokenizer_dir / "tokenizer.pkl"
+        payload = tokenizer_pkl.read_bytes()
+        fingerprint = hashlib.sha256(payload).hexdigest()[:16]
+        return cls(pickle.loads(payload), fingerprint=fingerprint)
 
     def get_vocab_size(self) -> int:
         return self.enc.n_vocab
@@ -210,7 +217,7 @@ def load_token_bytes() -> np.ndarray:
     return np.load(TOKENIZER_DIR / "token_bytes.npy")
 
 
-def _document_batches(split: str, tokenizer_batch_size: int = 128):
+def _split_parquet_paths(split: str) -> list[Path]:
     parquet_paths = list_parquet_files()
     if not parquet_paths:
         raise RuntimeError("No parquet files found. Run prepare_mlx.py first.")
@@ -222,7 +229,112 @@ def _document_batches(split: str, tokenizer_batch_size: int = 128):
             raise RuntimeError("No training shards available. Run prepare_mlx.py with at least 1 training shard.")
     else:
         parquet_paths = [val_path]
+    return parquet_paths
 
+
+def _token_cache_paths(parquet_path: Path) -> dict[str, Path]:
+    base = TOKEN_CACHE_DIR / parquet_path.stem
+    return {
+        "tokens": base.with_suffix(".tokens.bin"),
+        "offsets": base.with_suffix(".offsets.npy"),
+        "meta": base.with_suffix(".meta.json"),
+    }
+
+
+def _load_token_cache_meta(parquet_path: Path) -> dict | None:
+    meta_path = _token_cache_paths(parquet_path)["meta"]
+    if not meta_path.exists():
+        return None
+    return json.loads(meta_path.read_text())
+
+
+def _has_valid_token_cache(parquet_path: Path, tokenizer: Tokenizer) -> bool:
+    paths = _token_cache_paths(parquet_path)
+    if not all(path.exists() for path in paths.values()):
+        return False
+    meta = _load_token_cache_meta(parquet_path)
+    if meta is None:
+        return False
+    return (
+        meta.get("version") == TOKEN_CACHE_VERSION
+        and meta.get("tokenizer_fingerprint") == tokenizer.fingerprint
+        and meta.get("bos_token_id") == tokenizer.get_bos_token_id()
+        and meta.get("source_parquet") == parquet_path.name
+    )
+
+
+def _split_has_token_cache(split: str, tokenizer: Tokenizer) -> bool:
+    parquet_paths = _split_parquet_paths(split)
+    return all(_has_valid_token_cache(parquet_path, tokenizer) for parquet_path in parquet_paths)
+
+
+def build_token_cache(tokenizer: Tokenizer, tokenizer_batch_size: int = 128) -> None:
+    TOKEN_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    parquet_paths = list_parquet_files()
+    if not parquet_paths:
+        raise RuntimeError("No parquet files found. Run prepare_mlx.py first.")
+    if tokenizer.fingerprint is None:
+        raise RuntimeError("Tokenizer fingerprint missing; token cache cannot be validated.")
+    if tokenizer.get_vocab_size() > np.iinfo(np.uint16).max:
+        raise RuntimeError("Token cache expects vocab_size <= 65535 for uint16 storage.")
+
+    ready = sum(1 for parquet_path in parquet_paths if _has_valid_token_cache(parquet_path, tokenizer))
+    if ready == len(parquet_paths):
+        print(f"Token cache: all {ready} shard caches already built at {TOKEN_CACHE_DIR}")
+        return
+
+    print(f"Token cache: building {len(parquet_paths) - ready} shard caches at {TOKEN_CACHE_DIR}...")
+    for parquet_path in parquet_paths:
+        if _has_valid_token_cache(parquet_path, tokenizer):
+            continue
+        _build_single_token_cache(parquet_path, tokenizer, tokenizer_batch_size=tokenizer_batch_size)
+
+
+def _build_single_token_cache(parquet_path: Path, tokenizer: Tokenizer, tokenizer_batch_size: int = 128) -> None:
+    paths = _token_cache_paths(parquet_path)
+    temp_tokens = paths["tokens"].with_name(paths["tokens"].name + ".tmp")
+    temp_offsets = paths["offsets"].with_name(paths["offsets"].name + ".tmp")
+    temp_meta = paths["meta"].with_name(paths["meta"].name + ".tmp")
+
+    offsets = [0]
+    total_tokens = 0
+    doc_count = 0
+    bos_token = tokenizer.get_bos_token_id()
+
+    print(f"  Caching {parquet_path.name}")
+    parquet_file = pq.ParquetFile(parquet_path)
+    with temp_tokens.open("wb") as handle:
+        for row_group_idx in range(parquet_file.num_row_groups):
+            row_group = parquet_file.read_row_group(row_group_idx)
+            batch = row_group.column("text").to_pylist()
+            for start in range(0, len(batch), tokenizer_batch_size):
+                token_lists = tokenizer.encode(batch[start:start + tokenizer_batch_size], prepend=bos_token)
+                for doc in token_lists:
+                    doc_array = np.asarray(doc, dtype=np.uint16)
+                    doc_array.tofile(handle)
+                    total_tokens += int(doc_array.size)
+                    offsets.append(total_tokens)
+                    doc_count += 1
+
+    with temp_offsets.open("wb") as handle:
+        np.save(handle, np.asarray(offsets, dtype=np.int64))
+    meta = {
+        "version": TOKEN_CACHE_VERSION,
+        "source_parquet": parquet_path.name,
+        "tokenizer_fingerprint": tokenizer.fingerprint,
+        "bos_token_id": bos_token,
+        "doc_count": doc_count,
+        "token_count": total_tokens,
+        "dtype": "uint16",
+    }
+    temp_meta.write_text(json.dumps(meta, indent=2, sort_keys=True) + "\n")
+
+    temp_tokens.replace(paths["tokens"])
+    temp_offsets.replace(paths["offsets"])
+    temp_meta.replace(paths["meta"])
+
+
+def _document_text_batches(parquet_paths: list[Path], tokenizer_batch_size: int = 128):
     epoch = 1
     while True:
         for filepath in parquet_paths:
@@ -235,6 +347,45 @@ def _document_batches(split: str, tokenizer_batch_size: int = 128):
         epoch += 1
 
 
+def _document_token_batches(
+    split: str,
+    tokenizer: Tokenizer,
+    tokenizer_batch_size: int = 128,
+    *,
+    use_cache: bool | None = None,
+):
+    parquet_paths = _split_parquet_paths(split)
+    if use_cache is None:
+        use_cache = _split_has_token_cache(split, tokenizer)
+    if use_cache:
+        yield from _cached_document_batches(parquet_paths, tokenizer_batch_size=tokenizer_batch_size)
+        return
+
+    bos_token = tokenizer.get_bos_token_id()
+    for text_batch, epoch in _document_text_batches(parquet_paths, tokenizer_batch_size=tokenizer_batch_size):
+        yield tokenizer.encode(text_batch, prepend=bos_token), epoch
+
+
+def _cached_document_batches(parquet_paths: list[Path], tokenizer_batch_size: int = 128):
+    epoch = 1
+    while True:
+        for parquet_path in parquet_paths:
+            paths = _token_cache_paths(parquet_path)
+            offsets = np.load(paths["offsets"], mmap_mode="r")
+            tokens = np.memmap(paths["tokens"], dtype=np.uint16, mode="r")
+            batch: list[np.ndarray] = []
+            for doc_idx in range(len(offsets) - 1):
+                start = int(offsets[doc_idx])
+                end = int(offsets[doc_idx + 1])
+                batch.append(tokens[start:end])
+                if len(batch) == tokenizer_batch_size:
+                    yield batch, epoch
+                    batch = []
+            if batch:
+                yield batch, epoch
+        epoch += 1
+
+
 class PackedDataLoader:
     def __init__(self, tokenizer: Tokenizer, batch_size: int, seq_len: int, split: str, buffer_size: int = 1000):
         self.tokenizer = tokenizer
@@ -242,21 +393,22 @@ class PackedDataLoader:
         self.seq_len = seq_len
         self.row_capacity = seq_len + 1
         self.buffer_size = buffer_size
-        self.batches = _document_batches(split)
-        self.doc_buffer: list[list[int]] = []
+        self.using_token_cache = _split_has_token_cache(split, tokenizer)
+        source = "token cache" if self.using_token_cache else "parquet + tokenizer fallback"
+        print(f"Data loader ({split}): using {source}.")
+        self.batches = _document_token_batches(split, tokenizer, use_cache=self.using_token_cache)
+        self.doc_buffer: list[np.ndarray | list[int]] = []
         self.epoch = 1
         self.row_buffer = np.empty((batch_size, self.row_capacity), dtype=np.int32)
         self.inputs = np.empty((batch_size, seq_len), dtype=np.int32)
         self.targets = np.empty((batch_size, seq_len), dtype=np.int32)
-        self.bos_token = tokenizer.get_bos_token_id()
 
     def __iter__(self) -> "PackedDataLoader":
         return self
 
     def refill_buffer(self) -> None:
-        doc_batch, self.epoch = next(self.batches)
-        token_lists = self.tokenizer.encode(doc_batch, prepend=self.bos_token)
-        self.doc_buffer.extend(token_lists)
+        token_batch, self.epoch = next(self.batches)
+        self.doc_buffer.extend(token_batch)
 
     def __next__(self):
         for row_idx in range(self.batch_size):
