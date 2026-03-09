@@ -501,6 +501,146 @@ def _document_text_batches(parquet_paths: list[Path], tokenizer_batch_size: int 
         epoch += 1
 
 
+class _CachedTokenBatchSource:
+    def __init__(self, parquet_paths: list[Path], tokenizer_batch_size: int = 128):
+        if not parquet_paths:
+            raise RuntimeError("PackedDataLoader requires at least one parquet shard.")
+        self.parquet_paths = parquet_paths
+        self.tokenizer_batch_size = tokenizer_batch_size
+        self.parquet_index = 0
+        self.doc_index = 0
+        self.epoch = 1
+        self._offsets = None
+        self._tokens = None
+        self._doc_count = 0
+        self._open_current_parquet()
+
+    def _open_current_parquet(self) -> None:
+        paths = _token_cache_paths(self.parquet_paths[self.parquet_index])
+        self._offsets = np.load(paths["offsets"], mmap_mode="r")
+        self._tokens = np.memmap(paths["tokens"], dtype=np.uint16, mode="r")
+        self._doc_count = len(self._offsets) - 1
+
+    def _advance_parquet(self) -> None:
+        self.parquet_index += 1
+        self.doc_index = 0
+        if self.parquet_index >= len(self.parquet_paths):
+            self.parquet_index = 0
+            self.epoch += 1
+        self._open_current_parquet()
+
+    def next_batch(self):
+        batch = []
+        batch_epoch = self.epoch
+        while True:
+            while self.doc_index < self._doc_count and len(batch) < self.tokenizer_batch_size:
+                start = int(self._offsets[self.doc_index])
+                end = int(self._offsets[self.doc_index + 1])
+                batch.append(self._tokens[start:end])
+                self.doc_index += 1
+            if batch:
+                if self.doc_index >= self._doc_count:
+                    self._advance_parquet()
+                return batch, batch_epoch
+            self._advance_parquet()
+            batch_epoch = self.epoch
+
+    def state_dict(self) -> dict:
+        return {
+            "kind": "cached_token",
+            "parquet_index": self.parquet_index,
+            "doc_index": self.doc_index,
+            "epoch": self.epoch,
+            "tokenizer_batch_size": self.tokenizer_batch_size,
+        }
+
+    def load_state_dict(self, state: dict) -> None:
+        self.parquet_index = int(state["parquet_index"])
+        self.doc_index = int(state["doc_index"])
+        self.epoch = int(state["epoch"])
+        self._open_current_parquet()
+
+
+class _TextTokenBatchSource:
+    def __init__(self, parquet_paths: list[Path], tokenizer: Tokenizer, tokenizer_batch_size: int = 128):
+        if not parquet_paths:
+            raise RuntimeError("PackedDataLoader requires at least one parquet shard.")
+        self.parquet_paths = parquet_paths
+        self.tokenizer = tokenizer
+        self.tokenizer_batch_size = tokenizer_batch_size
+        self.bos_token = tokenizer.get_bos_token_id()
+        self.parquet_index = 0
+        self.row_group_index = 0
+        self.row_offset = 0
+        self.epoch = 1
+
+    def _current_file(self) -> pq.ParquetFile:
+        return pq.ParquetFile(self.parquet_paths[self.parquet_index])
+
+    def _advance_parquet(self) -> None:
+        self.parquet_index += 1
+        self.row_group_index = 0
+        self.row_offset = 0
+        if self.parquet_index >= len(self.parquet_paths):
+            self.parquet_index = 0
+            self.epoch += 1
+
+    def next_batch(self):
+        while True:
+            parquet_file = self._current_file()
+            if self.row_group_index >= parquet_file.num_row_groups:
+                self._advance_parquet()
+                continue
+
+            texts = parquet_file.read_row_group(self.row_group_index).column("text").to_pylist()
+            if self.row_offset >= len(texts):
+                self.row_group_index += 1
+                self.row_offset = 0
+                continue
+
+            batch_epoch = self.epoch
+            end = min(self.row_offset + self.tokenizer_batch_size, len(texts))
+            text_batch = texts[self.row_offset:end]
+            self.row_offset = end
+            if self.row_offset >= len(texts):
+                self.row_group_index += 1
+                self.row_offset = 0
+                if self.row_group_index >= parquet_file.num_row_groups:
+                    self._advance_parquet()
+            return self.tokenizer.encode(text_batch, prepend=self.bos_token), batch_epoch
+
+    def state_dict(self) -> dict:
+        return {
+            "kind": "text_tokenized",
+            "parquet_index": self.parquet_index,
+            "row_group_index": self.row_group_index,
+            "row_offset": self.row_offset,
+            "epoch": self.epoch,
+            "tokenizer_batch_size": self.tokenizer_batch_size,
+        }
+
+    def load_state_dict(self, state: dict) -> None:
+        self.parquet_index = int(state["parquet_index"])
+        self.row_group_index = int(state["row_group_index"])
+        self.row_offset = int(state["row_offset"])
+        self.epoch = int(state["epoch"])
+
+
+def _make_document_batch_source(
+    split: str,
+    tokenizer: Tokenizer,
+    tokenizer_batch_size: int = 128,
+    *,
+    use_cache: bool | None = None,
+):
+    parquet_paths = _split_parquet_paths(split)
+    if use_cache is None:
+        use_cache = _split_has_token_cache(split, tokenizer)
+    if use_cache:
+        return _CachedTokenBatchSource(parquet_paths, tokenizer_batch_size=tokenizer_batch_size)
+    return _TextTokenBatchSource(parquet_paths, tokenizer, tokenizer_batch_size=tokenizer_batch_size)
+
+
 def _document_token_batches(
     split: str,
     tokenizer: Tokenizer,
@@ -545,12 +685,13 @@ class PackedDataLoader:
         self.tokenizer = tokenizer
         self.batch_size = batch_size
         self.seq_len = seq_len
+        self.split = split
         self.row_capacity = seq_len + 1
         self.buffer_size = buffer_size
         self.using_token_cache = _split_has_token_cache(split, tokenizer)
         source = "token cache" if self.using_token_cache else "parquet + tokenizer fallback"
         print(f"Data loader ({split}): using {source}.")
-        self.batches = _document_token_batches(split, tokenizer, use_cache=self.using_token_cache)
+        self.batch_source = _make_document_batch_source(split, tokenizer, use_cache=self.using_token_cache)
         self.doc_buffer: list[np.ndarray | list[int]] = []
         self.epoch = 1
         self.row_buffer = np.empty((batch_size, self.row_capacity), dtype=np.int32)
@@ -561,8 +702,33 @@ class PackedDataLoader:
         return self
 
     def refill_buffer(self) -> None:
-        token_batch, self.epoch = next(self.batches)
+        token_batch, self.epoch = self.batch_source.next_batch()
         self.doc_buffer.extend(token_batch)
+
+    def checkpoint_state(self) -> tuple[dict, dict[str, np.ndarray]]:
+        doc_buffer_tokens, doc_buffer_offsets = _pack_documents(self.doc_buffer)
+        return (
+            {
+                "loader_type": "packed",
+                "split": self.split,
+                "batch_size": self.batch_size,
+                "seq_len": self.seq_len,
+                "buffer_size": self.buffer_size,
+                "using_token_cache": self.using_token_cache,
+                "epoch": self.epoch,
+                "tokenizer_fingerprint": self.tokenizer.fingerprint,
+                "batch_source": self.batch_source.state_dict(),
+            },
+            {
+                "doc_buffer_tokens": doc_buffer_tokens,
+                "doc_buffer_offsets": doc_buffer_offsets,
+            },
+        )
+
+    def load_checkpoint_state(self, metadata: dict, arrays: dict[str, np.ndarray]) -> None:
+        self.epoch = int(metadata["epoch"])
+        self.doc_buffer = _unpack_documents(arrays["doc_buffer_tokens"], arrays["doc_buffer_offsets"])
+        self.batch_source.load_state_dict(metadata["batch_source"])
 
     def __next__(self):
         for row_idx in range(self.batch_size):
@@ -600,6 +766,7 @@ class PrepackedDataLoader:
         self.tokenizer = tokenizer
         self.batch_size = batch_size
         self.seq_len = seq_len
+        self.split = split
         self.row_capacity = seq_len + 1
         self.epoch = 1
         self.row_index = 0
@@ -635,6 +802,60 @@ class PrepackedDataLoader:
                 self.row_index = 0
                 self.epoch += 1
         return mx.array(self.inputs), mx.array(self.targets), self.epoch
+
+    def checkpoint_state(self) -> tuple[dict, dict[str, np.ndarray]]:
+        return (
+            {
+                "loader_type": "prepacked",
+                "split": self.split,
+                "batch_size": self.batch_size,
+                "seq_len": self.seq_len,
+                "row_index": self.row_index,
+                "epoch": self.epoch,
+                "tokenizer_fingerprint": self.tokenizer.fingerprint,
+            },
+            {},
+        )
+
+    def load_checkpoint_state(self, metadata: dict, arrays: dict[str, np.ndarray]) -> None:
+        self.row_index = int(metadata["row_index"])
+        self.epoch = int(metadata["epoch"])
+
+
+def _pack_documents(documents: list[np.ndarray | list[int]]) -> tuple[np.ndarray, np.ndarray]:
+    offsets = [0]
+    chunks = []
+    for document in documents:
+        array = np.asarray(document, dtype=np.uint16)
+        chunks.append(array)
+        offsets.append(offsets[-1] + len(array))
+    flat = np.concatenate(chunks) if chunks else np.empty((0,), dtype=np.uint16)
+    return flat, np.asarray(offsets, dtype=np.int64)
+
+
+def _unpack_documents(tokens: np.ndarray, offsets: np.ndarray) -> list[np.ndarray]:
+    return [
+        np.array(tokens[int(offsets[idx]):int(offsets[idx + 1])], dtype=np.uint16, copy=True)
+        for idx in range(len(offsets) - 1)
+    ]
+
+
+def serialize_loader_state(loader) -> tuple[dict, dict[str, np.ndarray]]:
+    return loader.checkpoint_state()
+
+
+def restore_loader_state(loader, metadata: dict, arrays: dict[str, np.ndarray]) -> None:
+    expected = {
+        "loader_type": "prepacked" if isinstance(loader, PrepackedDataLoader) else "packed",
+        "split": loader.split,
+        "batch_size": loader.batch_size,
+        "seq_len": loader.seq_len,
+        "tokenizer_fingerprint": loader.tokenizer.fingerprint,
+    }
+    for key, value in expected.items():
+        if metadata.get(key) != value:
+            raise ValueError(f"Checkpoint loader metadata mismatch for {key}: expected {value!r}, got {metadata.get(key)!r}")
+    loader.load_checkpoint_state(metadata, arrays)
 
 
 def make_dataloader(

@@ -51,6 +51,16 @@ The current MLX port and preset defaults were developed on and tested against an
 
 If you want to precompute the row-packing step as well, run `uv run prepare_mlx.py --build-prepacked-cache`. That builds reusable packed-row caches under `~/.cache/autoresearch/prepacked_cache/`, keyed by split and sequence length. `train_mlx.py` and evaluation will prefer those caches automatically when they are present; use `uv run train_mlx.py --no-prepacked-cache` to force the live packing path for debugging or ablations.
 
+`train_mlx.py` also supports resumable checkpoints. Use `--checkpoint-path` to save a checkpoint directory, `--checkpoint-interval` to save periodically during longer runs, and `--resume-from` to continue the exact run state later.
+
+```bash
+# save checkpoints every 5 minutes
+uv run train_mlx.py --checkpoint-path /tmp/autoresearch-m5-balanced --checkpoint-interval 300
+
+# resume later with a larger total training budget
+uv run train_mlx.py --resume-from /tmp/autoresearch-m5-balanced --time-budget 900
+```
+
 ## Presets
 
 `train_mlx.py` supports named presets so the default shape is reasonable for Apple Silicon instead of mirroring an H100-oriented baseline.

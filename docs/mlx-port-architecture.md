@@ -370,7 +370,7 @@ These departures are not accidents. They are the core meaning of the fork: porta
 | MFU reporting | H100-relative MFU estimate | `mfu_percent` hardcoded to `0.00` | Gap | The MLX port does not yet provide a meaningful utilization metric. |
 | Overnight experimentation | No in-repo runner | Added local sweep runner and detached launcher | Extension | Useful addition, but not part of upstream parity. |
 | Autonomous code mutation | Human/agent edits `train.py` directly | Human/agent edits `train_mlx.py` and/or package modules | Partial parity | The loop exists, but the MLX path is multi-file by design. |
-| Resume/checkpoint support | Not present | Not present | Parity | Neither path currently addresses long-run resumability. |
+| Resume/checkpoint support | Not present | Step-boundary checkpoint and resume in `train_mlx.py` | Improvement | The MLX path now saves model, optimizer, runtime counters, and train-loader state for resumable local runs. |
 
 ## The Most Important Metric Caveat
 

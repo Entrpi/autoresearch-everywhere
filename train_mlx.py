@@ -22,6 +22,7 @@ from autoresearch_mlx.constants import (
     PROXY_EVAL_TOKENS,
     TIME_BUDGET,
 )
+from autoresearch_mlx.checkpoints import load_checkpoint_metadata, restore_checkpoint, save_checkpoint
 from autoresearch_mlx.data import Tokenizer, evaluate_bpb, make_dataloader
 from autoresearch_mlx.model import GPT, GPTConfig
 from autoresearch_mlx.optim import MuonAdamW
@@ -57,6 +58,9 @@ class RunConfig:
     seed: int
     smoke: bool
     prefer_prepacked_cache: bool
+    checkpoint_path: str | None
+    checkpoint_interval: float | None
+    resume_from: str | None
 
 
 def verify_mlx_env() -> None:
@@ -234,9 +238,10 @@ DEFAULT_PRESET = "m5-balanced"
 
 
 def resolve_run_config(args: argparse.Namespace) -> RunConfig:
-    preset = PRESETS[args.preset]
+    preset_name = args.preset or DEFAULT_PRESET
+    preset = PRESETS[preset_name]
     config = RunConfig(
-        preset=args.preset,
+        preset=preset_name,
         time_budget=TIME_BUDGET,
         seq_len=preset.seq_len,
         eval_tokens=preset.eval_tokens,
@@ -247,9 +252,12 @@ def resolve_run_config(args: argparse.Namespace) -> RunConfig:
         window_pattern=preset.window_pattern,
         device_batch_size=preset.device_batch_size,
         total_batch_size=preset.total_batch_size,
-        seed=args.seed,
+        seed=42 if args.seed is None else args.seed,
         smoke=args.smoke,
         prefer_prepacked_cache=not args.no_prepacked_cache,
+        checkpoint_path=args.checkpoint_path,
+        checkpoint_interval=args.checkpoint_interval,
+        resume_from=args.resume_from,
     )
 
     if args.smoke:
@@ -292,12 +300,58 @@ def resolve_run_config(args: argparse.Namespace) -> RunConfig:
     return config
 
 
+def resolve_resume_config(args: argparse.Namespace) -> RunConfig:
+    disallowed = []
+    for field in (
+        "preset",
+        "seq_len",
+        "eval_tokens",
+        "canonical_eval_seq_len",
+        "canonical_eval_tokens",
+        "canonical_eval_batch_size",
+        "depth",
+        "window_pattern",
+        "device_batch_size",
+        "total_batch_size",
+        "seed",
+    ):
+        if getattr(args, field) is not None:
+            disallowed.append(field)
+    if args.smoke:
+        disallowed.append("smoke")
+    if args.no_prepacked_cache:
+        disallowed.append("no_prepacked_cache")
+    if disallowed:
+        raise ValueError(
+            "--resume-from restores the saved run configuration. Only "
+            "--time-budget, --checkpoint-path, and --checkpoint-interval may be overridden. "
+            f"Got overrides for: {', '.join(disallowed)}"
+        )
+
+    metadata = load_checkpoint_metadata(args.resume_from)
+    run_config = dict(metadata["run_config"])
+    run_config.setdefault("checkpoint_path", None)
+    run_config.setdefault("checkpoint_interval", None)
+    run_config["time_budget"] = args.time_budget if args.time_budget is not None else run_config["time_budget"]
+    run_config["checkpoint_path"] = (
+        args.checkpoint_path
+        if args.checkpoint_path is not None
+        else run_config["checkpoint_path"] or args.resume_from
+    )
+    run_config["checkpoint_interval"] = (
+        args.checkpoint_interval
+        if args.checkpoint_interval is not None
+        else run_config["checkpoint_interval"]
+    )
+    run_config["resume_from"] = args.resume_from
+    return RunConfig(**run_config)
+
+
 def parse_args() -> RunConfig:
     parser = argparse.ArgumentParser(description="Run autoresearch pretraining with MLX on Apple Silicon.")
     parser.add_argument(
         "--preset",
         choices=tuple(PRESETS),
-        default=DEFAULT_PRESET,
         help="Named runtime preset. Defaults to the M5-friendly balanced preset.",
     )
     parser.add_argument("--time-budget", type=float, help="Training budget in seconds.")
@@ -333,7 +387,7 @@ def parse_args() -> RunConfig:
         type=int,
         help="Total batch size in tokens across gradient accumulation.",
     )
-    parser.add_argument("--seed", type=int, default=42, help="Random seed.")
+    parser.add_argument("--seed", type=int, help="Random seed.")
     parser.add_argument(
         "--smoke",
         action="store_true",
@@ -344,7 +398,22 @@ def parse_args() -> RunConfig:
         action="store_true",
         help="Disable optional prepacked row caches and use the live packing path instead.",
     )
+    parser.add_argument(
+        "--checkpoint-path",
+        help="Directory to save a resumable training checkpoint.",
+    )
+    parser.add_argument(
+        "--checkpoint-interval",
+        type=float,
+        help="Save a checkpoint every N training seconds. Requires --checkpoint-path.",
+    )
+    parser.add_argument(
+        "--resume-from",
+        help="Resume training from a checkpoint directory.",
+    )
     args = parser.parse_args()
+    if args.resume_from:
+        return resolve_resume_config(args)
     return resolve_run_config(args)
 
 
@@ -378,7 +447,9 @@ def main() -> None:
         f"canonical_eval_tokens={args.canonical_eval_tokens}, "
         f"canonical_eval_batch_size={args.canonical_eval_batch_size}, "
         f"device_batch_size={args.device_batch_size}, total_batch_size={args.total_batch_size}, "
-        f"smoke={args.smoke}, prefer_prepacked_cache={args.prefer_prepacked_cache}"
+        f"smoke={args.smoke}, prefer_prepacked_cache={args.prefer_prepacked_cache}, "
+        f"checkpoint_path={args.checkpoint_path}, checkpoint_interval={args.checkpoint_interval}, "
+        f"resume_from={args.resume_from}"
     )
 
     model = GPT(config)
@@ -416,19 +487,65 @@ def main() -> None:
         "train",
         prefer_prepacked_cache=args.prefer_prepacked_cache,
     )
+    if args.resume_from:
+        restored = restore_checkpoint(
+            args.resume_from,
+            model=model,
+            optimizer=optimizer,
+            train_loader=train_loader,
+        )
+        print(
+            f"Resumed from {args.resume_from}: step={restored['step']}, "
+            f"training_seconds={restored['total_training_time']:.1f}"
+        )
+    else:
+        restored = {
+            "step": 0,
+            "total_training_time": 0.0,
+            "smooth_train_loss": 0.0,
+        }
     grad_step = make_grad_step_fn(model)
     apply_grads = make_apply_grads_fn(model, optimizer)
 
     print(f"Time budget: {args.time_budget}s")
     print(f"Gradient accumulation steps: {grad_accum_steps}")
+    if args.checkpoint_interval is not None and args.checkpoint_path is None:
+        raise ValueError("--checkpoint-interval requires --checkpoint-path")
 
     mx.reset_peak_memory()
     t_start_training = time.time()
-    smooth_train_loss = 0.0
-    total_training_time = 0.0
-    step = 0
+    smooth_train_loss = float(restored["smooth_train_loss"])
+    total_training_time = float(restored["total_training_time"])
+    step = int(restored["step"])
+    last_checkpoint_time = total_training_time
+    checkpoint_run_config = asdict(replace(args, resume_from=None))
 
-    while True:
+    def maybe_save_checkpoint(*, force: bool = False) -> None:
+        nonlocal last_checkpoint_time
+        if args.checkpoint_path is None:
+            return
+        if force and total_training_time == last_checkpoint_time:
+            return
+        if not force:
+            if args.checkpoint_interval is None:
+                return
+            if (total_training_time - last_checkpoint_time) < args.checkpoint_interval:
+                return
+        save_checkpoint(
+            args.checkpoint_path,
+            run_config=checkpoint_run_config,
+            model_config=asdict(config),
+            model=model,
+            optimizer=optimizer,
+            train_loader=train_loader,
+            step=step,
+            total_training_time=total_training_time,
+            smooth_train_loss=smooth_train_loss,
+        )
+        last_checkpoint_time = total_training_time
+        print(f"\nCheckpoint saved to {args.checkpoint_path} at step {step}.")
+
+    while total_training_time < args.time_budget:
         progress = min(total_training_time / args.time_budget, 1.0)
         lrm = get_lr_multiplier(progress)
         muon_momentum = get_muon_momentum(step)
@@ -481,10 +598,10 @@ def main() -> None:
             gc.collect()
 
         step += 1
-        if total_training_time >= args.time_budget:
-            break
+        maybe_save_checkpoint()
 
     print()
+    maybe_save_checkpoint(force=True)
 
     total_tokens = step * args.total_batch_size
     model.eval()

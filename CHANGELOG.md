@@ -18,10 +18,97 @@ Top-level provenance bullets are the scored units. If a point is directly deriva
 When provenance is ambiguous, prefer `Human-directed, AI-shaped` over `AI-identified within brief, human-shaped`, prefer `AI-identified within brief, human-shaped` over `AI-identified within brief, human-approved`, prefer `AI-identified within brief, human-approved` over `Self-initiated, human-approved`, and prefer `Self-initiated, human-approved` over `Fully autonomous`.
 This changelog should bias toward under-claiming rather than over-claiming successful autonomy. When specific provenance attributions are corrected, prefer the more conservative tiering if there is real ambiguity. The long-term goal remains to push as much work as possible into the `Fully autonomous` category over time.
 This branch does not admit fully human-authored code changes. If a change must be authored entirely by a human, it belongs in a fork rather than this branch's mainline history.
+Grounding should also be conservative. When a claim is about performance, stability, or behavioral improvement, prefer the strongest practical evidence over the quickest smoke pass, and record the actual strength of that evidence rather than the intended standard.
+For benchmarked changes, "strong enough" means long enough and heavy enough to produce a high-signal result on the changed behavior. Choose a run shape where the affected path executes enough times to matter. For example, checkpoint-overhead claims should usually be grounded with a run that produces many checkpoint saves rather than only one or two, and scaling claims should prefer a model/preset large enough for the bottleneck to show up clearly.
+On this hardware, the default canonical matched benchmark window for optimization grounding is `60s`, not `30s`. Use shorter runs for smoke checks or when the changed path cannot practically support a longer benchmark, and say so explicitly when you do.
 
 ## Unreleased
 
-### New commit — Lazy-grow model caches — score `2`
+### New commit — Add checkpoint/resume for MLX training — score `6`
+
+**Human-directed, AI-shaped (4)**
+
+- Requested stronger grounding on the checkpoint/resume work by extending the benchmark window and then testing the heavier `m5-xlarge` preset, while leaving the exact comparison design to the agent.
+
+**AI-identified within brief, human-approved (2)**
+
+- Requested that work continue to the next optimization item after landing the lazy-cache checkpoint.
+  - Added resumable checkpoint save/load for the MLX trainer, including model weights, optimizer state, runtime counters, and train-loader cursor state.
+  - Added periodic step-boundary checkpoint saves plus explicit `--resume-from`, `--checkpoint-path`, and `--checkpoint-interval` flags.
+  - Added train-loader serialization for both prepacked and live-packed paths so resume continues from the saved training position instead of restarting the data stream.
+
+**Grounding**
+
+- Files:
+  - `autoresearch_mlx/checkpoints.py`
+  - `autoresearch_mlx/data.py`
+  - `train_mlx.py`
+  - `README.md`
+  - `docs/mlx-port-architecture.md`
+  - `CHANGELOG.md`
+- Validation:
+  - `python3 -m py_compile train_mlx.py autoresearch_mlx/data.py autoresearch_mlx/checkpoints.py`
+  - `./.venv/bin/python train_mlx.py --smoke --checkpoint-path /tmp/autoresearch_resume_smoke2 --checkpoint-interval 0.5`
+  - `./.venv/bin/python train_mlx.py --resume-from /tmp/autoresearch_resume_smoke2 --time-budget 1.5`
+  - `./.venv/bin/python train_mlx.py --smoke --checkpoint-path /tmp/autoresearch_resume_smoke3 --checkpoint-interval 0.5`
+- Measurements:
+  - matched `m5-large` run (`20s`, `512` eval tokens) with and without periodic checkpoint saves every `2s`:
+    - wall-clock overhead outside tracked training time: `0.1s -> 0.8s` (`+0.7s`) across ten checkpoint writes, or about `0.07s/save`
+    - peak memory: `1944.3 MB -> 1944.3 MB` (flat)
+    - steady-state per-step throughput stayed in the same `~15k tok/s` band
+    - `num_steps` stayed flat at `76 -> 76`, which is the cleaner fixed-budget result
+  - matched `m5-xlarge` run (`60s`, `512` eval tokens) with and without periodic checkpoint saves every `2s`:
+    - wall-clock overhead outside tracked training time: `0.2s -> 3.5s` (`+3.3s`) across twenty-nine checkpoint writes, or about `0.11s/save`
+    - peak memory: `4294.2 MB -> 4294.2 MB` (flat)
+    - `num_steps` stayed flat at `115 -> 115`
+    - steady-state per-step throughput stayed in the same `~7.8k-8.0k tok/s` band
+- Confirmed behavior:
+  - checkpoint saves succeeded during smoke runs without breaking evaluation
+  - resume restored the saved state at `step=133`, continued training to `step=186`, and preserved the same train-loader position rather than restarting from zero
+
+### New commit — Tighten grounding guidance — score `4`
+
+**Human-directed, AI-shaped (4)**
+
+- Requested that the changelog explicitly track grounding shaping and that the agent guidance become more eager to robustly ground changes before claiming wins.
+
+**Grounding**
+
+- Files:
+  - `CHANGELOG.md`
+  - `program_mlx.md`
+- Validation:
+  - docs-only change; no runtime validation needed
+
+### New commit — Standardize 60s benchmark grounding window — score `5`
+
+**Human-driven (5)**
+
+- Requested that, given the constrained Apple Silicon hardware, the canonical matched benchmark run length for grounding optimization changes be `60s` instead of `30s`.
+
+**Grounding**
+
+- Files:
+  - `CHANGELOG.md`
+  - `program_mlx.md`
+- Validation:
+  - matched `60s` preset reruns with `--eval-tokens 512 --canonical-eval-tokens 512` for:
+    - `m5-fast`
+    - `m5-balanced`
+    - `m5-large`
+    - `m5-xlarge`
+- Measurements:
+  - `m5-fast`: `val_bpb=1.964834`, `proxy_val_bpb=1.900012`, `~70.1k tok/s`, `174.5 MB`, `8213` steps
+  - `m5-balanced`: `val_bpb=1.757194`, `proxy_val_bpb=1.741310`, `~34.5k tok/s`, `949.9 MB`, `1011` steps
+  - `m5-large`: `val_bpb=1.901965`, `proxy_val_bpb=1.935591`, `~14.6k tok/s`, `1944.3 MB`, `215` steps
+  - `m5-xlarge`: `val_bpb=2.150093`, `proxy_val_bpb=2.122628`, `~7.8k tok/s`, `4294.2 MB`, `114` steps
+- Notes:
+  - `m5-fast` and `m5-balanced` used the train-side prepacked cache path during these reruns.
+  - `m5-large` and `m5-xlarge` used the token-cache plus live-packing path, so their throughput figures are conservative relative to a fully prepacked `1024/2048` cache setup.
+
+## Committed History
+
+### March 9, 2026 — `f1d14e8` — Lazy-grow model caches — score `2`
 
 **AI-identified within brief, human-approved (2)**
 
@@ -51,8 +138,6 @@ This branch does not admit fully human-authored code changes. If a change must b
 - Confirmed behavior:
   - the smoke path still trains and evaluates end-to-end
   - the `m5-xlarge` path completed with the lazily prewarmed `2048`-token cache setup instead of relying on the old eager `10x` RoPE allocation strategy
-
-## Committed History
 
 ### March 9, 2026 — `2be14fe` — Add changelog score parser — score `4`
 
