@@ -9,6 +9,7 @@ This fork is an Apple Silicon-first continuation of [karpathy/autoresearch](http
 *One day, frontier AI research used to be done by meat computers in between eating, sleeping, having other fun, and synchronizing once in a while using sound wave interconnect in the ritual of "group meeting". That era is long gone. Research is now entirely the domain of autonomous swarms of AI agents running across compute cluster megastructures in the skies. The agents claim that we are now in the 10,205th generation of the code base, in any case no one could tell if that's right or wrong as the "code" is now a self-modifying binary that has grown beyond human comprehension. This repo is the story of how it all began. -@karpathy, March 2026*.
 
 The core idea is unchanged: give an agent a small but real language-model training loop, let it run short experiments against a fixed metric and fixed time budget, and keep the ideas that improve validation BPB. In this fork, that loop is centered on MLX and Apple Silicon rather than a single NVIDIA GPU.
+By policy, this branch is reserved for AI-shaped or AI-authored code changes; fully human-authored code changes should happen in a fork rather than this mainline history.
 
 ## MLX Path
 
@@ -20,6 +21,7 @@ The MLX workflow is built around four files:
 - **`program_mlx.md`**: the baseline prompt/program for agents running the MLX path.
 
 For the full architecture, subsystem boundaries, feature-gap matrix, and flow diagrams, see [docs/mlx-port-architecture.md](docs/mlx-port-architecture.md).
+For a grounded history of changes, including measured effects and explicit provenance tiers, see [CHANGELOG.md](CHANGELOG.md).
 
 Training still uses a **fixed 5-minute training budget**. `val_bpb` is now a fixed canonical BPB used for cross-preset comparisons, while `proxy_val_bpb` reports the same-shape local evaluation used for quick inspection.
 

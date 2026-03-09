@@ -81,6 +81,19 @@ commit	val_bpb	memory_gb	status	description
 
 The status is one of `keep`, `discard`, or `crash`. `keep` and `discard` are based on canonical `val_bpb`.
 
+Also keep `CHANGELOG.md` current for meaningful changes. Each changelog entry should clearly separate:
+
+- `Human-driven`: what the human identified and tightly specified.
+- `Human-directed, AI-shaped`: what the human directed but the agent concretely designed.
+- `AI-identified within brief, human-shaped`: what the agent surfaced inside a broad human-scoped workstream, and the human materially reshaped before implementation.
+- `AI-identified within brief, human-approved`: what the agent surfaced inside a broad human-scoped workstream and the human approved with little reshaping.
+- `Self-initiated, human-approved`: what the agent initiated outside explicit human direction but still got approved before landing.
+- `Fully autonomous`: what the agent initiated without explicit human direction or approval.
+- `Grounding`: the files changed, the checks run, and any measured effects.
+
+When provenance is ambiguous, prefer `Human-directed, AI-shaped` over `AI-identified within brief, human-shaped`, prefer `AI-identified within brief, human-shaped` over `AI-identified within brief, human-approved`, prefer `AI-identified within brief, human-approved` over `Self-initiated, human-approved`, and prefer `Self-initiated, human-approved` over `Fully autonomous`.
+Do not land fully human-authored code changes on this branch. If a change must be authored entirely by a human, do that work in a fork.
+
 ## Loop
 
 1. Inspect the current branch and commit.
@@ -90,6 +103,7 @@ The status is one of `keep`, `discard`, or `crash`. `keep` and `discard` are bas
 5. Extract the results from `run.log`.
 6. If the run crashes, inspect the traceback, fix obvious bugs, and retry a small number of times.
 7. Record the result in `results.tsv`.
-8. Keep only improvements on canonical `val_bpb`.
+8. Update `CHANGELOG.md` if the run led to a meaningful code or workflow change.
+9. Keep only improvements on canonical `val_bpb`.
 
 Do not stop and ask whether to continue once the loop starts unless the human explicitly interrupts you.
