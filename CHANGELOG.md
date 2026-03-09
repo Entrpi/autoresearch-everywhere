@@ -24,11 +24,74 @@ On this hardware, the default canonical matched benchmark window for optimizatio
 
 ## Unreleased
 
-### New commit — Make prepacked caches the normal fast path for shipped presets — score `4`
+### New commit — Add warmup-aware benchmark tooling for xlarge prepacked analysis — score `4`
 
 **Human-directed, AI-shaped (4)**
 
-- Requested that the shipped M5 presets use prepacked caches as the normal prepared-state fast path instead of treating them as an extra opt-in.
+- Requested that we understand the apparent `m5-xlarge` prepacked regression rather than guess at it.
+  - Added a focused loader-path profiling harness that separates `next(loader)`, forced `mx.eval(x, y)`, gradient computation, and optimizer update timing.
+  - Added warmup-aware benchmark reporting to `train_mlx.py`, including startup/warmup seconds and steady-state tokens-per-second, with an option to skip eval noise during benchmarking.
+  - Used it to test whether the observed xlarge regression was actually in the prepacked loader path or was just run-level noise.
+
+**Grounding**
+
+- Files:
+  - `train_mlx.py`
+  - `tools/profile_loader_path.py`
+  - `program_mlx.md`
+  - `CHANGELOG.md`
+- Validation:
+  - `python3 -m py_compile train_mlx.py tools/profile_loader_path.py`
+  - `./.venv/bin/python train_mlx.py --smoke --benchmark-warmup-steps 1 --benchmark-skip-eval --no-checkpoint`
+  - `./.venv/bin/python train_mlx.py --preset m5-xlarge --time-budget 60 --benchmark-warmup-steps 5 --benchmark-skip-eval --no-checkpoint`
+  - `./.venv/bin/python train_mlx.py --preset m5-xlarge --time-budget 60 --benchmark-warmup-steps 5 --benchmark-skip-eval --no-checkpoint --no-prepacked-cache`
+  - repeated `ABAB` run using the same two commands above
+  - `python3 -m py_compile tools/profile_loader_path.py`
+  - `./.venv/bin/python tools/profile_loader_path.py --preset m5-xlarge --steps 80 --warmup-steps 5`
+  - `./.venv/bin/python tools/profile_loader_path.py --preset m5-xlarge --steps 80 --warmup-steps 5 --no-prepacked-cache`
+  - `./.venv/bin/python tools/profile_loader_path.py --preset m5-xlarge --steps 20 --warmup-steps 5`
+  - `./.venv/bin/python tools/profile_loader_path.py --preset m5-xlarge --steps 20 --warmup-steps 5 --no-prepacked-cache`
+- Measurements:
+  - `80` measured xlarge steps after `5` warmup steps:
+
+    | Train path | `tok_per_sec` | total mean / median (ms) | loader mean / median (ms) | grad mean / median (ms) | optimizer mean / median (ms) |
+    | --- | ---: | ---: | ---: | ---: | ---: |
+    | prepacked cache | `7637.86` | `536.28 / 534.48` | `0.46 / 0.08` | `447.99 / 446.38` | `84.05 / 83.95` |
+    | token cache / live packing | `7359.01` | `556.60 / 549.47` | `1.66 / 0.90` | `463.84 / 456.97` | `87.54 / 86.47` |
+
+  - `20` measured xlarge steps after `5` warmup steps:
+
+    | Train path | steady `tok_per_sec` | steady total mean / median (ms) | warmup total mean / median (ms) |
+    | --- | ---: | ---: | ---: |
+    | prepacked cache | `7742.33` | `529.04 / 527.70` | `619.00 / 541.36` |
+    | token cache / live packing | `7736.51` | `529.44 / 527.13` | `554.78 / 539.72` |
+
+  - Interpretation:
+    - There is no evidence here of a structural steady-state xlarge regression caused by the prepacked loader path.
+    - The only consistent loader-path effect is that prepacked reduces `loader_call` time. Forced `mx.eval(x, y)` materialization stays effectively zero on both paths, so the earlier regression is not explained by unified-memory handoff showing up outside the loader bucket.
+    - The earlier `60s` end-to-end xlarge regression now looks more like run-level variance or warmup/compile noise than a genuine fast-path loss.
+  - Warmup-aware `ABAB` end-to-end benchmark (`60s`, `benchmark_warmup_steps=5`, eval skipped):
+
+    | Leg | Train path | `session_steps` | `session_tokens_M` | warmup step seconds | steady-state `tok_per_sec` | `train_tflops` | `loader_percent` |
+    | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+    | `A1` | prepacked cache | `116` | `0.475` | `3.229` | `7974.2` | `2.206` | `0.04` |
+    | `B1` | token cache / live packing | `115` | `0.471` | `2.686` | `7858.0` | `2.176` | `0.27` |
+    | `A2` | prepacked cache | `116` | `0.475` | `3.101` | `7938.6` | `2.197` | `0.06` |
+    | `B2` | token cache / live packing | `115` | `0.471` | `2.738` | `7809.5` | `2.163` | `0.38` |
+
+  - Interpreting the warmup-aware `ABAB` run:
+    - Prepacked pays an extra startup cost of about `0.45s` on average across the first `5` warmup steps.
+    - After warmup, prepacked runs about `1.6%` faster in steady-state (`7956 tok/s` average vs `7834 tok/s` average).
+    - That implies a rough xlarge crossover at about `56` steady-state steps, or about `29s`, before the prepacked path amortizes its slower warmup and comes out ahead overall.
+    - Under the repo's current `60s` benchmark window, the xlarge prepacked path should now be treated as a small net win, not a regression.
+
+## Committed History
+
+### March 9, 2026 — `d7f4d23` — Make prepacked caches default for shipped presets — score `2`
+
+**AI-identified within brief, human-approved (2)**
+
+- Surfaced making the shipped M5 presets use prepacked caches as the normal prepared-state fast path instead of treating them as an extra opt-in, and the user refreshed that priority.
   - Switched `prepare_mlx.py` to build the shipped prepacked cache coverage by default.
   - Added an explicit opt-out path for intentionally leaving the live packing fallback in place.
   - Tightened the loader logging so missing prepacked coverage is visible instead of silently falling through to token-cache/live packing.
@@ -51,29 +114,39 @@ On this hardware, the default canonical matched benchmark window for optimizatio
   - `./.venv/bin/python train_mlx.py --preset m5-large --time-budget 60 --eval-tokens 512 --canonical-eval-tokens 512 --no-prepacked-cache`
   - `./.venv/bin/python train_mlx.py --preset m5-xlarge --time-budget 60 --eval-tokens 512 --canonical-eval-tokens 512`
   - `./.venv/bin/python train_mlx.py --preset m5-xlarge --time-budget 60 --eval-tokens 512 --canonical-eval-tokens 512 --no-prepacked-cache`
+  - `./.venv/bin/python train_mlx.py --preset m5-balanced --time-budget 60 --eval-tokens 512 --canonical-eval-tokens 512`
+  - `./.venv/bin/python train_mlx.py --preset m5-balanced --time-budget 60 --eval-tokens 512 --canonical-eval-tokens 512 --no-prepacked-cache`
+  - `./.venv/bin/python train_mlx.py --preset m5-fast --time-budget 60 --eval-tokens 512 --canonical-eval-tokens 512`
+  - `./.venv/bin/python train_mlx.py --preset m5-fast --time-budget 60 --eval-tokens 512 --canonical-eval-tokens 512 --no-prepacked-cache`
 - Measurements:
   - Default `prepare_mlx.py --num-shards 1` behavior on the existing cache directory detected the raw data, tokenizer, and token caches, then built the missing shipped prepacked coverage automatically:
     - `train seq_len=1024`
     - `train seq_len=2048`
     - `val seq_len=1024`
     - `val seq_len=2048`
-  - Both larger shipped presets now hit the prepacked train path without extra preparation flags:
+  - The shipped preset coverage now hits the prepacked train path without extra preparation flags:
+    - `m5-fast`: `Data loader (train): using prepacked cache.`
+    - `m5-balanced`: `Data loader (train): using prepacked cache.`
     - `m5-large`: `Data loader (train): using prepacked cache.`
     - `m5-xlarge`: `Data loader (train): using prepacked cache.`
   - `60s` A/B comparison (`512` proxy/canonical eval tokens):
 
     | Preset | Train path | `val_bpb` | `proxy_val_bpb` | `train_tflops` | `loader_percent` | `session_steps` | `session_tokens_M` |
     | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+    | `m5-fast` | prepacked cache | `1.956952` | `1.920689` | `0.624` | `0.44` | `7741` | `3.963` |
+    | `m5-fast` | token cache / live packing | `1.975841` | `1.901032` | `0.594` | `3.58` | `7369` | `3.773` |
+    | `m5-balanced` | prepacked cache | `1.730654` | `1.739594` | `1.384` | `0.18` | `1072` | `2.195` |
+    | `m5-balanced` | token cache / live packing | `1.731765` | `1.707002` | `1.306` | `1.23` | `1014` | `2.077` |
     | `m5-large` | prepacked cache | `1.911791` | `1.929047` | `1.692` | `0.13` | `224` | `0.918` |
     | `m5-large` | token cache / live packing | `1.906361` | `1.934655` | `1.607` | `0.51` | `213` | `0.872` |
     | `m5-xlarge` | prepacked cache | `2.169967` | `2.132617` | `2.152` | `0.05` | `114` | `0.467` |
     | `m5-xlarge` | token cache / live packing | `2.140543` | `2.115287` | `2.233` | `0.36` | `118` | `0.483` |
 
   - Interpreting the matched runs:
+    - `m5-fast` shows a clear prepacked win: `7741` vs `7369` steps, `3.963M` vs `3.773M` session tokens (`+5.0%`), and `loader_percent` dropped from `3.58` to `0.44`.
+    - `m5-balanced` also shows a clear prepacked win: `1072` vs `1014` steps, `2.195M` vs `2.077M` session tokens (`+5.7%`), and `loader_percent` dropped from `1.23` to `0.18`.
     - `m5-large` shows a real fast-path win from prepacking: `224` vs `213` steps in the same `60s`, `0.918M` vs `0.872M` session tokens (`+5.3%`), and `loader_percent` dropped from `0.51` to `0.13`.
-    - `m5-xlarge` still benefits on loader overhead (`loader_percent` `0.36 -> 0.05`), but the overall `60s` pair was compute-dominated and slightly favored the live-packed run on total tokens. Treat this change as making the prepared fast path normal and visible, not as a universal throughput improvement claim for every shipped preset.
-
-## Committed History
+    - `m5-xlarge` showed lower `loader_percent` but a small single-run loss on total tokens; later dedicated profiling suggests that negative result was likely run-level variance rather than a structural steady-state fast-path regression.
 
 ### March 9, 2026 — `b2b08df` — Add robust MLX utilization instrumentation — score `4`
 

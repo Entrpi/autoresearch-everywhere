@@ -62,6 +62,8 @@ class RunConfig:
     total_batch_size: int
     seed: int
     smoke: bool
+    benchmark_warmup_steps: int
+    benchmark_skip_eval: bool
     prefer_prepacked_cache: bool
     no_checkpoint: bool
     checkpoint_path: str | None
@@ -374,6 +376,8 @@ def resolve_run_config(args: argparse.Namespace) -> RunConfig:
         total_batch_size=preset.total_batch_size,
         seed=42 if args.seed is None else args.seed,
         smoke=args.smoke,
+        benchmark_warmup_steps=0 if args.benchmark_warmup_steps is None else args.benchmark_warmup_steps,
+        benchmark_skip_eval=args.benchmark_skip_eval,
         prefer_prepacked_cache=not args.no_prepacked_cache,
         no_checkpoint=args.no_checkpoint,
         checkpoint_path=args.checkpoint_path,
@@ -440,6 +444,10 @@ def resolve_resume_config(args: argparse.Namespace) -> RunConfig:
             disallowed.append(field)
     if args.smoke:
         disallowed.append("smoke")
+    if args.benchmark_warmup_steps is not None:
+        disallowed.append("benchmark_warmup_steps")
+    if args.benchmark_skip_eval:
+        disallowed.append("benchmark_skip_eval")
     if args.no_prepacked_cache:
         disallowed.append("no_prepacked_cache")
     if disallowed:
@@ -451,6 +459,8 @@ def resolve_resume_config(args: argparse.Namespace) -> RunConfig:
 
     metadata = load_checkpoint_metadata(args.resume_from)
     run_config = dict(metadata["run_config"])
+    run_config.setdefault("benchmark_warmup_steps", 0)
+    run_config.setdefault("benchmark_skip_eval", False)
     run_config.setdefault("no_checkpoint", False)
     run_config.setdefault("checkpoint_path", None)
     run_config.setdefault("checkpoint_interval", None)
@@ -519,6 +529,16 @@ def parse_args() -> RunConfig:
         "--smoke",
         action="store_true",
         help="Run a short end-to-end sanity check with smaller defaults.",
+    )
+    parser.add_argument(
+        "--benchmark-warmup-steps",
+        type=int,
+        help="Number of initial training steps to treat as warmup/startup when reporting steady-state benchmark metrics.",
+    )
+    parser.add_argument(
+        "--benchmark-skip-eval",
+        action="store_true",
+        help="Skip proxy and canonical evaluation to reduce benchmark noise.",
     )
     parser.add_argument(
         "--no-prepacked-cache",
@@ -628,7 +648,8 @@ def main() -> None:
         f"canonical_eval_tokens={args.canonical_eval_tokens}, "
         f"canonical_eval_batch_size={args.canonical_eval_batch_size}, "
         f"device_batch_size={args.device_batch_size}, total_batch_size={args.total_batch_size}, "
-        f"smoke={args.smoke}, prefer_prepacked_cache={args.prefer_prepacked_cache}, "
+        f"smoke={args.smoke}, benchmark_warmup_steps={args.benchmark_warmup_steps}, "
+        f"benchmark_skip_eval={args.benchmark_skip_eval}, prefer_prepacked_cache={args.prefer_prepacked_cache}, "
         f"no_checkpoint={args.no_checkpoint}, checkpoint_path={args.checkpoint_path}, "
         f"checkpoint_interval={args.checkpoint_interval}, resume_from={args.resume_from}"
     )
@@ -701,6 +722,9 @@ def main() -> None:
     checkpoint_count = 0
     last_checkpoint_time = total_training_time
     checkpoint_run_config = asdict(replace(args, resume_from=None))
+    benchmark_warmup_step_seconds = 0.0
+    benchmark_warmup_wall_seconds = 0.0
+    benchmark_warmup_steps_done = 0
 
     def maybe_save_checkpoint(*, force: bool = False) -> None:
         nonlocal last_checkpoint_time, checkpoint_seconds, checkpoint_count
@@ -763,6 +787,11 @@ def main() -> None:
             include_in_steady=local_step_index >= UTILIZATION_WARMUP_STEPS,
         )
         total_training_time += dt
+        if local_step_index < args.benchmark_warmup_steps:
+            benchmark_warmup_step_seconds += dt
+            benchmark_warmup_steps_done += 1
+            if benchmark_warmup_steps_done == args.benchmark_warmup_steps:
+                benchmark_warmup_wall_seconds = time.perf_counter() - t_start
 
         ema_beta = 0.9
         smooth_train_loss = ema_beta * smooth_train_loss + (1 - ema_beta) * train_loss
@@ -796,28 +825,37 @@ def main() -> None:
     maybe_save_checkpoint(force=True)
 
     total_tokens = step * args.total_batch_size
-    session_tokens = (step - resumed_step) * args.total_batch_size
-    model.eval()
-    t_proxy_eval_start = time.perf_counter()
-    proxy_val_bpb = evaluate_bpb(
-        model,
-        tokenizer,
-        args.device_batch_size,
-        seq_len=args.seq_len,
-        eval_tokens=args.eval_tokens,
-        prefer_prepacked_cache=args.prefer_prepacked_cache,
-    )
-    proxy_eval_seconds = time.perf_counter() - t_proxy_eval_start
-    t_canonical_eval_start = time.perf_counter()
-    val_bpb = evaluate_bpb(
-        model,
-        tokenizer,
-        args.canonical_eval_batch_size,
-        seq_len=args.canonical_eval_seq_len,
-        eval_tokens=args.canonical_eval_tokens,
-        prefer_prepacked_cache=args.prefer_prepacked_cache,
-    )
-    canonical_eval_seconds = time.perf_counter() - t_canonical_eval_start
+    session_steps = step - resumed_step
+    session_tokens = session_steps * args.total_batch_size
+    steady_state_steps = max(0, session_steps - benchmark_warmup_steps_done)
+    steady_state_tokens = max(0, session_tokens - benchmark_warmup_steps_done * args.total_batch_size)
+    if args.benchmark_skip_eval:
+        proxy_val_bpb = None
+        val_bpb = None
+        proxy_eval_seconds = 0.0
+        canonical_eval_seconds = 0.0
+    else:
+        model.eval()
+        t_proxy_eval_start = time.perf_counter()
+        proxy_val_bpb = evaluate_bpb(
+            model,
+            tokenizer,
+            args.device_batch_size,
+            seq_len=args.seq_len,
+            eval_tokens=args.eval_tokens,
+            prefer_prepacked_cache=args.prefer_prepacked_cache,
+        )
+        proxy_eval_seconds = time.perf_counter() - t_proxy_eval_start
+        t_canonical_eval_start = time.perf_counter()
+        val_bpb = evaluate_bpb(
+            model,
+            tokenizer,
+            args.canonical_eval_batch_size,
+            seq_len=args.canonical_eval_seq_len,
+            eval_tokens=args.canonical_eval_tokens,
+            prefer_prepacked_cache=args.prefer_prepacked_cache,
+        )
+        canonical_eval_seconds = time.perf_counter() - t_canonical_eval_start
     total_wall_seconds = time.perf_counter() - t_start
     telemetry_summary = summarize_step_telemetry(
         step_telemetry,
@@ -831,13 +869,21 @@ def main() -> None:
     session_checkpoint_count = checkpoint_count
     cumulative_checkpoint_seconds = resumed_checkpoint_seconds + checkpoint_seconds
     cumulative_checkpoint_count = resumed_checkpoint_count + checkpoint_count
+    steady_state_training_seconds = max(0.0, session_training_seconds - benchmark_warmup_step_seconds)
+    steady_state_tok_per_sec = (
+        steady_state_tokens / steady_state_training_seconds if steady_state_training_seconds > 0.0 else 0.0
+    )
     eval_percent = percent(session_eval_seconds, session_total_seconds)
     checkpoint_percent = percent(checkpoint_seconds, session_total_seconds)
     peak_vram_mb = mx.get_peak_memory() / 1024 / 1024
 
     print("---")
-    print(f"val_bpb:          {val_bpb:.6f}")
-    print(f"proxy_val_bpb:    {proxy_val_bpb:.6f}")
+    if val_bpb is None:
+        print("val_bpb:          skipped")
+        print("proxy_val_bpb:    skipped")
+    else:
+        print(f"val_bpb:          {val_bpb:.6f}")
+        print(f"proxy_val_bpb:    {proxy_val_bpb:.6f}")
     print(f"training_seconds: {session_training_seconds:.1f}")
     print(f"total_seconds:    {session_total_seconds:.1f}")
     print(f"peak_vram_mb:     {peak_vram_mb:.1f}")
@@ -854,7 +900,14 @@ def main() -> None:
     print(f"util_window:      cumulative {telemetry_summary['window_label']}")
     print(f"checkpoint_count: {session_checkpoint_count}")
     print(f"session_tokens_M: {session_tokens / 1e6:.3f}")
-    print(f"session_steps:    {step - resumed_step}")
+    print(f"session_steps:    {session_steps}")
+    print(f"benchmark_warmup_steps: {benchmark_warmup_steps_done}")
+    print(f"benchmark_warmup_step_seconds: {benchmark_warmup_step_seconds:.3f}")
+    print(f"benchmark_warmup_wall_seconds: {benchmark_warmup_wall_seconds:.3f}")
+    print(f"steady_state_training_seconds: {steady_state_training_seconds:.3f}")
+    print(f"steady_state_tokens_M: {steady_state_tokens / 1e6:.3f}")
+    print(f"steady_state_steps: {steady_state_steps}")
+    print(f"steady_state_tok_per_sec: {steady_state_tok_per_sec:.1f}")
     print(f"cumulative_training_seconds: {cumulative_training_seconds:.1f}")
     print(f"cumulative_checkpoint_seconds: {cumulative_checkpoint_seconds:.3f}")
     print(f"cumulative_checkpoint_count: {cumulative_checkpoint_count}")
@@ -862,10 +915,16 @@ def main() -> None:
     print(f"num_steps:        {step}")
     print(f"num_params_M:     {num_params / 1e6:.1f}")
     print(f"depth:            {args.depth}")
-    print(f"proxy_eval_tokens: {args.eval_tokens}")
-    print(f"canonical_seq_len: {args.canonical_eval_seq_len}")
-    print(f"canonical_tokens: {args.canonical_eval_tokens}")
-    print(f"canonical_batch:  {args.canonical_eval_batch_size}")
+    if args.benchmark_skip_eval:
+        print("proxy_eval_tokens: skipped")
+        print("canonical_seq_len: skipped")
+        print("canonical_tokens: skipped")
+        print("canonical_batch:  skipped")
+    else:
+        print(f"proxy_eval_tokens: {args.eval_tokens}")
+        print(f"canonical_seq_len: {args.canonical_eval_seq_len}")
+        print(f"canonical_tokens: {args.canonical_eval_tokens}")
+        print(f"canonical_batch:  {args.canonical_eval_batch_size}")
 
 
 if __name__ == "__main__":
