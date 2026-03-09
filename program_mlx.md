@@ -38,7 +38,7 @@ uv run train_mlx.py --preset upstream
 ```
 
 Use `uv run train_mlx.py --no-prepacked-cache` when you explicitly want to benchmark or debug the live packing path instead of the optional prepacked row caches.
-Use `uv run train_mlx.py --benchmark-warmup-steps 5 --benchmark-skip-eval` when you want a warmup-aware comparison that separates startup cost from steady-state throughput.
+Use `uv run train_mlx.py --benchmark-skip-eval` when you want a warmup-aware comparison that separates startup cost from steady-state throughput. By default, the trainer auto-detects the warmup cutoff statistically from step-time stabilization and reports `warmup_done_step`. Use `--benchmark-warmup-steps <N>` only when you need a fixed override for an ablation or apples-to-apples replay.
 
 `uv run prepare_mlx.py` now builds the shipped prepacked row caches by default so `m5-fast`, `m5-balanced`, `m5-large`, and `m5-xlarge` all have a prepared fast path. Use `uv run prepare_mlx.py --skip-prepacked-cache` only when you intentionally want the live packing fallback.
 
@@ -82,7 +82,9 @@ util_window:      <string>
 checkpoint_count: <int>
 session_tokens_M: <float>
 session_steps:    <int>
+benchmark_warmup_mode: <auto|fixed>
 benchmark_warmup_steps: <int>
+warmup_done_step: <int>
 benchmark_warmup_step_seconds: <float>
 benchmark_warmup_wall_seconds: <float>
 steady_state_training_seconds: <float>
@@ -102,7 +104,7 @@ canonical_tokens: <int>
 canonical_batch:  <int>
 ```
 
-`training_seconds`, `total_seconds`, `checkpoint_percent`, `eval_percent`, and `checkpoint_count` are current-invocation metrics, so a resumed run no longer mixes cumulative training time with per-invocation wall-clock time. `mfu_percent` is retained as a backward-compatible alias for measured step compute-share utilization on the MLX path and remains resume-aware because its step telemetry is restored from checkpoints. The more informative new fields are `train_tflops`, the explicit loader/grad/optimizer/checkpoint/eval percentages, the separate `session_*` / `cumulative_*` counters, and the `benchmark_*` / `steady_state_*` fields when you invoke the warmup-aware benchmark mode.
+`training_seconds`, `total_seconds`, `checkpoint_percent`, `eval_percent`, and `checkpoint_count` are current-invocation metrics, so a resumed run no longer mixes cumulative training time with per-invocation wall-clock time. `mfu_percent` is retained as a backward-compatible alias for measured step compute-share utilization on the MLX path and remains resume-aware because its step telemetry is restored from checkpoints. The more informative new fields are `train_tflops`, the explicit loader/grad/optimizer/checkpoint/eval percentages, the separate `session_*` / `cumulative_*` counters, and the `benchmark_*` / `steady_state_*` fields when you invoke the warmup-aware benchmark mode. `benchmark_warmup_mode` tells you whether the warmup cutoff came from the default statistical detector or an explicit override, and `warmup_done_step` records the first global step treated as steady-state.
 
 ## Logging results
 

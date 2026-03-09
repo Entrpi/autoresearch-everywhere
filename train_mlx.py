@@ -5,6 +5,7 @@ Usage: uv run train_mlx.py
 
 import argparse
 import gc
+import statistics
 import sys
 import time
 from dataclasses import asdict, dataclass, replace
@@ -62,7 +63,7 @@ class RunConfig:
     total_batch_size: int
     seed: int
     smoke: bool
-    benchmark_warmup_steps: int
+    benchmark_warmup_steps: int | None
     benchmark_skip_eval: bool
     prefer_prepacked_cache: bool
     no_checkpoint: bool
@@ -202,6 +203,47 @@ def percent(part: float, whole: float) -> float:
     return 100.0 * part / whole
 
 
+def median_abs_deviation(samples: list[float], center: float) -> float:
+    if not samples:
+        return 0.0
+    return statistics.median([abs(sample - center) for sample in samples])
+
+
+def detect_benchmark_warmup_steps(step_seconds: list[float]) -> int:
+    if len(step_seconds) < BENCHMARK_AUTO_MIN_TOTAL_STEPS:
+        return 0
+
+    # Compare early-step windows to a trailing reference window and pick the
+    # first prefix after which step times look statistically stable.
+    reference_window = min(
+        BENCHMARK_AUTO_MAX_REFERENCE_STEPS,
+        max(BENCHMARK_AUTO_MIN_REFERENCE_STEPS, len(step_seconds) // 5),
+    )
+    stability_window = min(
+        BENCHMARK_AUTO_MAX_STABILITY_STEPS,
+        max(BENCHMARK_AUTO_MIN_STABILITY_STEPS, reference_window // 2),
+    )
+    reference = step_seconds[-reference_window:]
+    reference_median = statistics.median(reference)
+    reference_mad = median_abs_deviation(reference, reference_median)
+    tolerance = max(
+        BENCHMARK_AUTO_MIN_REL_TOL * reference_median,
+        BENCHMARK_AUTO_MAD_MULTIPLIER * reference_mad,
+    )
+
+    max_warmup_steps = max(0, len(step_seconds) - stability_window)
+    for warmup_steps in range(max_warmup_steps + 1):
+        window = step_seconds[warmup_steps:warmup_steps + stability_window]
+        if len(window) < stability_window:
+            break
+        if abs(statistics.median(window) - reference_median) > tolerance:
+            continue
+        if max(abs(sample - reference_median) for sample in window) > tolerance:
+            continue
+        return warmup_steps
+    return 0
+
+
 def estimate_step_tflops(num_flops_per_token: int, total_batch_size: int, step_seconds: float) -> float:
     if step_seconds <= 0.0:
         return 0.0
@@ -293,6 +335,13 @@ WARMUP_RATIO = 0.0
 WARMDOWN_RATIO = 0.5
 FINAL_LR_FRAC = 0.0
 UTILIZATION_WARMUP_STEPS = 1
+BENCHMARK_AUTO_MIN_TOTAL_STEPS = 8
+BENCHMARK_AUTO_MIN_REFERENCE_STEPS = 5
+BENCHMARK_AUTO_MAX_REFERENCE_STEPS = 12
+BENCHMARK_AUTO_MIN_STABILITY_STEPS = 3
+BENCHMARK_AUTO_MAX_STABILITY_STEPS = 6
+BENCHMARK_AUTO_MIN_REL_TOL = 0.03
+BENCHMARK_AUTO_MAD_MULTIPLIER = 3.0
 
 PRESETS = {
     "m5-fast": RunPreset(
@@ -360,6 +409,8 @@ DEFAULT_PRESET = "m5-balanced"
 
 
 def resolve_run_config(args: argparse.Namespace) -> RunConfig:
+    if args.benchmark_warmup_steps is not None and args.benchmark_warmup_steps < 0:
+        raise ValueError("--benchmark-warmup-steps must be non-negative.")
     preset_name = args.preset or DEFAULT_PRESET
     preset = PRESETS[preset_name]
     config = RunConfig(
@@ -376,7 +427,7 @@ def resolve_run_config(args: argparse.Namespace) -> RunConfig:
         total_batch_size=preset.total_batch_size,
         seed=42 if args.seed is None else args.seed,
         smoke=args.smoke,
-        benchmark_warmup_steps=0 if args.benchmark_warmup_steps is None else args.benchmark_warmup_steps,
+        benchmark_warmup_steps=args.benchmark_warmup_steps,
         benchmark_skip_eval=args.benchmark_skip_eval,
         prefer_prepacked_cache=not args.no_prepacked_cache,
         no_checkpoint=args.no_checkpoint,
@@ -459,7 +510,7 @@ def resolve_resume_config(args: argparse.Namespace) -> RunConfig:
 
     metadata = load_checkpoint_metadata(args.resume_from)
     run_config = dict(metadata["run_config"])
-    run_config.setdefault("benchmark_warmup_steps", 0)
+    run_config.setdefault("benchmark_warmup_steps", None)
     run_config.setdefault("benchmark_skip_eval", False)
     run_config.setdefault("no_checkpoint", False)
     run_config.setdefault("checkpoint_path", None)
@@ -533,7 +584,7 @@ def parse_args() -> RunConfig:
     parser.add_argument(
         "--benchmark-warmup-steps",
         type=int,
-        help="Number of initial training steps to treat as warmup/startup when reporting steady-state benchmark metrics.",
+        help="Override the warmup cutoff used for steady-state benchmark metrics. If omitted, the cutoff is auto-detected from step-time stabilization.",
     )
     parser.add_argument(
         "--benchmark-skip-eval",
@@ -648,7 +699,7 @@ def main() -> None:
         f"canonical_eval_tokens={args.canonical_eval_tokens}, "
         f"canonical_eval_batch_size={args.canonical_eval_batch_size}, "
         f"device_batch_size={args.device_batch_size}, total_batch_size={args.total_batch_size}, "
-        f"smoke={args.smoke}, benchmark_warmup_steps={args.benchmark_warmup_steps}, "
+        f"smoke={args.smoke}, benchmark_warmup_steps={args.benchmark_warmup_steps if args.benchmark_warmup_steps is not None else 'auto'}, "
         f"benchmark_skip_eval={args.benchmark_skip_eval}, prefer_prepacked_cache={args.prefer_prepacked_cache}, "
         f"no_checkpoint={args.no_checkpoint}, checkpoint_path={args.checkpoint_path}, "
         f"checkpoint_interval={args.checkpoint_interval}, resume_from={args.resume_from}"
@@ -722,9 +773,8 @@ def main() -> None:
     checkpoint_count = 0
     last_checkpoint_time = total_training_time
     checkpoint_run_config = asdict(replace(args, resume_from=None))
-    benchmark_warmup_step_seconds = 0.0
-    benchmark_warmup_wall_seconds = 0.0
-    benchmark_warmup_steps_done = 0
+    session_step_seconds: list[float] = []
+    session_post_step_wall_seconds: list[float] = []
 
     def maybe_save_checkpoint(*, force: bool = False) -> None:
         nonlocal last_checkpoint_time, checkpoint_seconds, checkpoint_count
@@ -787,11 +837,7 @@ def main() -> None:
             include_in_steady=local_step_index >= UTILIZATION_WARMUP_STEPS,
         )
         total_training_time += dt
-        if local_step_index < args.benchmark_warmup_steps:
-            benchmark_warmup_step_seconds += dt
-            benchmark_warmup_steps_done += 1
-            if benchmark_warmup_steps_done == args.benchmark_warmup_steps:
-                benchmark_warmup_wall_seconds = time.perf_counter() - t_start
+        session_step_seconds.append(dt)
 
         ema_beta = 0.9
         smooth_train_loss = ema_beta * smooth_train_loss + (1 - ema_beta) * train_loss
@@ -820,6 +866,7 @@ def main() -> None:
         step += 1
         local_step_index += 1
         maybe_save_checkpoint()
+        session_post_step_wall_seconds.append(time.perf_counter() - t_start)
 
     print()
     maybe_save_checkpoint(force=True)
@@ -827,6 +874,17 @@ def main() -> None:
     total_tokens = step * args.total_batch_size
     session_steps = step - resumed_step
     session_tokens = session_steps * args.total_batch_size
+    if args.benchmark_warmup_steps is None:
+        benchmark_warmup_mode = "auto"
+        benchmark_warmup_steps_done = detect_benchmark_warmup_steps(session_step_seconds)
+    else:
+        benchmark_warmup_mode = "fixed"
+        benchmark_warmup_steps_done = min(args.benchmark_warmup_steps, session_steps)
+    benchmark_warmup_step_seconds = sum(session_step_seconds[:benchmark_warmup_steps_done])
+    benchmark_warmup_wall_seconds = (
+        session_post_step_wall_seconds[benchmark_warmup_steps_done - 1] if benchmark_warmup_steps_done > 0 else 0.0
+    )
+    warmup_done_step = resumed_step + benchmark_warmup_steps_done
     steady_state_steps = max(0, session_steps - benchmark_warmup_steps_done)
     steady_state_tokens = max(0, session_tokens - benchmark_warmup_steps_done * args.total_batch_size)
     if args.benchmark_skip_eval:
@@ -901,7 +959,9 @@ def main() -> None:
     print(f"checkpoint_count: {session_checkpoint_count}")
     print(f"session_tokens_M: {session_tokens / 1e6:.3f}")
     print(f"session_steps:    {session_steps}")
+    print(f"benchmark_warmup_mode: {benchmark_warmup_mode}")
     print(f"benchmark_warmup_steps: {benchmark_warmup_steps_done}")
+    print(f"warmup_done_step: {warmup_done_step}")
     print(f"benchmark_warmup_step_seconds: {benchmark_warmup_step_seconds:.3f}")
     print(f"benchmark_warmup_wall_seconds: {benchmark_warmup_wall_seconds:.3f}")
     print(f"steady_state_training_seconds: {steady_state_training_seconds:.3f}")

@@ -24,7 +24,75 @@ On this hardware, the default canonical matched benchmark window for optimizatio
 
 ## Unreleased
 
-### New commit — Optimize live-packing fallback for non-prepacked runs — score `2`
+## Committed History
+
+### March 9, 2026 — `26e4c64` — Auto-detect benchmark warmup cutoff — score `4`
+
+**Human-directed, AI-shaped (4)**
+
+- Requested that the benchmark warmup cutoff be determined statistically by default instead of relying on a manually specified fixed step count, and that the resulting cutoff be tracked explicitly as `warmup_done_step`.
+  - Switched the benchmark accounting to record per-step session timings and determine the warmup boundary after the run.
+  - Preserved `--benchmark-warmup-steps` as an explicit fixed override for ablations and replay.
+  - Added `benchmark_warmup_mode` and `warmup_done_step` to the training summary so the cutoff is explicit in the reported metrics.
+
+**Grounding**
+
+- Files:
+  - `train_mlx.py`
+  - `program_mlx.md`
+  - `CHANGELOG.md`
+- Validation:
+  - `python3 -m py_compile train_mlx.py`
+  - `python3 tools/changelog_scores.py --group-by entry --format csv --include-unreleased --verify`
+  - `./.venv/bin/python train_mlx.py --preset m5-fast --time-budget 5 --benchmark-skip-eval --no-checkpoint`
+  - `./.venv/bin/python train_mlx.py --preset m5-fast --time-budget 5 --benchmark-warmup-steps 62 --benchmark-skip-eval --no-checkpoint`
+- Measurements:
+  - Detection rule:
+    - The auto cutoff compares early-step windows against a trailing reference window taken from the end of the run instead of guessing a fixed warmup length ahead of time.
+    - The reference center is the trailing-window median, and the tolerance is the larger of a `3%` relative band or `3 x` the trailing-window median absolute deviation.
+    - The chosen cutoff is the first step prefix after which a short stability window stays within that tolerance, so `warmup_done_step` marks the first step whose timing looks statistically indistinguishable from the trailing steady-state band.
+  - Auto-vs-fixed `m5-fast` comparison (`5s`, eval skipped, no checkpoint):
+
+    | Mode | `benchmark_warmup_steps` | `warmup_done_step` | warmup step seconds | warmup wall seconds | steady-state steps | steady-state training seconds | steady-state `tok_per_sec` |
+    | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+    | `auto` | `37` | `37` | `1.258` | `1.291` | `316` | `3.749` | `43153.8` |
+    | `fixed` | `62` | `62` | `1.012` | `1.046` | `333` | `3.990` | `42734.9` |
+
+  - Interpretation:
+    - The default statistical detector produces a concrete benchmark cutoff without requiring a manually chosen step count.
+    - The detector is responsive to real startup shape, so it should not be expected to pick the same cutoff across materially different warmup profiles.
+    - On the final `m5-fast` rerun, the auto and fixed modes still landed in the same steady-state performance band, which is the main practical requirement: the new default is more ergonomic without obscuring the benchmark semantics.
+
+### March 9, 2026 — `9330302` — Profile checkpoint save/load path — score `2`
+
+**AI-identified within brief, human-approved (2)**
+
+- Surfaced checkpoint persistence as the next optimization target now that runtime instrumentation, the prepacked fast path, and the live-packing fallback have all been tightened.
+  - Added a dedicated save/load profiler so checkpoint work can be aimed at the dominant cost center instead of guessing from end-to-end wall time alone.
+
+**Grounding**
+
+- Files:
+  - `tools/profile_checkpoint_path.py`
+  - `CHANGELOG.md`
+- Validation:
+  - `python3 -m py_compile tools/profile_checkpoint_path.py`
+  - `./.venv/bin/python tools/profile_checkpoint_path.py --preset m5-large --train-steps 5`
+  - `./.venv/bin/python tools/profile_checkpoint_path.py --preset m5-xlarge --train-steps 5`
+- Measurements:
+  - Save-path breakdown on the default prepared prepacked path:
+
+    | Preset | save total (s) | model write (s) | optimizer write (s) | loader write (s) | metadata write (s) | model bytes | optimizer bytes | loader bytes |
+    | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+    | `m5-large` | `0.254` | `0.224` | `0.028` | `0.0017` | `0.0008` | `80.2M` | `118.1M` | `22` |
+    | `m5-xlarge` | `0.473` | `0.422` | `0.050` | `0.0004` | `0.0002` | `159.4M` | `218.3M` | `22` |
+
+  - Interpretation:
+    - On the shipped prepacked path, checkpoint cost is overwhelmingly dominated by writing model and optimizer safetensors. Loader serialization and metadata are effectively free by comparison.
+    - That means the next meaningful checkpoint optimization is not Python-side cleanup inside the current save path; it would need to change semantics or scheduling, such as lighter resume tiers or asynchronous/background save behavior.
+    - The current restore-side numbers from this tool are exploratory only. `mx.load` appears lazy enough that raw file-load timings understate "resume ready" cost, so restore optimization should not be driven from those numbers yet without a stronger resume-readiness benchmark.
+
+### March 9, 2026 — `9a79473` — Optimize live-packed fallback buffer — score `2`
 
 **AI-identified within brief, human-approved (2)**
 
@@ -57,8 +125,6 @@ On this hardware, the default canonical matched benchmark window for optimizatio
     - The new packing buffer removes most of the Python-side fallback cost on both tested presets: loader-call time dropped by about `82%` on `m5-balanced` and `m5-large`.
     - The end-to-end win is real but modest because these steps are still compute-dominated: about `+3.1% tok/s` on `m5-balanced` and `+0.5% tok/s` on `m5-large`.
     - This is worth keeping as a fallback-path cleanup, but the grounded effect is much smaller than the raw loader-time drop might suggest.
-
-## Committed History
 
 ### March 9, 2026 — `8c6ed4f` — Add warmup-aware MLX benchmark tooling — score `4`
 
