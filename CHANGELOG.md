@@ -24,6 +24,37 @@ On this hardware, the default canonical matched benchmark window for optimizatio
 
 ## Unreleased
 
+### New commit — Benchmark resume-ready latency — score `2`
+
+**AI-identified within brief, human-approved (2)**
+
+- Surfaced a stronger grounding need for checkpoint optimization: raw `mx.load` timings are not enough, because they understate what a resumed run actually pays before it becomes productive again.
+  - Added a dedicated resume-ready benchmark that measures cold runtime build, checkpoint restore, and the first completed optimizer step after resume.
+  - Added repeat support and aggregate summaries so checkpoint policy work can use medians instead of hanging on a single noisy resumed run.
+
+**Grounding**
+
+- Files:
+  - `tools/profile_resume_ready.py`
+  - `CHANGELOG.md`
+- Validation:
+  - `python3 -m py_compile tools/profile_resume_ready.py`
+  - `./.venv/bin/python tools/profile_resume_ready.py --preset m5-large --resume-steps 2 --repeats 3 --json-out results/analysis/m5_large_resume_ready.json`
+  - `./.venv/bin/python tools/profile_resume_ready.py --preset m5-xlarge --resume-steps 2 --repeats 3 --json-out results/analysis/m5_xlarge_resume_ready.json`
+- Measurements:
+  - Resume-ready summary (`3` trials each, prepacked path, `5` seed train steps before save):
+
+    | Preset | median resume-ready (s) | median runtime build (s) | median restore (s) | median first step wall (s) | median steady step wall (s) | median resume tax vs steady wall (s) |
+    | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+    | `m5-large` | `0.641` | `0.039` | `0.016` | `0.581` | `0.568` | `0.073` |
+    | `m5-xlarge` | `0.683` | `0.060` | `0.020` | `0.549` | `0.538` | `0.168` |
+
+  - Interpretation:
+    - The user-facing resume-ready delay is not dominated by checkpoint metadata or loader restore. It is mostly runtime rebuild plus the first resumed optimizer step.
+    - `m5-large` is reasonably tight across the three trials; the median resume-ready delay is about `0.64s`, with about `73ms` above a steady resumed step.
+    - `m5-xlarge` is centered closer to about `0.68s`, and one of the three trials again had a much slower first resumed step. That makes the median much more trustworthy than the mean for policy work at this shape.
+    - This is the right benchmark to use for future checkpoint-mode comparisons, because it measures "time until the resumed run is productive again" directly instead of inferring from lazy file-load timings.
+
 ## Committed History
 
 ### March 9, 2026 — `26e4c64` — Auto-detect benchmark warmup cutoff — score `4`
