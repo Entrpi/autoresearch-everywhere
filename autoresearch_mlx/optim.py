@@ -1,7 +1,7 @@
 from dataclasses import dataclass
 
 import mlx.core as mx
-from mlx.utils import tree_flatten, tree_unflatten
+from mlx.utils import tree_flatten
 
 
 POLAR_EXPRESS_COEFFS = [
@@ -32,8 +32,79 @@ class MuonGroup:
     ns_steps: int
 
 
+@dataclass(frozen=True)
+class ParamSlot:
+    path: str
+    tokens: tuple[object, ...]
+    safe_key: str
+    parent: object
+    leaf: object
+
+
 def _safe_key(path: str) -> str:
     return path.replace(".", "__")
+
+
+_MISSING = object()
+
+
+def _parse_path(path: str) -> tuple[object, ...]:
+    tokens = []
+    for token in path.split("."):
+        tokens.append(int(token) if token.isdigit() else token)
+    return tuple(tokens)
+
+
+def _descend(node, token):
+    if isinstance(node, dict):
+        return node[token]
+    if isinstance(node, list):
+        return node[token]
+    return getattr(node, token)
+
+
+def _resolve_slot(root, path: str) -> ParamSlot:
+    tokens = _parse_path(path)
+    parent = root
+    for token in tokens[:-1]:
+        parent = _descend(parent, token)
+    return ParamSlot(path, tokens, _safe_key(path), parent, tokens[-1])
+
+
+def _get_slot_value(slot: ParamSlot):
+    if isinstance(slot.parent, dict):
+        return slot.parent[slot.leaf]
+    if isinstance(slot.parent, list):
+        return slot.parent[slot.leaf]
+    return getattr(slot.parent, slot.leaf)
+
+
+def _set_slot_value(slot: ParamSlot, value) -> None:
+    if isinstance(slot.parent, dict):
+        slot.parent[slot.leaf] = value
+    elif isinstance(slot.parent, list):
+        slot.parent[slot.leaf] = value
+    else:
+        setattr(slot.parent, slot.leaf, value)
+
+
+def _get_tree_value(root, tokens):
+    node = root
+    for token in tokens:
+        if isinstance(node, dict):
+            node = node.get(token, _MISSING)
+        elif isinstance(node, list):
+            if not isinstance(token, int) or token >= len(node):
+                return _MISSING
+            node = node[token]
+        else:
+            try:
+                node = getattr(node, token)
+            except AttributeError:
+                return _MISSING
+        if node is _MISSING:
+            return _MISSING
+    return node
 
 
 def _adamw_update(param, grad, exp_avg, exp_avg_sq, step, lr, beta1, beta2, eps, weight_decay):
@@ -127,7 +198,19 @@ class MuonAdamW:
         }
 
         flat_params = dict(tree_flatten(model.trainable_parameters()))
+        self.param_slots = {
+            path: _resolve_slot(model, path)
+            for path in flat_params
+        }
         self.adamw_groups, self.muon_groups = self._build_groups(flat_params, adam_betas, weight_decay)
+        self.adamw_group_slots = tuple(
+            tuple(self.param_slots[path] for path in group.paths)
+            for group in self.adamw_groups
+        )
+        self.muon_group_slots = tuple(
+            tuple(self.param_slots[path] for path in group.paths)
+            for group in self.muon_groups
+        )
         self.state = self._init_state(flat_params)
         self.set_schedule(lr_multiplier=1.0, muon_momentum=0.95, muon_weight_decay=weight_decay)
 
@@ -222,14 +305,9 @@ class MuonAdamW:
         hyperparams["muon_weight_decay"] = mx.array(muon_weight_decay, dtype=mx.float32)
 
     def update(self, model, gradients) -> None:
-        params = model.trainable_parameters()
-        updated = self.apply_gradients(gradients, params)
-        model.update(updated)
+        self.apply_gradients(gradients)
 
-    def apply_gradients(self, gradients, parameters):
-        flat_params = dict(tree_flatten(parameters))
-        flat_grads = dict(tree_flatten(gradients))
-        updated = dict(flat_params)
+    def apply_gradients(self, gradients):
         step = self.state["step"] + 1
         self.state["step"] = step
         hyperparams = self.state["hyperparams"]
@@ -242,18 +320,18 @@ class MuonAdamW:
             "x0": hyperparams["x0_lr"],
         }
 
-        for group in self.adamw_groups:
+        for group, slots in zip(self.adamw_groups, self.adamw_group_slots):
             lr = group_lrs[group.name]
             beta1 = mx.array(group.beta1, dtype=mx.float32)
             beta2 = mx.array(group.beta2, dtype=mx.float32)
             eps = mx.array(group.eps, dtype=mx.float32)
             weight_decay = mx.array(group.weight_decay, dtype=mx.float32)
-            for path in group.paths:
-                if path not in flat_grads:
+            for slot in slots:
+                grad = _get_tree_value(gradients, slot.tokens)
+                if grad is _MISSING:
                     continue
-                param = flat_params[path]
-                grad = flat_grads[path]
-                state_entry = self.state["adamw"][_safe_key(path)]
+                param = _get_slot_value(slot)
+                state_entry = self.state["adamw"][slot.safe_key]
                 new_param, exp_avg, exp_avg_sq = _adamw_update(
                     param,
                     grad,
@@ -268,14 +346,17 @@ class MuonAdamW:
                 )
                 state_entry["exp_avg"] = exp_avg
                 state_entry["exp_avg_sq"] = exp_avg_sq
-                updated[path] = new_param
+                _set_slot_value(slot, new_param)
 
         muon_lr = hyperparams["muon_lr"]
         muon_momentum = hyperparams["muon_momentum"]
         muon_weight_decay = hyperparams["muon_weight_decay"]
-        for idx, group in enumerate(self.muon_groups):
-            stacked_params = mx.stack([flat_params[path] for path in group.paths], axis=0)
-            stacked_grads = mx.stack([flat_grads[path] for path in group.paths], axis=0)
+        for idx, (group, slots) in enumerate(zip(self.muon_groups, self.muon_group_slots)):
+            grads = [_get_tree_value(gradients, slot.tokens) for slot in slots]
+            if any(grad is _MISSING for grad in grads):
+                continue
+            stacked_params = mx.stack([_get_slot_value(slot) for slot in slots], axis=0)
+            stacked_grads = mx.stack(grads, axis=0)
             state_entry = self.state["muon"][idx]
             updated_stack, momentum_buffer, second_momentum_buffer = _muon_update(
                 stacked_params,
@@ -291,7 +372,5 @@ class MuonAdamW:
             )
             state_entry["momentum_buffer"] = momentum_buffer
             state_entry["second_momentum_buffer"] = second_momentum_buffer
-            for param_idx, path in enumerate(group.paths):
-                updated[path] = updated_stack[param_idx]
-
-        return tree_unflatten(list(updated.items()))
+            for param_idx, slot in enumerate(slots):
+                _set_slot_value(slot, updated_stack[param_idx])

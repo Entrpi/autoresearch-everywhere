@@ -13,11 +13,57 @@ Each entry records:
 
 If an entry has no measurements yet, it should say so explicitly.
 When provenance is ambiguous, prefer `Human-directed, AI-shaped` over `AI-identified within brief, human-shaped`, prefer `AI-identified within brief, human-shaped` over `AI-identified within brief, human-approved`, prefer `AI-identified within brief, human-approved` over `Self-initiated, human-approved`, and prefer `Self-initiated, human-approved` over `Fully autonomous`.
+This changelog should bias toward under-claiming rather than over-claiming successful autonomy. When specific provenance attributions are corrected, prefer the more conservative tiering if there is real ambiguity. The long-term goal remains to push as much work as possible into the `Fully autonomous` category over time.
 This branch does not admit fully human-authored code changes. If a change must be authored entirely by a human, it belongs in a fork rather than this branch's mainline history.
 
 ## Unreleased
 
-### March 9, 2026 — Working tree — Changelog and provenance policy
+### New commit — Remove optimizer tree churn
+
+**Human-driven**
+
+- None in this entry.
+
+**Human-directed, AI-shaped**
+
+- None in this entry.
+
+**AI-identified within brief, human-shaped**
+
+- Surfaced optimizer tree churn as the next high-value optimization after streamed gradient accumulation.
+- The human selected that item directly from the optimization list.
+- Reworked `MuonAdamW` to cache stable parameter slots on the model, fetch gradients by cached path tokens, and write updated arrays back directly instead of flattening and unflattening the full parameter tree on every step.
+- Cached per-group slot lists so the Muon path no longer rebuilds its parameter-slot lists inside the hot loop.
+
+**AI-identified within brief, human-approved**
+
+- None in this entry.
+
+**Self-initiated, human-approved**
+
+- None in this entry.
+
+**Fully autonomous**
+
+- None in this entry.
+
+**Grounding**
+
+- Files:
+  - `autoresearch_mlx/optim.py`
+- Validation:
+  - `python3 -m py_compile autoresearch_mlx/optim.py`
+  - matched A/B benchmark on `m5-large` against the last committed optimizer from `9a4ef79`
+- Measured effect on `m5-large` (`5s`, matched settings):
+  - step-0 latency: `558 ms -> 365 ms` (`-34.6%`)
+  - completed updates in budget: `17 -> 18`
+  - fixed-budget throughput: `13.65k tok/s -> 14.18k tok/s` (`+3.8%`)
+  - peak memory: `1946.6 MB -> 1946.6 MB` (flat)
+  - steady-state per-step throughput: roughly flat within run-to-run noise
+
+## Committed History
+
+### March 9, 2026 — `9a4ef79` — Add changelog and provenance policy
 
 **Human-driven**
 
@@ -58,7 +104,7 @@ This branch does not admit fully human-authored code changes. If a change must b
 - Validation:
   - docs/process only; no code-path tests were needed
 
-### March 9, 2026 — Working tree — Streamed gradient accumulation
+### March 9, 2026 — `077a187` — Stream gradient accumulation in MLX trainer
 
 **Human-driven**
 
@@ -102,8 +148,6 @@ This branch does not admit fully human-authored code changes. If a change must b
   - step-0 latency: `533 ms -> 354 ms` (`-33.6%`)
   - steps completed in budget: `18 -> 19`
   - canonical `val_bpb`: `2.373981 -> 2.368727`
-
-## Committed History
 
 ### March 9, 2026 — `e06f85c` — Add token caching and calibrate M5 presets
 
