@@ -681,7 +681,16 @@ def _cached_document_batches(parquet_paths: list[Path], tokenizer_batch_size: in
 
 
 class PackedDataLoader:
-    def __init__(self, tokenizer: Tokenizer, batch_size: int, seq_len: int, split: str, buffer_size: int = 1000):
+    def __init__(
+        self,
+        tokenizer: Tokenizer,
+        batch_size: int,
+        seq_len: int,
+        split: str,
+        buffer_size: int = 1000,
+        *,
+        prepacked_requested: bool = False,
+    ):
         self.tokenizer = tokenizer
         self.batch_size = batch_size
         self.seq_len = seq_len
@@ -689,7 +698,13 @@ class PackedDataLoader:
         self.row_capacity = seq_len + 1
         self.buffer_size = buffer_size
         self.using_token_cache = _split_has_token_cache(split, tokenizer)
-        source = "token cache" if self.using_token_cache else "parquet + tokenizer fallback"
+        if prepacked_requested:
+            if self.using_token_cache:
+                source = f"token cache (prepacked cache missing for seq_len={seq_len})"
+            else:
+                source = f"parquet + tokenizer fallback (prepacked cache missing for seq_len={seq_len})"
+        else:
+            source = "token cache" if self.using_token_cache else "parquet + tokenizer fallback"
         print(f"Data loader ({split}): using {source}.")
         self.batch_source = _make_document_batch_source(split, tokenizer, use_cache=self.using_token_cache)
         self.doc_buffer: list[np.ndarray | list[int]] = []
@@ -869,9 +884,17 @@ def make_dataloader(
 ):
     if split not in {"train", "val"}:
         raise ValueError(f"Invalid split: {split}")
-    if prefer_prepacked_cache and _split_has_prepacked_cache(split, seq_len, tokenizer):
+    has_prepacked_cache = _split_has_prepacked_cache(split, seq_len, tokenizer)
+    if prefer_prepacked_cache and has_prepacked_cache:
         return PrepackedDataLoader(tokenizer, batch_size, seq_len, split)
-    return PackedDataLoader(tokenizer, batch_size, seq_len, split, buffer_size=buffer_size)
+    return PackedDataLoader(
+        tokenizer,
+        batch_size,
+        seq_len,
+        split,
+        buffer_size=buffer_size,
+        prepacked_requested=prefer_prepacked_cache and not has_prepacked_cache,
+    )
 
 
 @mx.compile

@@ -56,17 +56,24 @@ def main() -> None:
     parser.add_argument(
         "--build-prepacked-cache",
         action="store_true",
-        help="Build optional prepacked row caches for the requested sequence lengths.",
+        help="Legacy no-op. Prepacked row caches are now built by default unless --skip-prepacked-cache is set.",
+    )
+    parser.add_argument(
+        "--skip-prepacked-cache",
+        action="store_true",
+        help="Skip building the prepacked row caches and leave training on the live packing fallback path.",
     )
     parser.add_argument(
         "--prepacked-seq-lens",
         type=str,
         default=",".join(str(seq_len) for seq_len in DEFAULT_PREPACKED_SEQ_LENS),
-        help="Comma-separated sequence lengths to prepack when --build-prepacked-cache is set.",
+        help="Comma-separated sequence lengths to prepack when prepacked cache generation is enabled.",
     )
     args = parser.parse_args()
-    if args.skip_token_cache and args.build_prepacked_cache:
+    if args.skip_token_cache and not args.skip_prepacked_cache:
         raise ValueError("Prepacked cache generation requires token caches; remove --skip-token-cache.")
+    if args.build_prepacked_cache and args.skip_prepacked_cache:
+        raise ValueError("--build-prepacked-cache and --skip-prepacked-cache are mutually exclusive.")
 
     num_shards = MAX_SHARD if args.num_shards == -1 else args.num_shards
     print(f"Cache directory: {CACHE_DIR}")
@@ -78,7 +85,7 @@ def main() -> None:
         print()
         tokenizer = Tokenizer.from_directory()
         build_token_cache(tokenizer)
-        if args.build_prepacked_cache:
+        if not args.skip_prepacked_cache:
             print()
             build_prepacked_cache(tokenizer, parse_seq_lens(args.prepacked_seq_lens))
     print()

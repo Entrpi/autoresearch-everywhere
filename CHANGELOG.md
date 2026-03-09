@@ -24,7 +24,58 @@ On this hardware, the default canonical matched benchmark window for optimizatio
 
 ## Unreleased
 
-### New commit — Add robust MLX utilization instrumentation — score `4`
+### New commit — Make prepacked caches the normal fast path for shipped presets — score `4`
+
+**Human-directed, AI-shaped (4)**
+
+- Requested that the shipped M5 presets use prepacked caches as the normal prepared-state fast path instead of treating them as an extra opt-in.
+  - Switched `prepare_mlx.py` to build the shipped prepacked cache coverage by default.
+  - Added an explicit opt-out path for intentionally leaving the live packing fallback in place.
+  - Tightened the loader logging so missing prepacked coverage is visible instead of silently falling through to token-cache/live packing.
+
+**Grounding**
+
+- Files:
+  - `prepare_mlx.py`
+  - `autoresearch_mlx/data.py`
+  - `README.md`
+  - `program_mlx.md`
+  - `docs/mlx-port-architecture.md`
+  - `CHANGELOG.md`
+- Validation:
+  - `python3 -m py_compile prepare_mlx.py autoresearch_mlx/data.py`
+  - `./.venv/bin/python prepare_mlx.py --num-shards 1`
+  - `./.venv/bin/python train_mlx.py --preset m5-large --time-budget 0.2 --eval-tokens 512 --canonical-eval-tokens 512`
+  - `./.venv/bin/python train_mlx.py --preset m5-xlarge --time-budget 0.2 --eval-tokens 512 --canonical-eval-tokens 512`
+  - `./.venv/bin/python train_mlx.py --preset m5-large --time-budget 60 --eval-tokens 512 --canonical-eval-tokens 512`
+  - `./.venv/bin/python train_mlx.py --preset m5-large --time-budget 60 --eval-tokens 512 --canonical-eval-tokens 512 --no-prepacked-cache`
+  - `./.venv/bin/python train_mlx.py --preset m5-xlarge --time-budget 60 --eval-tokens 512 --canonical-eval-tokens 512`
+  - `./.venv/bin/python train_mlx.py --preset m5-xlarge --time-budget 60 --eval-tokens 512 --canonical-eval-tokens 512 --no-prepacked-cache`
+- Measurements:
+  - Default `prepare_mlx.py --num-shards 1` behavior on the existing cache directory detected the raw data, tokenizer, and token caches, then built the missing shipped prepacked coverage automatically:
+    - `train seq_len=1024`
+    - `train seq_len=2048`
+    - `val seq_len=1024`
+    - `val seq_len=2048`
+  - Both larger shipped presets now hit the prepacked train path without extra preparation flags:
+    - `m5-large`: `Data loader (train): using prepacked cache.`
+    - `m5-xlarge`: `Data loader (train): using prepacked cache.`
+  - `60s` A/B comparison (`512` proxy/canonical eval tokens):
+
+    | Preset | Train path | `val_bpb` | `proxy_val_bpb` | `train_tflops` | `loader_percent` | `session_steps` | `session_tokens_M` |
+    | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+    | `m5-large` | prepacked cache | `1.911791` | `1.929047` | `1.692` | `0.13` | `224` | `0.918` |
+    | `m5-large` | token cache / live packing | `1.906361` | `1.934655` | `1.607` | `0.51` | `213` | `0.872` |
+    | `m5-xlarge` | prepacked cache | `2.169967` | `2.132617` | `2.152` | `0.05` | `114` | `0.467` |
+    | `m5-xlarge` | token cache / live packing | `2.140543` | `2.115287` | `2.233` | `0.36` | `118` | `0.483` |
+
+  - Interpreting the matched runs:
+    - `m5-large` shows a real fast-path win from prepacking: `224` vs `213` steps in the same `60s`, `0.918M` vs `0.872M` session tokens (`+5.3%`), and `loader_percent` dropped from `0.51` to `0.13`.
+    - `m5-xlarge` still benefits on loader overhead (`loader_percent` `0.36 -> 0.05`), but the overall `60s` pair was compute-dominated and slightly favored the live-packed run on total tokens. Treat this change as making the prepared fast path normal and visible, not as a universal throughput improvement claim for every shipped preset.
+
+## Committed History
+
+### March 9, 2026 — `b2b08df` — Add robust MLX utilization instrumentation — score `4`
 
 **Human-directed, AI-shaped (4)**
 
@@ -84,8 +135,6 @@ On this hardware, the default canonical matched benchmark window for optimizatio
   - resumed runs no longer print a cumulative `training_seconds` beside a per-invocation `total_seconds`
   - across the shipped M5 presets, utilization stays near saturation while `train_tflops` rises with model size and the larger presets still reveal the token-cache/live-pack fallback in their train-loader path
   - no performance-improvement claim is attached to this change; the grounding here is instrumentation correctness and observability
-
-## Committed History
 
 ### March 9, 2026 — `62f2f9c` — Auto-enable checkpoint cadence for longer runs — score `4`
 

@@ -151,7 +151,7 @@ The following concepts are preserved from `prepare.py`:
 
 - Token byte lookups are stored as `token_bytes.npy` instead of PyTorch `token_bytes.pt`.
 - Pretokenized shard caches are stored under `~/.cache/autoresearch/token_cache/` as concatenated token streams plus offsets and metadata.
-- Optional prepacked row caches are stored under `~/.cache/autoresearch/prepacked_cache/` and keyed by split plus sequence length.
+- Prepacked row caches are stored under `~/.cache/autoresearch/prepacked_cache/` and keyed by split plus sequence length. The default `prepare_mlx.py` flow now builds the shipped preset coverage (`256`, `512`, `1024`, `2048`) so prepacked loading is the normal prepared-state fast path rather than an extra opt-in step.
 - The MLX dataloader returns `mx.array` batches instead of pinned CPU tensors copied into CUDA buffers.
 - Error handling is stricter than upstream for partial data download and missing train shards.
 
@@ -167,7 +167,7 @@ The loader is not a naive contiguous-token stream. It does all of the following:
 
 This design preserves full token utilization without padding and matches the upstream packing semantics closely.
 
-When a matching prepacked cache exists, the MLX path skips live best-fit packing at runtime and streams prebuilt rows directly. When it does not, the loader falls back to the live token-cache path above.
+When a matching prepacked cache exists, the MLX path skips live best-fit packing at runtime and streams prebuilt rows directly. That is now the normal prepared-state path for the shipped presets. When a matching cache does not exist, the loader falls back to the live token-cache path above and prints that fallback explicitly.
 
 ## Subsystem 2: Model Training
 

@@ -47,9 +47,9 @@ If that works, the MLX environment is ready.
 
 The current MLX port and preset defaults were developed on and tested against an Apple M5 MacBook Pro with 32 GB unified memory and a 10-core GPU. They are a calibrated starting point for that machine, not a promise of universal optimality across the whole M5 family.
 
-`prepare_mlx.py` now builds a reusable shard token cache under `~/.cache/autoresearch/token_cache/` by default so training does not need to re-tokenize parquet text on every run. Use `uv run prepare_mlx.py --skip-token-cache` if you only want the raw data and tokenizer artifacts.
+`prepare_mlx.py` now builds both the reusable shard token cache under `~/.cache/autoresearch/token_cache/` and the shipped prepacked row caches under `~/.cache/autoresearch/prepacked_cache/` by default, so all shipped M5 presets can hit the fast path without extra setup. Use `uv run prepare_mlx.py --skip-token-cache` if you only want the raw data and tokenizer artifacts, or `uv run prepare_mlx.py --skip-prepacked-cache` if you explicitly want to leave training on the live packing fallback path.
 
-If you want to precompute the row-packing step as well, run `uv run prepare_mlx.py --build-prepacked-cache`. That builds reusable packed-row caches under `~/.cache/autoresearch/prepacked_cache/`, keyed by split and sequence length. `train_mlx.py` and evaluation will prefer those caches automatically when they are present; use `uv run train_mlx.py --no-prepacked-cache` to force the live packing path for debugging or ablations.
+The prepacked caches are keyed by split and sequence length. `train_mlx.py` and evaluation will prefer them automatically when they are present; use `uv run train_mlx.py --no-prepacked-cache` to force the live packing path for debugging or ablations.
 
 `train_mlx.py` also supports resumable checkpoints. For runs longer than 5 minutes, the MLX path now enables checkpoints by default using a conservative interval selector grounded in the measured exact-resume save costs on this machine. Use `--checkpoint-path` to choose the directory explicitly while keeping the default cadence selector, `--checkpoint-interval` to pin the cadence, `--resume-from` to continue the exact run state later, or `--no-checkpoint` to disable checkpointing entirely.
 
