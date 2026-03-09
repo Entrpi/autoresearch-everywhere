@@ -194,6 +194,10 @@ def default_auto_checkpoint_path(
     total_batch_size: int,
     window_pattern: str,
     checkpoint_mode: str,
+    checkpoint_save_mode: str,
 ) -> Path:
-    slug = f"{preset}-seq{seq_len}-d{depth}-tb{total_batch_size}-w{window_pattern.lower()}-ckpt{checkpoint_mode}"
+    slug = (
+        f"{preset}-seq{seq_len}-d{depth}-tb{total_batch_size}-w{window_pattern.lower()}"
+        f"-ckpt{checkpoint_mode}-save{checkpoint_save_mode}"
+    )
     return CHECKPOINT_DIR / "auto" / slug

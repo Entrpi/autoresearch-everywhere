@@ -31,6 +31,11 @@ from autoresearch_mlx.checkpoint_policy import (
 from autoresearch_mlx.checkpoints import (
     CHECKPOINT_MODE_EXACT,
     CHECKPOINT_MODES,
+    CHECKPOINT_SAVE_MODE_ASYNC,
+    CHECKPOINT_SAVE_MODE_SYNC,
+    CHECKPOINT_SAVE_MODES,
+    AsyncCheckpointWriter,
+    capture_async_checkpoint_snapshot,
     load_checkpoint_metadata,
     restore_checkpoint,
     save_checkpoint,
@@ -74,6 +79,7 @@ class RunConfig:
     prefer_prepacked_cache: bool
     no_checkpoint: bool
     checkpoint_mode: str
+    checkpoint_save_mode: str
     checkpoint_path: str | None
     checkpoint_interval: float | None
     resume_from: str | None
@@ -439,6 +445,9 @@ def resolve_run_config(args: argparse.Namespace) -> RunConfig:
         prefer_prepacked_cache=not args.no_prepacked_cache,
         no_checkpoint=args.no_checkpoint,
         checkpoint_mode=CHECKPOINT_MODE_EXACT if args.checkpoint_mode is None else args.checkpoint_mode,
+        checkpoint_save_mode=(
+            CHECKPOINT_SAVE_MODE_SYNC if args.checkpoint_save_mode is None else args.checkpoint_save_mode
+        ),
         checkpoint_path=args.checkpoint_path,
         checkpoint_interval=args.checkpoint_interval,
         resume_from=args.resume_from,
@@ -522,6 +531,7 @@ def resolve_resume_config(args: argparse.Namespace) -> RunConfig:
     run_config.setdefault("benchmark_skip_eval", False)
     run_config.setdefault("no_checkpoint", False)
     run_config.setdefault("checkpoint_mode", CHECKPOINT_MODE_EXACT)
+    run_config.setdefault("checkpoint_save_mode", CHECKPOINT_SAVE_MODE_SYNC)
     run_config.setdefault("checkpoint_path", None)
     run_config.setdefault("checkpoint_interval", None)
     run_config["time_budget"] = args.time_budget if args.time_budget is not None else run_config["time_budget"]
@@ -530,6 +540,11 @@ def resolve_resume_config(args: argparse.Namespace) -> RunConfig:
         args.checkpoint_mode
         if args.checkpoint_mode is not None
         else run_config["checkpoint_mode"]
+    )
+    run_config["checkpoint_save_mode"] = (
+        args.checkpoint_save_mode
+        if args.checkpoint_save_mode is not None
+        else run_config["checkpoint_save_mode"]
     )
     if args.no_checkpoint:
         run_config["checkpoint_path"] = None
@@ -618,7 +633,12 @@ def parse_args() -> RunConfig:
     parser.add_argument(
         "--checkpoint-mode",
         choices=CHECKPOINT_MODES,
-        help="Checkpoint semantics. 'exact' restores optimizer and loader state; 'weights_only' restores only model weights and resumes approximately.",
+        help="Checkpoint semantics. 'exact' restores optimizer and loader state; 'weights_only' is retained only for failed-experiment comparison and resumes approximately from model weights alone.",
+    )
+    parser.add_argument(
+        "--checkpoint-save-mode",
+        choices=CHECKPOINT_SAVE_MODES,
+        help="Checkpoint write path. 'sync' writes on the training thread; 'async' captures an exact host snapshot and writes it in the background. Async currently supports only exact checkpoints.",
     )
     parser.add_argument(
         "--checkpoint-path",
@@ -650,6 +670,7 @@ def resolve_checkpoint_settings(args: RunConfig, num_params: int) -> tuple[RunCo
         total_batch_size=args.total_batch_size,
         window_pattern=args.window_pattern,
         checkpoint_mode=args.checkpoint_mode,
+        checkpoint_save_mode=args.checkpoint_save_mode,
     )
 
     if args.checkpoint_interval is not None:
@@ -675,7 +696,7 @@ def resolve_checkpoint_settings(args: RunConfig, num_params: int) -> tuple[RunCo
         f"auto-enabled for time_budget>{AUTO_CHECKPOINT_MIN_TIME_BUDGET_SEC:.0f}s using "
         f"{decision.calibration.label}; selected {decision.recommendation.interval_label} "
         f"at {decision.recommendation.save_only_overhead_fraction * 100.0:.4f}% save-only overhead "
-        f"with {path_source}; checkpoint_mode={args.checkpoint_mode}; measured resume-ready penalty "
+        f"with {path_source}; checkpoint_mode={args.checkpoint_mode}; checkpoint_save_mode={args.checkpoint_save_mode}; measured resume-ready penalty "
         f"{decision.calibration.resume_ready_penalty_sec:.3f}s"
     )
     return resolved, reason
@@ -683,6 +704,8 @@ def resolve_checkpoint_settings(args: RunConfig, num_params: int) -> tuple[RunCo
 
 def main() -> None:
     args = parse_args()
+    if args.checkpoint_save_mode == CHECKPOINT_SAVE_MODE_ASYNC and args.checkpoint_mode != CHECKPOINT_MODE_EXACT:
+        raise ValueError("Async checkpoint writes currently support only --checkpoint-mode exact.")
     if args.canonical_eval_seq_len > args.seq_len:
         raise ValueError(
             "canonical_eval_seq_len cannot exceed training seq_len. "
@@ -725,7 +748,7 @@ def main() -> None:
         f"device_batch_size={args.device_batch_size}, total_batch_size={args.total_batch_size}, "
         f"smoke={args.smoke}, benchmark_warmup_steps={args.benchmark_warmup_steps if args.benchmark_warmup_steps is not None else 'auto'}, "
         f"benchmark_skip_eval={args.benchmark_skip_eval}, prefer_prepacked_cache={args.prefer_prepacked_cache}, "
-        f"no_checkpoint={args.no_checkpoint}, checkpoint_mode={args.checkpoint_mode}, checkpoint_path={args.checkpoint_path}, "
+        f"no_checkpoint={args.no_checkpoint}, checkpoint_mode={args.checkpoint_mode}, checkpoint_save_mode={args.checkpoint_save_mode}, checkpoint_path={args.checkpoint_path}, "
         f"checkpoint_interval={args.checkpoint_interval}, resume_from={args.resume_from}"
     )
     num_flops_per_token = model.estimate_flops()
@@ -769,7 +792,8 @@ def main() -> None:
         print(
             f"Resumed from {args.resume_from}: step={restored['step']}, "
             f"cumulative_training_seconds={restored['total_training_time']:.1f}, "
-            f"checkpoint_mode={resume_mode} ({resume_semantics})"
+            f"checkpoint_mode={resume_mode}, checkpoint_save_mode={restored['loaded_checkpoint_save_mode']} "
+            f"({resume_semantics})"
         )
     else:
         restored = {
@@ -797,18 +821,27 @@ def main() -> None:
     local_step_index = 0
     step_telemetry = StepTelemetry.from_dict(restored.get("step_telemetry"))
     resumed_checkpoint_seconds = float(restored.get("total_checkpoint_time", 0.0))
+    resumed_checkpoint_write_seconds = float(restored.get("total_checkpoint_write_time", resumed_checkpoint_seconds))
     resumed_checkpoint_count = int(restored.get("checkpoint_count", 0))
     checkpoint_seconds = 0.0
     checkpoint_count = 0
+    checkpoint_write_seconds = 0.0
     last_checkpoint_time = total_training_time
     checkpoint_run_config = asdict(replace(args, resume_from=None))
     session_step_seconds: list[float] = []
     session_post_step_wall_seconds: list[float] = []
+    async_checkpoint_writer = (
+        AsyncCheckpointWriter()
+        if args.checkpoint_path is not None and args.checkpoint_save_mode == CHECKPOINT_SAVE_MODE_ASYNC
+        else None
+    )
 
     def maybe_save_checkpoint(*, force: bool = False) -> None:
-        nonlocal last_checkpoint_time, checkpoint_seconds, checkpoint_count
+        nonlocal last_checkpoint_time, checkpoint_seconds, checkpoint_count, checkpoint_write_seconds
         if args.checkpoint_path is None:
             return
+        if async_checkpoint_writer is not None:
+            async_checkpoint_writer.check_health()
         if force and total_training_time == last_checkpoint_time:
             return
         if not force:
@@ -816,25 +849,51 @@ def main() -> None:
                 return
             if (total_training_time - last_checkpoint_time) < args.checkpoint_interval:
                 return
-        elapsed = save_checkpoint(
-            args.checkpoint_path,
-            checkpoint_mode=args.checkpoint_mode,
-            run_config=checkpoint_run_config,
-            model_config=asdict(config),
-            model=model,
-            optimizer=optimizer,
-            train_loader=train_loader,
-            step=step,
-            total_training_time=total_training_time,
-            smooth_train_loss=smooth_train_loss,
-            step_telemetry=asdict(step_telemetry),
-            total_checkpoint_time=resumed_checkpoint_seconds + checkpoint_seconds,
-            checkpoint_count=resumed_checkpoint_count + checkpoint_count,
-        )
-        checkpoint_seconds += elapsed
-        checkpoint_count += 1
+        if async_checkpoint_writer is None:
+            elapsed = save_checkpoint(
+                args.checkpoint_path,
+                checkpoint_mode=args.checkpoint_mode,
+                checkpoint_save_mode=args.checkpoint_save_mode,
+                run_config=checkpoint_run_config,
+                model_config=asdict(config),
+                model=model,
+                optimizer=optimizer,
+                train_loader=train_loader,
+                step=step,
+                total_training_time=total_training_time,
+                smooth_train_loss=smooth_train_loss,
+                step_telemetry=asdict(step_telemetry),
+                total_checkpoint_time=resumed_checkpoint_seconds + checkpoint_seconds,
+                total_checkpoint_write_time=resumed_checkpoint_write_seconds + checkpoint_write_seconds,
+                checkpoint_count=resumed_checkpoint_count + checkpoint_count,
+            )
+            checkpoint_seconds += elapsed
+            checkpoint_write_seconds += elapsed
+            checkpoint_count += 1
+            print(f"\nCheckpoint saved to {args.checkpoint_path} at step {step}.")
+        else:
+            snapshot, capture_seconds = capture_async_checkpoint_snapshot(
+                args.checkpoint_path,
+                checkpoint_mode=args.checkpoint_mode,
+                run_config=checkpoint_run_config,
+                model_config=asdict(config),
+                model=model,
+                optimizer=optimizer,
+                train_loader=train_loader,
+                step=step,
+                total_training_time=total_training_time,
+                smooth_train_loss=smooth_train_loss,
+                step_telemetry=asdict(step_telemetry),
+                total_checkpoint_time=resumed_checkpoint_seconds + checkpoint_seconds,
+                total_checkpoint_write_time=resumed_checkpoint_write_seconds + checkpoint_write_seconds,
+                checkpoint_count=resumed_checkpoint_count + checkpoint_count,
+            )
+            checkpoint_seconds += capture_seconds
+            async_checkpoint_writer.submit(snapshot)
+            checkpoint_write_seconds = async_checkpoint_writer.completed_write_seconds
+            checkpoint_count = async_checkpoint_writer.completed_count
+            print(f"\nCheckpoint queued to {args.checkpoint_path} at step {step}.")
         last_checkpoint_time = total_training_time
-        print(f"\nCheckpoint saved to {args.checkpoint_path} at step {step}.")
 
     while total_training_time < args.time_budget:
         progress = min(total_training_time / args.time_budget, 1.0)
@@ -900,6 +959,13 @@ def main() -> None:
 
     print()
     maybe_save_checkpoint(force=True)
+    if async_checkpoint_writer is not None:
+        t_flush_start = time.perf_counter()
+        async_checkpoint_writer.wait_until_idle()
+        checkpoint_seconds += time.perf_counter() - t_flush_start
+        checkpoint_write_seconds = async_checkpoint_writer.completed_write_seconds
+        checkpoint_count = async_checkpoint_writer.completed_count
+        async_checkpoint_writer.close()
 
     total_tokens = step * args.total_batch_size
     session_steps = step - resumed_step
@@ -957,12 +1023,14 @@ def main() -> None:
     session_checkpoint_count = checkpoint_count
     cumulative_checkpoint_seconds = resumed_checkpoint_seconds + checkpoint_seconds
     cumulative_checkpoint_count = resumed_checkpoint_count + checkpoint_count
+    cumulative_checkpoint_write_seconds = resumed_checkpoint_write_seconds + checkpoint_write_seconds
     steady_state_training_seconds = max(0.0, session_training_seconds - benchmark_warmup_step_seconds)
     steady_state_tok_per_sec = (
         steady_state_tokens / steady_state_training_seconds if steady_state_training_seconds > 0.0 else 0.0
     )
     eval_percent = percent(session_eval_seconds, session_total_seconds)
     checkpoint_percent = percent(checkpoint_seconds, session_total_seconds)
+    checkpoint_write_percent = percent(checkpoint_write_seconds, session_total_seconds)
     peak_vram_mb = mx.get_peak_memory() / 1024 / 1024
 
     print("---")
@@ -983,6 +1051,7 @@ def main() -> None:
     print(f"optimizer_percent: {telemetry_summary['optimizer_percent']:.2f}")
     print(f"other_step_percent: {telemetry_summary['other_step_percent']:.2f}")
     print(f"checkpoint_percent: {checkpoint_percent:.2f}")
+    print(f"checkpoint_write_percent: {checkpoint_write_percent:.2f}")
     print(f"eval_percent:     {eval_percent:.2f}")
     print(f"util_window_steps: {telemetry_summary['window_steps']}")
     print(f"util_window:      cumulative {telemetry_summary['window_label']}")
@@ -1000,6 +1069,7 @@ def main() -> None:
     print(f"steady_state_tok_per_sec: {steady_state_tok_per_sec:.1f}")
     print(f"cumulative_training_seconds: {cumulative_training_seconds:.1f}")
     print(f"cumulative_checkpoint_seconds: {cumulative_checkpoint_seconds:.3f}")
+    print(f"cumulative_checkpoint_write_seconds: {cumulative_checkpoint_write_seconds:.3f}")
     print(f"cumulative_checkpoint_count: {cumulative_checkpoint_count}")
     print(f"total_tokens_M:   {total_tokens / 1e6:.3f}")
     print(f"num_steps:        {step}")
