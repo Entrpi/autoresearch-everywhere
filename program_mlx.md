@@ -86,14 +86,18 @@ The status is one of `keep`, `discard`, or `crash`. `keep` and `discard` are bas
 
 Also keep `CHANGELOG.md` current for meaningful changes. Each changelog entry should clearly separate:
 
-- `Human-driven`: what the human identified and tightly specified.
-- `Human-directed, AI-shaped`: what the human directed but the agent concretely designed.
-- `AI-identified within brief, human-shaped`: what the agent surfaced inside a broad human-scoped workstream, and the human materially reshaped before implementation.
-- `AI-identified within brief, human-approved`: what the agent surfaced inside a broad human-scoped workstream and the human approved with little reshaping.
-- `Self-initiated, human-approved`: what the agent initiated outside explicit human direction but still got approved before landing.
-- `Fully autonomous`: what the agent initiated without explicit human direction or approval.
+- `Human-driven (5)`: what the human identified and tightly specified.
+- `Human-directed, AI-shaped (4)`: what the human directed but the agent concretely designed.
+- `AI-identified within brief, human-shaped (3)`: what the agent surfaced inside a broad human-scoped workstream, and the human materially reshaped before implementation.
+- `AI-identified within brief, human-approved (2)`: what the agent surfaced inside a broad human-scoped workstream and the human approved with little reshaping.
+- `Self-initiated, human-approved (1)`: what the agent initiated outside explicit human direction but still got approved before landing.
+- `Fully autonomous (0)`: what the agent initiated without explicit human direction or approval.
 - `Grounding`: the files changed, the checks run, and any measured effects.
 
+Omit empty provenance sections instead of adding `None in this entry.`
+Show an autonomy golf score in each commit header. Score each provenance bullet as `Human-driven = 5`, `Human-directed, AI-shaped = 4`, `AI-identified within brief, human-shaped = 3`, `AI-identified within brief, human-approved = 2`, `Self-initiated, human-approved = 1`, and `Fully autonomous = 0`; `Grounding` is not scored.
+Treat top-level provenance bullets as the scored units. If a point is directly derivative of a main bullet and stays at the same autonomy level, record it as a nested sub-bullet so it remains visible without adding score.
+Use `python3 tools/changelog_scores.py --group-by day --format csv` when you want a plotting-friendly daily autonomy summary, or `--group-by entry --verify` to sanity-check header totals against the parsed bullets.
 When provenance is ambiguous, prefer `Human-directed, AI-shaped` over `AI-identified within brief, human-shaped`, prefer `AI-identified within brief, human-shaped` over `AI-identified within brief, human-approved`, prefer `AI-identified within brief, human-approved` over `Self-initiated, human-approved`, and prefer `Self-initiated, human-approved` over `Fully autonomous`.
 Do not land fully human-authored code changes on this branch. If a change must be authored entirely by a human, do that work in a fork.
 

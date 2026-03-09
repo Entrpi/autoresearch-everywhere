@@ -93,6 +93,9 @@ Examples:
 
 # 8-hour overnight run
 ./tools/launch_overnight_mlx.sh overnight 8
+
+# autonomy scores by day for plotting
+python3 tools/changelog_scores.py --group-by day --format csv > autonomy_by_day.csv
 ```
 
 Artifacts are written under `results/overnight/<run-tag>/`, and the summary ledger is appended to `results.tsv`. The sweep runner keeps or discards experiments using canonical `val_bpb`, not the preset-shaped proxy metric.

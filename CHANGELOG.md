@@ -3,49 +3,91 @@
 This changelog is intended to be useful for research, not just release bookkeeping.
 Each entry records:
 
-- `Human-driven`: the human identified the change and specified it tightly enough that the agent mostly executed.
-- `Human-directed, AI-shaped`: the human set the direction or requirement, but the agent designed the concrete mechanism, structure, or validation plan.
-- `AI-identified within brief, human-shaped`: inside a broad human-scoped workstream, the agent surfaced the opportunity, and the human materially shaped the exact target, scope, or framing before implementation.
-- `AI-identified within brief, human-approved`: inside a broad human-scoped workstream, the agent surfaced the opportunity and the human approved it with little additional shaping.
-- `Self-initiated, human-approved`: the agent initiated the change outside explicit human direction in the thread, but still got human approval before landing it.
-- `Fully autonomous`: changes or experiments the agent initiated without explicit human direction or approval in the thread.
+- `Human-driven (5)`: the human identified the change and specified it tightly enough that the agent mostly executed.
+- `Human-directed, AI-shaped (4)`: the human set the direction or requirement, but the agent designed the concrete mechanism, structure, or validation plan.
+- `AI-identified within brief, human-shaped (3)`: inside a broad human-scoped workstream, the agent surfaced the opportunity, and the human materially shaped the exact target, scope, or framing before implementation.
+- `AI-identified within brief, human-approved (2)`: inside a broad human-scoped workstream, the agent surfaced the opportunity and the human approved it with little additional shaping.
+- `Self-initiated, human-approved (1)`: the agent initiated the change outside explicit human direction in the thread, but still got human approval before landing it.
+- `Fully autonomous (0)`: changes or experiments the agent initiated without explicit human direction or approval in the thread.
 - `Grounding`: the files changed, the checks run, and any measured effects.
 
 If an entry has no measurements yet, it should say so explicitly.
+Entries should omit empty provenance sections rather than spelling out `None in this entry.`
+Each commit entry should also show an autonomy golf score in the header. Score each provenance bullet as `Human-driven = 5`, `Human-directed, AI-shaped = 4`, `AI-identified within brief, human-shaped = 3`, `AI-identified within brief, human-approved = 2`, `Self-initiated, human-approved = 1`, and `Fully autonomous = 0`. `Grounding` does not contribute to the score.
+Top-level provenance bullets are the scored units. If a point is directly derivative of a main bullet and stays at the same autonomy level, record it as a nested sub-bullet so it remains visible without adding score.
 When provenance is ambiguous, prefer `Human-directed, AI-shaped` over `AI-identified within brief, human-shaped`, prefer `AI-identified within brief, human-shaped` over `AI-identified within brief, human-approved`, prefer `AI-identified within brief, human-approved` over `Self-initiated, human-approved`, and prefer `Self-initiated, human-approved` over `Fully autonomous`.
 This changelog should bias toward under-claiming rather than over-claiming successful autonomy. When specific provenance attributions are corrected, prefer the more conservative tiering if there is real ambiguity. The long-term goal remains to push as much work as possible into the `Fully autonomous` category over time.
 This branch does not admit fully human-authored code changes. If a change must be authored entirely by a human, it belongs in a fork rather than this branch's mainline history.
 
 ## Unreleased
 
-### New commit — Remove optimizer tree churn
+### New commit — Add changelog score parser — score `4`
 
-**Human-driven**
+**Human-directed, AI-shaped (4)**
 
-- None in this entry.
+- Requested a changelog parser for future autonomy plotting and later tightened the requirement to include explicit commit-count tracking for daily per-commit views.
+  - Added `tools/changelog_scores.py`.
+  - Added per-entry and per-day output.
+  - Added CSV/JSON/TSV formats, score verification, and daily `commit_count` plus per-commit score fields.
 
-**Human-directed, AI-shaped**
+**Grounding**
 
-- None in this entry.
+- Files:
+  - `tools/changelog_scores.py`
+  - `CHANGELOG.md`
+  - `README.md`
+  - `program_mlx.md`
+- Validation:
+  - `python3 -m py_compile tools/changelog_scores.py`
+  - `python3 tools/changelog_scores.py --group-by entry --format csv --include-unreleased --verify`
+  - `python3 tools/changelog_scores.py --group-by day --format csv --include-unreleased`
+- Historical score corrections surfaced by the parser:
+  - `9a4ef79`: `39 -> 40`
+  - `e06f85c`: `35 -> 36`
 
-**AI-identified within brief, human-shaped**
+## Committed History
 
-- Surfaced optimizer tree churn as the next high-value optimization after streamed gradient accumulation.
-- The human selected that item directly from the optimization list.
-- Reworked `MuonAdamW` to cache stable parameter slots on the model, fetch gradients by cached path tokens, and write updated arrays back directly instead of flattening and unflattening the full parameter tree on every step.
-- Cached per-group slot lists so the Muon path no longer rebuilds its parameter-slot lists inside the hot loop.
+### March 9, 2026 — `2bcdc0c` — Add optional prepacked row caches — score `6`
 
-**AI-identified within brief, human-approved**
+**Human-directed, AI-shaped (4)**
 
-- None in this entry.
+- Implemented split-and-sequence-length keyed prepacked row caches, an opt-in `prepare_mlx.py` build path, runtime preference with fallback, and a trainer flag to disable the caches for ablations.
 
-**Self-initiated, human-approved**
+**AI-identified within brief, human-approved (2)**
 
-- None in this entry.
+- Requested work on optional prepacked caches after landing the optimizer checkpoint.
 
-**Fully autonomous**
+**Grounding**
 
-- None in this entry.
+- Files:
+  - `autoresearch_mlx/constants.py`
+  - `autoresearch_mlx/data.py`
+  - `prepare_mlx.py`
+  - `train_mlx.py`
+  - `README.md`
+  - `program_mlx.md`
+  - `docs/mlx-port-architecture.md`
+- Validation:
+  - `python3 -m py_compile prepare_mlx.py train_mlx.py autoresearch_mlx/data.py autoresearch_mlx/constants.py`
+  - `./.venv/bin/python prepare_mlx.py --num-shards 1 --build-prepacked-cache --prepacked-seq-lens 256,512`
+  - `./.venv/bin/python train_mlx.py --smoke`
+  - matched A/B benchmark on `m5-fast` against the live token-cache packing path using `--no-prepacked-cache`
+- Measured effect on `m5-fast` (`2s`, matched settings):
+  - step-0 latency: `48 ms -> 37 ms` (`-22.9%`)
+  - completed updates in budget: `233 -> 255`
+  - fixed-budget throughput: `59.65k tok/s -> 65.28k tok/s` (`+9.4%`)
+  - peak memory: `147.1 MB -> 147.1 MB` (flat)
+  - validation metrics: effectively unchanged within short-run noise
+  - confirmed runtime behavior: train and val loaders both switched to `prepacked cache` when the matching cache existed
+
+### March 9, 2026 — `137ba69` — Remove optimizer tree churn — score `3`
+
+**AI-identified within brief, human-shaped (3)**
+
+- Surfaced optimizer tree churn as the next high-value optimization after streamed gradient accumulation and, after human selection, removed it from the hot path.
+  - Reworked `MuonAdamW` to cache stable parameter slots on the model.
+  - Fetched gradients by cached path tokens and wrote updated arrays back directly instead of flattening and unflattening the full parameter tree on every step.
+  - Cached per-group slot lists so the Muon path no longer rebuilds them inside the hot loop.
 
 **Grounding**
 
@@ -61,39 +103,23 @@ This branch does not admit fully human-authored code changes. If a change must b
   - peak memory: `1946.6 MB -> 1946.6 MB` (flat)
   - steady-state per-step throughput: roughly flat within run-to-run noise
 
-## Committed History
+### March 9, 2026 — `9a4ef79` — Add changelog and provenance policy — score `17`
 
-### March 9, 2026 — `9a4ef79` — Add changelog and provenance policy
+**Human-driven (5)**
 
-**Human-driven**
+- Requested a grounded `CHANGELOG.md` rather than a lightweight release log, with explicit autonomy distinctions and progressively finer provenance tiers.
+- Corrected provenance overclaims with a deliberate under-claiming bias and required a branch policy that fully human-authored code changes happen in a fork.
 
-- Requested a `CHANGELOG.md` with grounded reports on changes rather than a lightweight release log.
-- Requested explicit distinction between autonomous and human-in-the-loop work.
-- Requested progressively finer provenance tiers for the changelog.
-- Corrected specific provenance attributions where the changelog overstated AI agency, with a deliberate bias toward under-claiming rather than over-claiming successful autonomy; the goal remains to push as much work as possible into the `Fully autonomous` category over time.
-- Required a branch policy that fully human-authored code changes are out of scope and should happen in a fork.
+**Human-directed, AI-shaped (4)**
 
-**Human-directed, AI-shaped**
+- Added `CHANGELOG.md` and integrated it into the repo workflow.
+  - Seeded it with grounded history for the MLX port, evaluation split, preset/token-cache work, and the streamed-accumulation change.
+  - Linked the changelog from `README.md`.
+  - Updated `program_mlx.md` so future experiment loops keep the changelog current.
 
-- Added `CHANGELOG.md` and seeded it with grounded history for the MLX port, evaluation split, preset/token-cache work, and the current streamed-accumulation change.
-- Linked the changelog from `README.md`.
-- Updated `program_mlx.md` so future experiment loops keep the changelog current.
-
-**AI-identified within brief, human-shaped**
+**AI-identified within brief, human-shaped (3)**
 
 - Proposed intermediate provenance ladders and wording variants; the human materially reshaped them into the current six-tier taxonomy and policy wording.
-
-**AI-identified within brief, human-approved**
-
-- None in this entry.
-
-**Self-initiated, human-approved**
-
-- None in this entry.
-
-**Fully autonomous**
-
-- None in this entry.
 
 **Grounding**
 
@@ -104,35 +130,13 @@ This branch does not admit fully human-authored code changes. If a change must b
 - Validation:
   - docs/process only; no code-path tests were needed
 
-### March 9, 2026 — `077a187` — Stream gradient accumulation in MLX trainer
+### March 9, 2026 — `077a187` — Stream gradient accumulation in MLX trainer — score `3`
 
-**Human-driven**
+**AI-identified within brief, human-shaped (3)**
 
-- None in this entry.
-
-**Human-directed, AI-shaped**
-
-- None in this entry.
-
-**AI-identified within brief, human-shaped**
-
-- Surfaced streamed gradient accumulation earlier as a likely next optimization target in the MLX optimization list.
-- The human selected it as the next optimization pass and approved continuing after the `e06f85c` checkpoint.
-- Replaced stacked microbatch gathering with streamed gradient accumulation in `train_mlx.py`.
-- Split the train step into a compiled per-microbatch gradient pass plus a compiled gradient-application pass.
-- Updated the architecture report to reflect the new training flow.
-
-**AI-identified within brief, human-approved**
-
-- None in this entry.
-
-**Self-initiated, human-approved**
-
-- None in this entry.
-
-**Fully autonomous**
-
-- None in this entry.
+- Surfaced streamed gradient accumulation as a likely next optimization target and, after human selection, replaced stacked microbatch gathering with a streamed training loop.
+  - Split the train step into a compiled per-microbatch gradient pass plus a compiled gradient-application pass.
+  - Updated the architecture report to reflect the new training flow.
 
 **Grounding**
 
@@ -149,36 +153,24 @@ This branch does not admit fully human-authored code changes. If a change must b
   - steps completed in budget: `18 -> 19`
   - canonical `val_bpb`: `2.373981 -> 2.368727`
 
-### March 9, 2026 — `e06f85c` — Add token caching and calibrate M5 presets
+### March 9, 2026 — `e06f85c` — Add token caching and calibrate M5 presets — score `19`
 
-**Human-driven**
+**Human-driven (5)**
 
 - Requested M5-oriented practical defaults rather than retaining H100-shaped settings.
-- Requested measured preset documentation in the README, including architecture, batch, throughput, memory, and 5-minute baseline figures.
-- Requested investigation of upstream-scale performance on the tested M5 hardware.
-- Requested calibration and documentation of the `m5-fast`, `m5-balanced`, `m5-large`, and `m5-xlarge` presets on the reference machine.
+- Requested measured investigation and documentation of the reference-machine presets, including upstream-scale behavior and the README baseline figures.
 
-**Human-directed, AI-shaped**
+**Human-directed, AI-shaped (4)**
 
-- Requested an `m5-xlarge` or "upstream-ish" preset for the tested M5 while leaving the exact shape to the agent.
-- Ran the fixed-budget measurements and wrote the concrete throughput, memory, and baseline metric figures used to document the M5 presets.
+- Requested an `m5-xlarge` or "upstream-ish" preset for the tested M5 while leaving the exact shape to the agent, then used fixed-budget measurements to document the concrete throughput, memory, and baseline figures.
 
-**AI-identified within brief, human-shaped**
+**AI-identified within brief, human-shaped (3)**
 
-- Surfaced the time-budget bug during benchmarking; the human then requested a fix for that specific issue.
-- Implemented the time-budget fix so slow presets stop once accumulated training time exceeds the configured budget.
+- Surfaced the time-budget bug during benchmarking and, after the human requested that specific fix, implemented the budget-stop correction for slow presets.
 
-**AI-identified within brief, human-approved**
+**AI-identified within brief, human-approved (2)**
 
 - Added prepare-time token caches and cache-aware loading so training no longer has to re-tokenize parquet text on every run.
-
-**Self-initiated, human-approved**
-
-- None in this entry.
-
-**Fully autonomous**
-
-- None in this entry.
 
 **Grounding**
 
@@ -212,35 +204,19 @@ This branch does not admit fully human-authored code changes. If a change must b
   - literal `upstream` preset ran at roughly `1.1k-1.9k tok/s`
   - the same `50.3M` / `2048` architecture with M5-sized batch (`m5-xlarge`) ran at roughly `7.4k-8.0k tok/s`
 
-### March 9, 2026 — `eee26f5` — Separate canonical eval and demote local tooling
+### March 9, 2026 — `eee26f5` — Separate canonical eval and demote local tooling — score `9`
 
-**Human-driven**
+**Human-directed, AI-shaped (4)**
 
-- None in this entry.
+- Requested that the fork stay centered on the core MLX research loop and approved demoting optional workstation automation so it would not define the repo.
 
-**Human-directed, AI-shaped**
+**AI-identified within brief, human-shaped (3)**
 
-- Requested that the fork stay centered on the core MLX research loop rather than letting overnight tooling define the repo.
-- Approved moving optional workstation automation out of the core path and clarifying that it is secondary.
+- Surfaced tooling demotion as part of keeping the core MLX path front and center, then moved the overnight automation under `tools/` and rewrote docs to describe it as optional local tooling rather than core architecture.
 
-**AI-identified within brief, human-shaped**
+**AI-identified within brief, human-approved (2)**
 
-- Surfaced tooling demotion as part of keeping the core MLX path front and center.
-- Moved the overnight automation under `tools/` and rewrote docs to describe it as optional local tooling rather than core architecture.
-
-**AI-identified within brief, human-approved**
-
-- Surfaced canonical-vs-proxy evaluation separation as part of the MLX optimization plan.
-- Split evaluation into canonical `val_bpb` and preset-shaped `proxy_val_bpb`.
-- Updated the sweep runner to keep or discard runs using canonical `val_bpb`.
-
-**Self-initiated, human-approved**
-
-- None in this entry.
-
-**Fully autonomous**
-
-- None in this entry.
+- Surfaced canonical-vs-proxy evaluation separation as part of the MLX optimization plan, then split evaluation into canonical `val_bpb` and preset-shaped `proxy_val_bpb` and updated the sweep runner to keep or discard runs using canonical `val_bpb`.
 
 **Grounding**
 
@@ -263,35 +239,14 @@ This branch does not admit fully human-authored code changes. If a change must b
     - proxy `val_bpb`: `2.473907`
   - the sweep runner kept or discarded runs based on canonical `val_bpb`, not the proxy metric
 
-### March 9, 2026 — `c3b3d8d` — Add initial MLX port for Apple Silicon
+### March 9, 2026 — `c3b3d8d` — Add initial MLX port for Apple Silicon — score `4`
 
-**Human-driven**
+**Human-directed, AI-shaped (4)**
 
-- None in this entry.
-
-**Human-directed, AI-shaped**
-
-- Requested a clean, feature-complete, idiomatic, maintainable MLX reimplementation of upstream `karpathy/autoresearch`.
-- Chose Apple Silicon as the primary target and explicitly rejected settling for the PyTorch/MPS SDPA path.
-- Implemented the MLX data path, model, optimizer, evaluation path, and Apple-Silicon-first documentation.
-- Kept the upstream CUDA path in-tree for reference while making the MLX path the primary workflow.
-- Added an MLX-specific program file and smoke-test path.
-
-**AI-identified within brief, human-shaped**
-
-- None in this entry.
-
-**AI-identified within brief, human-approved**
-
-- None in this entry.
-
-**Self-initiated, human-approved**
-
-- None in this entry.
-
-**Fully autonomous**
-
-- None in this entry.
+- Requested a clean, feature-complete, idiomatic, maintainable MLX reimplementation of upstream `karpathy/autoresearch` for Apple Silicon rather than the PyTorch/MPS SDPA path, then implemented the core MLX path and its Apple-Silicon-first docs.
+  - Implemented the MLX data path, model, optimizer, and evaluation path.
+  - Kept the upstream CUDA path in-tree for reference while making the MLX path the primary workflow.
+  - Added an MLX-specific program file and smoke-test path.
 
 **Grounding**
 
