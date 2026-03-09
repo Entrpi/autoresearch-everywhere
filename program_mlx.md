@@ -39,6 +39,8 @@ uv run train_mlx.py --preset upstream
 
 Use `uv run train_mlx.py --no-prepacked-cache` when you explicitly want to benchmark or debug the live packing path instead of the optional prepacked row caches.
 
+For runs above 5 minutes, `train_mlx.py` now enables resumable checkpoints by default using the repo's conservative checkpoint-frequency selector. Use `--checkpoint-path` to choose the checkpoint directory while keeping that selector, `--checkpoint-interval` to pin the cadence, or `--no-checkpoint` to disable it.
+
 What you CAN do:
 - Modify `train_mlx.py`.
 - Modify `autoresearch_mlx/model.py`.

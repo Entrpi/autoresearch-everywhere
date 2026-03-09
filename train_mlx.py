@@ -22,6 +22,11 @@ from autoresearch_mlx.constants import (
     PROXY_EVAL_TOKENS,
     TIME_BUDGET,
 )
+from autoresearch_mlx.checkpoint_policy import (
+    AUTO_CHECKPOINT_MIN_TIME_BUDGET_SEC,
+    choose_auto_checkpoint_decision,
+    default_auto_checkpoint_path,
+)
 from autoresearch_mlx.checkpoints import load_checkpoint_metadata, restore_checkpoint, save_checkpoint
 from autoresearch_mlx.data import Tokenizer, evaluate_bpb, make_dataloader
 from autoresearch_mlx.model import GPT, GPTConfig
@@ -58,6 +63,7 @@ class RunConfig:
     seed: int
     smoke: bool
     prefer_prepacked_cache: bool
+    no_checkpoint: bool
     checkpoint_path: str | None
     checkpoint_interval: float | None
     resume_from: str | None
@@ -255,6 +261,7 @@ def resolve_run_config(args: argparse.Namespace) -> RunConfig:
         seed=42 if args.seed is None else args.seed,
         smoke=args.smoke,
         prefer_prepacked_cache=not args.no_prepacked_cache,
+        no_checkpoint=args.no_checkpoint,
         checkpoint_path=args.checkpoint_path,
         checkpoint_interval=args.checkpoint_interval,
         resume_from=args.resume_from,
@@ -324,25 +331,31 @@ def resolve_resume_config(args: argparse.Namespace) -> RunConfig:
     if disallowed:
         raise ValueError(
             "--resume-from restores the saved run configuration. Only "
-            "--time-budget, --checkpoint-path, and --checkpoint-interval may be overridden. "
+            "--time-budget, --checkpoint-path, --checkpoint-interval, and --no-checkpoint may be overridden. "
             f"Got overrides for: {', '.join(disallowed)}"
         )
 
     metadata = load_checkpoint_metadata(args.resume_from)
     run_config = dict(metadata["run_config"])
+    run_config.setdefault("no_checkpoint", False)
     run_config.setdefault("checkpoint_path", None)
     run_config.setdefault("checkpoint_interval", None)
     run_config["time_budget"] = args.time_budget if args.time_budget is not None else run_config["time_budget"]
-    run_config["checkpoint_path"] = (
-        args.checkpoint_path
-        if args.checkpoint_path is not None
-        else run_config["checkpoint_path"] or args.resume_from
-    )
-    run_config["checkpoint_interval"] = (
-        args.checkpoint_interval
-        if args.checkpoint_interval is not None
-        else run_config["checkpoint_interval"]
-    )
+    run_config["no_checkpoint"] = args.no_checkpoint
+    if args.no_checkpoint:
+        run_config["checkpoint_path"] = None
+        run_config["checkpoint_interval"] = None
+    else:
+        run_config["checkpoint_path"] = (
+            args.checkpoint_path
+            if args.checkpoint_path is not None
+            else run_config["checkpoint_path"] or args.resume_from
+        )
+        run_config["checkpoint_interval"] = (
+            args.checkpoint_interval
+            if args.checkpoint_interval is not None
+            else run_config["checkpoint_interval"]
+        )
     run_config["resume_from"] = args.resume_from
     return RunConfig(**run_config)
 
@@ -399,13 +412,18 @@ def parse_args() -> RunConfig:
         help="Disable optional prepacked row caches and use the live packing path instead.",
     )
     parser.add_argument(
+        "--no-checkpoint",
+        action="store_true",
+        help="Disable resumable checkpoints, including the automatic defaults for longer runs.",
+    )
+    parser.add_argument(
         "--checkpoint-path",
         help="Directory to save a resumable training checkpoint.",
     )
     parser.add_argument(
         "--checkpoint-interval",
         type=float,
-        help="Save a checkpoint every N training seconds. Requires --checkpoint-path.",
+        help="Save a checkpoint every N training seconds. If no path is provided, an automatic checkpoint directory is used.",
     )
     parser.add_argument(
         "--resume-from",
@@ -415,6 +433,43 @@ def parse_args() -> RunConfig:
     if args.resume_from:
         return resolve_resume_config(args)
     return resolve_run_config(args)
+
+
+def resolve_checkpoint_settings(args: RunConfig, num_params: int) -> tuple[RunConfig, str | None]:
+    if args.no_checkpoint:
+        return replace(args, checkpoint_path=None, checkpoint_interval=None), "disabled via --no-checkpoint"
+
+    auto_path = default_auto_checkpoint_path(
+        args.preset,
+        seq_len=args.seq_len,
+        depth=args.depth,
+        total_batch_size=args.total_batch_size,
+        window_pattern=args.window_pattern,
+    )
+
+    if args.checkpoint_interval is not None:
+        if args.checkpoint_path is None:
+            return replace(args, checkpoint_path=str(auto_path)), "auto-selected checkpoint path for explicit interval"
+        return args, None
+
+    if args.time_budget <= AUTO_CHECKPOINT_MIN_TIME_BUDGET_SEC:
+        return args, None
+
+    decision = choose_auto_checkpoint_decision(num_params / 1e6)
+    checkpoint_path = args.checkpoint_path or str(auto_path)
+    resolved = replace(
+        args,
+        checkpoint_path=checkpoint_path,
+        checkpoint_interval=decision.recommendation.interval_sec,
+    )
+    path_source = "existing path" if args.checkpoint_path is not None else "auto path"
+    reason = (
+        f"auto-enabled for time_budget>{AUTO_CHECKPOINT_MIN_TIME_BUDGET_SEC:.0f}s using "
+        f"{decision.calibration.label}; selected {decision.recommendation.interval_label} "
+        f"at {decision.recommendation.save_only_overhead_fraction * 100.0:.4f}% save-only overhead "
+        f"with {path_source}"
+    )
+    return resolved, reason
 
 
 def main() -> None:
@@ -438,19 +493,6 @@ def main() -> None:
         sequence_len=args.seq_len,
         window_pattern=args.window_pattern,
     )
-    print(f"Model config: {asdict(config)}")
-    print(f"Run preset: {args.preset} ({PRESETS[args.preset].description})")
-    print(
-        "Run config: "
-        f"time_budget={args.time_budget}s, seq_len={args.seq_len}, eval_tokens={args.eval_tokens}, "
-        f"canonical_eval_seq_len={args.canonical_eval_seq_len}, "
-        f"canonical_eval_tokens={args.canonical_eval_tokens}, "
-        f"canonical_eval_batch_size={args.canonical_eval_batch_size}, "
-        f"device_batch_size={args.device_batch_size}, total_batch_size={args.total_batch_size}, "
-        f"smoke={args.smoke}, prefer_prepacked_cache={args.prefer_prepacked_cache}, "
-        f"checkpoint_path={args.checkpoint_path}, checkpoint_interval={args.checkpoint_interval}, "
-        f"resume_from={args.resume_from}"
-    )
 
     model = GPT(config)
     model.init_weights()
@@ -462,8 +504,24 @@ def main() -> None:
     for key, value in param_counts.items():
         print(f"  {key:24s}: {value:,}")
     num_params = param_counts["total"]
+    args, checkpoint_resolution = resolve_checkpoint_settings(args, num_params)
+    print(f"Model config: {asdict(config)}")
+    print(f"Run preset: {args.preset} ({PRESETS[args.preset].description})")
+    print(
+        "Run config: "
+        f"time_budget={args.time_budget}s, seq_len={args.seq_len}, eval_tokens={args.eval_tokens}, "
+        f"canonical_eval_seq_len={args.canonical_eval_seq_len}, "
+        f"canonical_eval_tokens={args.canonical_eval_tokens}, "
+        f"canonical_eval_batch_size={args.canonical_eval_batch_size}, "
+        f"device_batch_size={args.device_batch_size}, total_batch_size={args.total_batch_size}, "
+        f"smoke={args.smoke}, prefer_prepacked_cache={args.prefer_prepacked_cache}, "
+        f"no_checkpoint={args.no_checkpoint}, checkpoint_path={args.checkpoint_path}, "
+        f"checkpoint_interval={args.checkpoint_interval}, resume_from={args.resume_from}"
+    )
     num_flops_per_token = model.estimate_flops()
     print(f"Estimated FLOPs per token: {num_flops_per_token:e}")
+    if checkpoint_resolution is not None:
+        print(f"Checkpoint policy: {checkpoint_resolution}")
 
     tokens_per_fwdbwd = args.device_batch_size * args.seq_len
     if args.total_batch_size % tokens_per_fwdbwd != 0:
