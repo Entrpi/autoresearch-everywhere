@@ -29,16 +29,49 @@ On this hardware, the default canonical matched benchmark window for optimizatio
 
 ## Latest
 
-### New commit — changelog: Clarify lag-by-one commit stamping — score `5` — complexity `7`
+### New commit — train: Auto-derive canonical eval batch from sequence length — score `4` — complexity `7`
 
-**Human-driven (5)**
+**Human-directed, AI-shaped (4)**
 
-- Pointed out that a commit cannot safely amend itself just to add its own hash to committed history, because the amend changes the hash again.
-  - Meaning: the local autonomy-golf maintenance loop needs to follow the lag-by-one stamping rule literally, not approximately.
-  - Motivation: the previous attempt at self-stamping left the committed-history entry pointing at the wrong hash.
-  - Purpose: keep the repo’s governance history mechanically sound so the changelog stays trustworthy as structured provenance.
-  - Corrected the previously self-stamped commit ID from `fb3c53e` to the actual landed hash `1778297`.
-  - Tightened the local checklist and agent brief to say explicitly that a commit must not amend itself just to stamp its own hash; only a later commit may move it into committed history.
+- Requested that canonical evaluation batch sizing follow the measured sequence-length sweep instead of staying fixed at `4`.
+  - Meaning: canonical eval now defaults to a constant `4096` tokens per eval step, so batch size scales down as canonical sequence length scales up.
+  - Motivation: the batch sweeps on the same saved `m5-balanced` checkpoint showed effectively identical BPB across batches, with a clean fastest pattern of `256 -> 16`, `512 -> 8`, `1024 -> 4`, and `2048 -> 2`.
+  - Purpose: keep canonical eval cheap and consistent across sequence lengths without hand-tuning the batch every time the canonical eval shape changes.
+  - Updated the trainer to auto-derive `canonical_eval_batch_size` from `canonical_eval_seq_len` when the user does not override it explicitly.
+  - Raised the default canonical sequence length to `2048` and widened the live model config to `max(train seq, canonical seq)` so shorter-sequence presets can still use the upstream-shaped canonical eval.
+  - Kept smoke runs and explicit `--canonical-eval-batch-size` overrides unchanged.
+
+**Grounding**
+
+- Files:
+  - `autoresearch_mlx/constants.py`
+  - `README.md`
+  - `program_mlx.md`
+  - `train_mlx.py`
+- Validation:
+  - Reused the saved `m5-balanced` 2-minute checkpoint at `/tmp/autoresearch_balanced_2min_compare` to isolate eval behavior from training variance.
+  - Swept canonical eval batches at `seq=256`, `seq=512`, `seq=1024`, and `seq=2048` with a hard `20s` timeout per candidate.
+  - `python3 -m py_compile train_mlx.py autoresearch_mlx/constants.py`
+- Measurements:
+  - On the same saved `m5-balanced` 2-minute checkpoint, the canonical-style BPB estimates tightened from shorter-sequence local estimates toward the upstream-shaped contract as sequence length increased:
+    - `seq=256`: `1.660391`
+    - `seq=512`: `1.634503`
+    - `seq=1024`: `1.560247`
+    - `seq=2048`, `262144` tokens: `1.622282`
+    - `seq=2048`, Trevin contract (`1572864` tokens): `1.609069`
+    - `seq=2048`, upstream practical contract (`20971520` tokens): `1.627251`
+  - `seq=256`: fastest batch `16`
+  - `seq=512`: fastest batch `8`
+  - `seq=1024`: fastest batch `4`
+  - `seq=2048`: fastest batch `2`
+  - Under the Trevin-sized long-context contract (`seq=2048`, `eval_tokens=1572864`), the optimized local batch stayed metric-equivalent while materially reducing eval time:
+
+    | batch | eval sec | `val_bpb` |
+    | ---: | ---: | ---: |
+    | `2` | `14.02` | `1.609068586` |
+    | `256` | `20.31` | `1.609068590` |
+
+  - BPB was effectively invariant across the swept batch sizes for each sequence length, so the change is about eval efficiency, not metric drift.
 
 ## Committed History
 

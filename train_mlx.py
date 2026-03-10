@@ -16,8 +16,8 @@ import mlx.nn as nn
 from mlx.utils import tree_map
 
 from autoresearch_mlx.constants import (
-    CANONICAL_EVAL_BATCH_SIZE,
     CANONICAL_EVAL_SEQ_LEN,
+    CANONICAL_EVAL_STEP_TOKENS,
     CANONICAL_EVAL_TOKENS,
     MAX_SEQ_LEN,
     PROXY_EVAL_TOKENS,
@@ -145,6 +145,12 @@ class StepTelemetry:
 TIME_BUDGET_MODE_TRAIN = "train"
 TIME_BUDGET_MODE_WALL = "wall"
 TIME_BUDGET_MODES = (TIME_BUDGET_MODE_TRAIN, TIME_BUDGET_MODE_WALL)
+
+
+def default_canonical_eval_batch_size(seq_len: int) -> int:
+    if seq_len <= 0:
+        raise ValueError("canonical eval sequence length must be positive")
+    return max(1, CANONICAL_EVAL_STEP_TOKENS // seq_len)
 
 
 def verify_mlx_env() -> None:
@@ -369,7 +375,7 @@ PRESETS = {
         eval_tokens=PROXY_EVAL_TOKENS,
         canonical_eval_seq_len=CANONICAL_EVAL_SEQ_LEN,
         canonical_eval_tokens=CANONICAL_EVAL_TOKENS,
-        canonical_eval_batch_size=CANONICAL_EVAL_BATCH_SIZE,
+        canonical_eval_batch_size=default_canonical_eval_batch_size(CANONICAL_EVAL_SEQ_LEN),
         depth=2,
         window_pattern="L",
         device_batch_size=2,
@@ -381,7 +387,7 @@ PRESETS = {
         eval_tokens=PROXY_EVAL_TOKENS,
         canonical_eval_seq_len=CANONICAL_EVAL_SEQ_LEN,
         canonical_eval_tokens=CANONICAL_EVAL_TOKENS,
-        canonical_eval_batch_size=CANONICAL_EVAL_BATCH_SIZE,
+        canonical_eval_batch_size=default_canonical_eval_batch_size(CANONICAL_EVAL_SEQ_LEN),
         depth=4,
         window_pattern="L",
         device_batch_size=4,
@@ -393,7 +399,7 @@ PRESETS = {
         eval_tokens=PROXY_EVAL_TOKENS,
         canonical_eval_seq_len=CANONICAL_EVAL_SEQ_LEN,
         canonical_eval_tokens=CANONICAL_EVAL_TOKENS,
-        canonical_eval_batch_size=CANONICAL_EVAL_BATCH_SIZE,
+        canonical_eval_batch_size=default_canonical_eval_batch_size(CANONICAL_EVAL_SEQ_LEN),
         depth=6,
         window_pattern="L",
         device_batch_size=2,
@@ -405,7 +411,7 @@ PRESETS = {
         eval_tokens=PROXY_EVAL_TOKENS,
         canonical_eval_seq_len=CANONICAL_EVAL_SEQ_LEN,
         canonical_eval_tokens=CANONICAL_EVAL_TOKENS,
-        canonical_eval_batch_size=CANONICAL_EVAL_BATCH_SIZE,
+        canonical_eval_batch_size=default_canonical_eval_batch_size(CANONICAL_EVAL_SEQ_LEN),
         depth=8,
         window_pattern="L",
         device_batch_size=2,
@@ -417,7 +423,7 @@ PRESETS = {
         eval_tokens=PROXY_EVAL_TOKENS,
         canonical_eval_seq_len=CANONICAL_EVAL_SEQ_LEN,
         canonical_eval_tokens=CANONICAL_EVAL_TOKENS,
-        canonical_eval_batch_size=CANONICAL_EVAL_BATCH_SIZE,
+        canonical_eval_batch_size=default_canonical_eval_batch_size(CANONICAL_EVAL_SEQ_LEN),
         depth=8,
         window_pattern="SSSL",
         device_batch_size=8,
@@ -496,6 +502,11 @@ def resolve_run_config(args: argparse.Namespace) -> RunConfig:
             overrides[field] = value
     if overrides:
         config = replace(config, **overrides)
+    if not args.smoke and args.canonical_eval_batch_size is None:
+        config = replace(
+            config,
+            canonical_eval_batch_size=default_canonical_eval_batch_size(config.canonical_eval_seq_len),
+        )
 
     return config
 
@@ -605,7 +616,7 @@ def parse_args() -> RunConfig:
     parser.add_argument(
         "--canonical-eval-batch-size",
         type=int,
-        help="Batch size for fixed canonical evaluation.",
+        help="Batch size for fixed canonical evaluation. Defaults to a constant 4096 tokens per eval step.",
     )
     parser.add_argument("--depth", type=int, help="Number of transformer blocks.")
     parser.add_argument(
@@ -726,11 +737,6 @@ def main() -> None:
     args = parse_args()
     if args.checkpoint_save_mode == CHECKPOINT_SAVE_MODE_ASYNC and args.checkpoint_mode != CHECKPOINT_MODE_EXACT:
         raise ValueError("Async checkpoint writes currently support only --checkpoint-mode exact.")
-    if args.canonical_eval_seq_len > args.seq_len:
-        raise ValueError(
-            "canonical_eval_seq_len cannot exceed training seq_len. "
-            "Lower --canonical-eval-seq-len or increase --seq-len."
-        )
     verify_mlx_env()
     t_start = time.perf_counter()
     mx.random.seed(args.seed)
@@ -742,7 +748,7 @@ def main() -> None:
     config = build_model_config(
         args.depth,
         vocab_size,
-        sequence_len=args.seq_len,
+        sequence_len=max(args.seq_len, args.canonical_eval_seq_len),
         window_pattern=args.window_pattern,
     )
 
