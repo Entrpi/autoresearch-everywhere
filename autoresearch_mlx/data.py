@@ -19,6 +19,7 @@ from .constants import (
     BASE_URL,
     BOS_TOKEN,
     DATA_DIR,
+    EVAL_SLICE_TARGET_STEPS,
     EVAL_TOKENS,
     MAX_SEQ_LEN,
     MAX_SHARD,
@@ -785,6 +786,7 @@ class PrepackedDataLoader:
             mode="r",
             shape=(self.row_count, self.row_capacity),
         )
+        self._batch_offsets = np.arange(batch_size, dtype=np.int64)
         self.inputs = np.empty((batch_size, seq_len), dtype=np.int32)
         self.targets = np.empty((batch_size, seq_len), dtype=np.int32)
         print(f"Data loader ({split}): using prepacked cache.")
@@ -801,6 +803,13 @@ class PrepackedDataLoader:
                 self.row_index = 0
                 self.epoch += 1
         return mx.array(self.inputs), mx.array(self.targets), self.epoch
+
+    def batch_at_row_index(self, row_index: int):
+        indices = (row_index + self._batch_offsets) % self.row_count
+        batch_rows = self.rows[indices]
+        self.inputs[...] = batch_rows[:, :-1]
+        self.targets[...] = batch_rows[:, 1:]
+        return mx.array(self.inputs), mx.array(self.targets)
 
     def checkpoint_state(self) -> tuple[dict, dict[str, np.ndarray]]:
         return (
@@ -947,6 +956,30 @@ def _masked_token_sums(loss_flat, target_ids, token_bytes):
     return mx.sum(loss_flat * mask.astype(loss_flat.dtype)), mx.sum(nbytes.astype(mx.int64))
 
 
+def _iter_eval_batches(loader, steps: int, eval_slices: int, reference_steps: int | None = None):
+    if isinstance(loader, PrepackedDataLoader) and eval_slices > 1:
+        available_batches = max(1, loader.row_count // loader.batch_size)
+        horizon_batches = available_batches
+        if reference_steps is not None:
+            # For cheap canonical evals, spread slices across the same prefix
+            # horizon that the full upstream contract would traverse.
+            horizon_batches = max(1, min(max(steps, reference_steps), available_batches))
+        slice_count = max(1, min(eval_slices, max(1, steps // EVAL_SLICE_TARGET_STEPS), horizon_batches))
+        for slice_idx in range(slice_count):
+            slice_steps = steps // slice_count + (1 if slice_idx < steps % slice_count else 0)
+            if slice_steps <= 0:
+                continue
+            row_index = ((slice_idx * horizon_batches) // slice_count) * loader.batch_size
+            for _ in range(slice_steps):
+                yield loader.batch_at_row_index(row_index)
+                row_index = (row_index + loader.batch_size) % loader.row_count
+        return
+
+    for _ in range(steps):
+        x, y, _ = next(loader)
+        yield x, y
+
+
 def evaluate_bpb(
     model,
     tokenizer: Tokenizer,
@@ -955,6 +988,8 @@ def evaluate_bpb(
     seq_len: int = MAX_SEQ_LEN,
     eval_tokens: int = EVAL_TOKENS,
     prefer_prepacked_cache: bool = True,
+    eval_slices: int = 1,
+    reference_eval_tokens: int | None = None,
 ) -> float:
     token_bytes = mx.array(load_token_bytes())
     val_loader = make_dataloader(
@@ -965,11 +1000,13 @@ def evaluate_bpb(
         prefer_prepacked_cache=prefer_prepacked_cache,
     )
     steps = max(1, eval_tokens // (batch_size * seq_len))
+    reference_steps = None
+    if reference_eval_tokens is not None:
+        reference_steps = max(1, reference_eval_tokens // (batch_size * seq_len))
     total_nats = 0.0
     total_bytes = 0
 
-    for _ in range(steps):
-        x, y, _ = next(val_loader)
+    for x, y in _iter_eval_batches(val_loader, steps, eval_slices, reference_steps=reference_steps):
         loss_flat = model(x, y, reduction="none").reshape((-1,))
         y_flat = y.reshape((-1,))
         batch_nats, batch_bytes = _masked_token_sums(loss_flat, y_flat, token_bytes)

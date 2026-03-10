@@ -17,6 +17,8 @@ from mlx.utils import tree_map
 
 from autoresearch_mlx.constants import (
     CANONICAL_EVAL_SEQ_LEN,
+    EVAL_SLICE_CAP,
+    EVAL_TOKENS,
     CANONICAL_EVAL_STEP_TOKENS,
     CANONICAL_EVAL_TOKENS,
     MAX_SEQ_LEN,
@@ -1042,6 +1044,8 @@ def main() -> None:
             seq_len=args.canonical_eval_seq_len,
             eval_tokens=args.canonical_eval_tokens,
             prefer_prepacked_cache=args.prefer_prepacked_cache,
+            eval_slices=EVAL_SLICE_CAP,
+            reference_eval_tokens=EVAL_TOKENS,
         )
         canonical_eval_seconds = time.perf_counter() - t_canonical_eval_start
     total_wall_seconds = time.perf_counter() - t_start

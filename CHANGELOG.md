@@ -29,7 +29,87 @@ On this hardware, the default canonical matched benchmark window for optimizatio
 
 ## Latest
 
-### New commit — train: Auto-derive canonical eval batch from sequence length — score `4` — complexity `7`
+### New commit — eval: Stratify canonical val sampling across the upstream horizon — score `3` — complexity `6`
+
+**AI-identified within brief, human-shaped (3)**
+
+- Requested that the cheap canonical eval stop behaving like a luck-of-the-prefix estimate and instead sample the same upstream-sized prefix horizon more representatively.
+  - Meaning: canonical BPB now keeps the same token-loss math and `2048` context, but when prepacked val rows are available it samples evenly spaced contiguous slices across the first upstream-sized eval horizon instead of just reading one deterministic prefix.
+  - Motivation: the earlier token sweep showed that the sequential-prefix estimator was strongly slice-biased, while a naïve whole-shard slice strategy overshot the upstream-style result. The missing piece was to stratify within the upstream horizon itself rather than across the whole val shard.
+  - Purpose: get cheaper canonical numbers that track the full upstream-shaped eval more closely without paying the wall time of the full `40 * 524288` token contract.
+  - Kept proxy eval sequential for now; only canonical eval uses the new horizon-aware slice strategy.
+  - Derived the slice count from eval length instead of a fixed constant, using roughly `8` eval steps per slice and a cap of `32`.
+  - Used the saved checkpoint sweeps to choose that rule rather than guessing a slice count by intuition.
+
+**Grounding**
+
+- Files:
+  - `autoresearch_mlx/data.py`
+  - `autoresearch_mlx/constants.py`
+  - `train_mlx.py`
+  - `README.md`
+  - `program_mlx.md`
+- Validation:
+  - Reused the saved `m5-balanced` 2-minute checkpoint at `/tmp/autoresearch_balanced_2min_compare` to isolate eval behavior from training variance.
+  - Swept upstream-horizon slice counts at `seq=2048` for both the cheap canonical budget and the Trevin-sized budget.
+  - `python3 -m py_compile train_mlx.py autoresearch_mlx/constants.py autoresearch_mlx/data.py`
+  - `./.venv/bin/python train_mlx.py --preset m5-balanced --time-budget 0.2 --eval-tokens 4096 --canonical-eval-tokens 4096 --no-checkpoint`
+- Measurements:
+  - On the same saved `m5-balanced` 2-minute checkpoint, the upstream-horizon slice sweep picked a clear rule:
+
+    | eval contract | steps | best slice count | best `val_bpb` | eval sec |
+    | --- | ---: | ---: | ---: | ---: |
+    | canonical `2048 / 262144 / 2` | `64` | `8` | `1.625061687` | `2.31` |
+    | Trevin `2048 / 1572864 / 2` | `384` | `32` | `1.627754259` | `14.80` |
+
+  - Against the previously measured upstream practical reference (`2048 / 20971520 / 256 -> 1.627251` on this same checkpoint), the new slice strategy moved the cheap contracts closer without adding meaningful runtime:
+
+    | eval contract | mode | `val_bpb` | abs error vs upstream practical | eval sec |
+    | --- | --- | ---: | ---: | ---: |
+    | canonical `2048 / 262144 / 2` | sequential prefix | `1.622281811` | `0.004969` | `2.38` |
+    | canonical `2048 / 262144 / 2` | upstream-horizon slices | `1.625061687` | `0.002189` | `2.37` |
+    | Trevin `2048 / 1572864 / 2` | sequential prefix | `1.609068586` | `0.018182` | `14.16` |
+    | Trevin `2048 / 1572864 / 2` | upstream-horizon slices | `1.627754259` | `0.000503` | `14.13` |
+
+  - Re-ran the full upstream-shaped baseline on the same checkpoint with the locally optimal long-context batch (`2`) under both sequential and sliced scheduling:
+
+    | full upstream mode | `val_bpb` | eval sec |
+    | --- | ---: | ---: |
+    | sequential `2048 / 20971520 / 2` | `1.627251004` | `183.79` |
+    | sliced `2048 / 20971520 / 2 / 32` | `1.627251004` | `232.12` |
+
+  - That confirmed the cheap sliced estimator is still chasing the same full upstream target rather than a different metric, and that full upstream eval should stay sequential because slicing only adds wall time at full budget.
+
+  - Built the first preset-calibration table for an eventual rung selector using the same sliced cheap/reference contracts and the sequential full upstream baseline:
+
+    | preset | rung | eval tokens | eval sec | abs error vs full | speedup vs full | `5m` overhead | `8h` overhead |
+    | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+    | `m5-fast` | cheap | `262144` | `1.34` | `0.008803` | `81.8x` | `0.45%` | `0.005%` |
+    | `m5-fast` | reference | `1572864` | `7.74` | `0.003155` | `14.2x` | `2.58%` | `0.027%` |
+    | `m5-fast` | full | `20971520` | `109.74` | `0.000000` | `1.0x` | `36.58%` | `0.381%` |
+    | `m5-balanced` | cheap | `262144` | `2.96` | `0.002189` | `62.0x` | `0.99%` | `0.010%` |
+    | `m5-balanced` | reference | `1572864` | `17.34` | `0.000503` | `10.6x` | `5.78%` | `0.060%` |
+    | `m5-balanced` | full | `20971520` | `183.79` | `0.000000` | `1.0x` | `61.26%` | `0.638%` |
+    | `m5-large` | cheap | `262144` | `5.87` | `0.004303` | `74.0x` | `1.96%` | `0.020%` |
+    | `m5-large` | reference | `1572864` | `34.82` | `0.003782` | `12.5x` | `11.61%` | `0.121%` |
+    | `m5-large` | full | `20971520` | `434.09` | `0.000000` | `1.0x` | `144.70%` | `1.507%` |
+    | `m5-xlarge` | cheap | `262144` | `6.55` | `0.008206` | `72.6x` | `2.18%` | `0.023%` |
+    | `m5-xlarge` | reference | `1572864` | `38.03` | `0.004042` | `12.5x` | `12.68%` | `0.132%` |
+    | `m5-xlarge` | full | `20971520` | `475.17` | `0.000000` | `1.0x` | `158.39%` | `1.650%` |
+
+  - The early selector read is preset-sensitive rather than global:
+    - `m5-fast` has a plausible middle rung; `reference` cuts error by about `2.8x` versus `cheap` while still costing only `2.58%` of a `5m` training run.
+    - `m5-balanced` is the cleanest argument for the three-rung policy itself: `reference` is much closer to full than `cheap` (`0.000503` vs `0.002189` error) while still staying under `6%` overhead for a `5m` run, and full upstream only becomes cheap enough to treat as normal once the run is much longer.
+    - `m5-large` does not have the same middle-rung economics on a `5m` run; `reference` is only slightly more accurate than `cheap`, but costs `11.61%` of the run budget instead of `1.96%`.
+    - `m5-xlarge` behaves like the heavier version of that same story: `reference` does improve over `cheap` (`0.004042` vs `0.008206` error), but the `5m` tax is `12.68%`, so it still reads more like a long-run rung than a short-run default.
+    - On long runs the tradeoff flips. For an `8h` training run, even `m5-large` `reference` is only `0.121%` overhead, while full upstream remains expensive enough (`1.507%`) that it still reads more like an audit rung than a default.
+    - `m5-xlarge` reaches the same conclusion with slightly worse full-rung cost: `reference` is only `0.132%` overhead on an `8h` run, while full upstream is still `1.650%`.
+
+  - This change is about estimator quality, not raw eval speed. Runtime stayed effectively flat while the cheap long-context estimates moved substantially closer to the upstream-shaped reference.
+
+## Committed History
+
+### March 10, 2026 — `a3c1aa2` — train: Scale canonical eval batch with sequence length — score `4` — complexity `7`
 
 **Human-directed, AI-shaped (4)**
 
@@ -72,8 +152,6 @@ On this hardware, the default canonical matched benchmark window for optimizatio
     | `256` | `20.31` | `1.609068590` |
 
   - BPB was effectively invariant across the swept batch sizes for each sequence length, so the change is about eval efficiency, not metric drift.
-
-## Committed History
 
 ### March 10, 2026 — `1778297` — changelog: Sync autonomy-golf resources from canonical repo — score `4` — complexity `8`
 
