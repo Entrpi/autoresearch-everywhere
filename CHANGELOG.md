@@ -29,9 +29,20 @@ On this hardware, the default canonical matched benchmark window for optimizatio
 
 ## Latest
 
+### New commit — changelog: Clarify lag-by-one commit stamping — score `5` — complexity `7`
+
+**Human-driven (5)**
+
+- Pointed out that a commit cannot safely amend itself just to add its own hash to committed history, because the amend changes the hash again.
+  - Meaning: the local autonomy-golf maintenance loop needs to follow the lag-by-one stamping rule literally, not approximately.
+  - Motivation: the previous attempt at self-stamping left the committed-history entry pointing at the wrong hash.
+  - Purpose: keep the repo’s governance history mechanically sound so the changelog stays trustworthy as structured provenance.
+  - Corrected the previously self-stamped commit ID from `fb3c53e` to the actual landed hash `1778297`.
+  - Tightened the local checklist and agent brief to say explicitly that a commit must not amend itself just to stamp its own hash; only a later commit may move it into committed history.
+
 ## Committed History
 
-### March 10, 2026 — `fb3c53e` — changelog: Sync autonomy-golf resources from canonical repo — score `4` — complexity `8`
+### March 10, 2026 — `1778297` — changelog: Sync autonomy-golf resources from canonical repo — score `4` — complexity `8`
 
 **Human-directed, AI-shaped (4)**
 
