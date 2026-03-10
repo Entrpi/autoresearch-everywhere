@@ -29,7 +29,69 @@ On this hardware, the default canonical matched benchmark window for optimizatio
 
 ## Latest
 
-### New commit — eval: Stratify canonical val sampling across the upstream horizon — score `3` — complexity `6`
+### New commit — calibration: Add preset calibration tooling foundation — score `4` — complexity `7`
+
+**Human-directed, AI-shaped (4)**
+
+- Requested that the new calibration work cover batching and other model-shape / hardware-capability decisions, not just eval rung selection.
+  - Meaning: the repo now has a first-pass calibration layer with a checked-in `eval_policy.py` for current M5 rung data and a `tools/calibrate_eval_policy.py` CLI that can sweep train-side device batches, eval batches, and cheap/reference/full eval rungs.
+  - Motivation: an eval-only selector would underscope the real problem. We also need a mechanical way to identify train-side batch sweet spots and other preset / hardware operating points instead of rediscovering them manually.
+  - Purpose: turn the recent manual `fast / balanced / large / xlarge` policy work into a repeatable calibration loop that can be rerun for new preset shapes and future hardware.
+  - Kept the trainer behavior unchanged for now; this is an offline calibration layer, not a new default selector wired into `train_mlx.py`.
+  - Seeded the policy module with the current M5 calibrations for `m5-fast`, `m5-balanced`, `m5-large`, and `m5-xlarge`.
+  - Made the calibration CLI able to reuse existing checkpoints or mint a fresh short checkpoint for rung measurement, so it can be used incrementally rather than only as a full re-benchmark pass.
+
+**Grounding**
+
+- Files:
+  - `CHANGELOG.md`
+  - `docs/preset-calibration.md`
+  - `autoresearch_mlx/eval_policy.py`
+  - `tools/calibrate_eval_policy.py`
+- Validation:
+  - `python3 -m py_compile autoresearch_mlx/eval_policy.py tools/calibrate_eval_policy.py`
+  - `./.venv/bin/python tools/calibrate_eval_policy.py train-batch --preset m5-fast --time-budget 0.2 --device-batches 1,2 --json-out /tmp/calibrate_train_batch_test.json`
+  - `./.venv/bin/python tools/calibrate_eval_policy.py eval-rungs --preset m5-fast --checkpoint /tmp/autoresearch_m5_fast_2min_eval_ladder --rungs cheap,reference --json-out /tmp/calibrate_eval_rungs_test.json`
+  - `./.venv/bin/python tools/calibrate_eval_policy.py eval-batch --checkpoint /tmp/autoresearch_balanced_2min_compare --seq-len 2048 --eval-tokens 262144 --batches 1,2,4 --json-out /tmp/calibrate_eval_batch_default_test.json`
+- Measurements:
+  - The quick `train-batch` validation already reproduces the expected local batch preference on `m5-fast`:
+
+    | device batch | status | steady tok/s | peak MB |
+    | ---: | --- | ---: | ---: |
+    | `1` | `ok` | `976.4` | `86.6` |
+    | `2` | `ok` | `26249.2` | `147.0` |
+
+  - The `eval-rungs` mode reproduces the existing `m5-fast` rung measurements on the saved checkpoint without retraining:
+
+    | rung | eval sec | `val_bpb` |
+    | --- | ---: | ---: |
+    | `cheap` | `1.32` | `2.002362005` |
+    | `reference` | `6.54` | `2.014320405` |
+
+  - The `eval-batch` mode surfaced an important calibration rule: batch sweeps should stay sequential by default. With the tool's intended default (`eval_slices=1`), the same saved `m5-balanced` checkpoint stays effectively batch-invariant at `seq=2048`:
+
+    | batch | eval sec | `val_bpb` |
+    | ---: | ---: | ---: |
+    | `1` | `2.44` | `1.622281806` |
+    | `2` | `2.47` | `1.622281811` |
+    | `4` | `2.60` | `1.622281804` |
+
+  - A sliced `eval-batch` probe during validation showed visible batch dependence on the same checkpoint, which is a useful failure mode to catch early:
+    - when the batch sweep reused horizon slicing (`eval_slices=32`, `reference_eval_tokens=20971520`), the measured `val_bpb` drifted across batches instead of staying invariant
+    - that is why the tool keeps `eval-batch` sequential by default, while `eval-rungs` is the place where reduced-budget sliced canonical measurements belong
+
+  - The seeded policy module already produces the selector preview we would expect from the earlier manual tables:
+
+    | preset | `5m` recommendation | `8h` recommendation |
+    | --- | --- | --- |
+    | `m5-fast` | `reference` (`2.58%`) | `full` (`0.381%`) |
+    | `m5-balanced` | `reference` (`5.78%`) | `full` (`0.638%`) |
+    | `m5-large` | `cheap` (`1.96%`) | `reference` (`0.121%`) |
+    | `m5-xlarge` | `cheap` (`2.18%`) | `reference` (`0.132%`) |
+
+## Committed History
+
+### March 10, 2026 — `28fe7d9` — eval: Stratify canonical val sampling across the upstream horizon — score `3` — complexity `6`
 
 **AI-identified within brief, human-shaped (3)**
 
@@ -106,8 +168,6 @@ On this hardware, the default canonical matched benchmark window for optimizatio
     - `m5-xlarge` reaches the same conclusion with slightly worse full-rung cost: `reference` is only `0.132%` overhead on an `8h` run, while full upstream is still `1.650%`.
 
   - This change is about estimator quality, not raw eval speed. Runtime stayed effectively flat while the cheap long-context estimates moved substantially closer to the upstream-shaped reference.
-
-## Committed History
 
 ### March 10, 2026 — `a3c1aa2` — train: Scale canonical eval batch with sequence length — score `4` — complexity `7`
 

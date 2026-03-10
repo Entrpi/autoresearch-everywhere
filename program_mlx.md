@@ -40,6 +40,7 @@ uv run train_mlx.py --preset upstream
 Use `uv run train_mlx.py --no-prepacked-cache` when you explicitly want to benchmark or debug the live packing path instead of the optional prepacked row caches.
 Use `uv run train_mlx.py --benchmark-skip-eval` when you want a warmup-aware comparison that separates startup cost from steady-state throughput. By default, the trainer auto-detects the warmup cutoff statistically from step-time stabilization and reports `warmup_done_step`. Use `--benchmark-warmup-steps <N>` only when you need a fixed override for an ablation or apples-to-apples replay.
 Use `--time-budget-mode train` for core training-path changes and `--time-budget-mode wall` for checkpointing or orchestration changes where elapsed wall time is the metric you actually care about. `train` remains the default and preserves the original autoresearch intent.
+When the task is to calibrate a preset or a hardware profile rather than mutate the trainer itself, prefer the dedicated calibration path in `docs/preset-calibration.md` and `tools/calibrate_eval_policy.py`.
 
 `uv run prepare_mlx.py` now builds the shipped prepacked row caches by default so `m5-fast`, `m5-balanced`, `m5-large`, and `m5-xlarge` all have a prepared fast path. Use `uv run prepare_mlx.py --skip-prepacked-cache` only when you intentionally want the live packing fallback.
 
