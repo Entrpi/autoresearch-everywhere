@@ -27,13 +27,12 @@ That last point is the main justification for a calibration harness.
 
 ## Implemented First Pass
 
-The repo now has the first two pieces of the intended shape:
+The repo now has the first three pieces of the intended shape:
 
 1. `autoresearch_mlx/eval_policy.py`
 2. `tools/calibrate_eval_policy.py`
-3. generated JSON artifacts for raw calibration runs
-
-What is still missing is runtime integration: `train_mlx.py` does not yet call into `eval_policy.py` to choose cheap / reference / full automatically.
+3. runtime integration in `train_mlx.py`
+4. generated JSON artifacts for raw calibration runs
 
 ### `autoresearch_mlx/eval_policy.py`
 
@@ -69,7 +68,7 @@ all on the current reference machine:
 
 - `apple-m5-32gb-10gpu`
 
-The runtime selector still does not consume these values. For now, the module is the checked-in policy source, not yet the active trainer authority.
+The runtime selector now consumes these values by default for shipped preset shapes when the user has not explicitly overridden canonical eval settings. Mutated preset shapes still fall back to the default canonical settings until they are calibrated, and exact-hardware matching is required before a checked-in row is trusted at runtime.
 
 ### `tools/calibrate_eval_policy.py`
 
@@ -77,17 +76,58 @@ This is now the offline harness for repeating the workflow mechanically.
 
 Implemented modes:
 
-- `train-batch`
-  - short training runs over a device-batch sweep
-  - intended to expose throughput / memory tradeoffs for a preset on a given machine
+- `train-grid`
+  - short training runs over a constrained operating-point grid
+  - supports `device_batch_size`, `total_batch_size`, `seq_len`, and `window_pattern`
+  - intended to expose throughput / memory tradeoffs for a preset on a given machine without turning calibration into an architecture search
 - `eval-batch`
   - eval batch sweep on an existing checkpoint
   - intended to find fast, metric-stable eval batches
 - `eval-rungs`
   - cheap / reference / full eval ladder on an existing or newly minted checkpoint
   - intended to produce the error-vs-overhead table for selector design
+- `telemetry-summary`
+  - summarize passive runtime evidence for a preset / hardware / policy row
+  - intended to show whether a checked-in calibration is still only a seed or has broader stable coverage
 
 The tool can reuse an existing checkpoint or mint a fresh short checkpoint for rung calibration.
+
+### `train_mlx.py`
+
+The trainer now uses the checked-in eval tradeoff table by default:
+
+- shipped preset shape + no explicit canonical override
+  - auto-select cheap / reference / full from `eval_policy.py`
+- mutated preset shape
+  - keep the default canonical settings until that shape is calibrated
+- explicit canonical override
+  - treat the run as manual and do not apply the selector
+
+This keeps the runtime policy conservative: only measured preset / hardware rows drive automatic eval behavior.
+
+The trainer now also exposes selector provenance directly in its run config and final summary:
+
+- selected rung
+- detected hardware key
+- calibration status
+- calibration key
+- seed and effective calibration confidence
+- freshness
+- repeat count
+- telemetry count
+- commit/day spread
+- last-seen date
+- observed rungs
+- stable rungs
+- any limit reason that capped a more aggressive rung
+- calibration measurement date
+- policy version
+
+That output is there to make semantic drift visible instead of implicit.
+
+Ordinary eligible runs also append passive eval telemetry to `~/.cache/autoresearch/eval_policy_telemetry.jsonl`. That ledger is not the checked-in policy table; it is the evidence stream used to track freshness, repeat coverage, commit/day spread, rung timing stability, and whether a shipped row still deserves to auto-select more aggressive rungs.
+
+In the current implementation, a rung counts as timing-stable once it has at least `3` eligible runs and its eval-seconds relative MAD is at most `5%`. Confidence promotion is driven by stable rung coverage, not just raw run count.
 
 ## Why The Scope Grew
 
@@ -120,11 +160,12 @@ For a new preset / hardware combination:
 
 This gives enough information to choose eval defaults without pretending the selector is universally portable.
 
-For a fuller preset calibration, add a short training sweep before step `2`:
+For a fuller preset calibration, add a short training grid before step `2`:
 
-- vary `device_batch_size`
-- keep the preset shape fixed
-- record `steady_state_tok_per_sec` and `peak_vram_mb`
+- vary `device_batch_size x total_batch_size`
+- optionally vary `seq_len` and a small candidate set of `window_pattern` values
+- keep depth / width fixed so the sweep remains a calibration problem instead of a new model search
+- record `steady_state_tok_per_sec`, `peak_vram_mb`, and `grad_accum_steps`
 - choose the best supported local operating point before doing eval calibration
 
 ## Initial Policy Shape
@@ -156,10 +197,8 @@ A single global eval selector would hide exactly the information the calibration
 
 ## Integration Points
 
-The likely runtime integration points are still:
+The remaining integration points are:
 
-- `train_mlx.py`
-  - replace direct canonical constants with a call into `eval_policy.py`
 - `autoresearch_mlx/constants.py`
   - keep only basic defaults, not the full policy logic
 - `README.md`
@@ -167,12 +206,34 @@ The likely runtime integration points are still:
 - `CHANGELOG.md`
   - record new calibration tables when a preset / hardware profile is added or revised
 
+## Practical Command Shape
+
+The intended operating-point workflow now looks like:
+
+1. `train-grid`
+   - identify the best local training shape for the preset on the target hardware
+2. `eval-batch`
+   - verify the fast canonical eval batch at the chosen eval sequence length
+3. `eval-rungs`
+   - measure cheap / reference / full against a fixed checkpoint
+4. `telemetry-summary`
+   - inspect what passive runtime evidence has accumulated after ordinary runs
+
+The important constraint is to keep the training grid small and interpretable. A good calibration grid is something like:
+
+- `device_batch_size x total_batch_size`
+- one or two `seq_len` candidates
+- one or two `window_pattern` candidates
+
+and not an open-ended product over every model hyperparameter.
+
 ## Open Questions
 
 - Should the hardware key be manual (`m5-32gb-10gpu`) or partially auto-detected?
 - Should calibrations be stored in Python, JSON, or both?
 - Should the training checkpoint budget for calibration stay fixed at `120s`, or vary by preset size?
 - Should the runtime selector expose explicit modes like `cheap`, `reference`, `full`, and `auto`?
+- Should the operating-point grid grow to include a constrained `depth` ladder for future hardware classes, or should that remain outside calibration entirely?
 
 ## Current Recommendation
 
@@ -180,6 +241,16 @@ Keep the runtime policy simple for now:
 
 - keep the selector ladder discrete
 - use measured preset-specific data
+- require exact hardware-key matches for automatic selection
+- treat the checked-in rows as low-confidence seed calibrations until they have broader repeat coverage
+- let opportunistic telemetry from ordinary eligible runs update freshness and repeat evidence, but not silently rewrite the checked-in policy rows
+- aggregate confidence from stable coverage, not just raw counts:
+  - repeated stable telemetry on one rung can promote a row to `telemetry-repeated-single-hardware`
+  - multiple stable rungs across multiple days/commits can promote further to `telemetry-cross-rung-single-hardware` or `telemetry-cross-session-stable`
+- let confidence and freshness gate how aggressive the runtime selector may be:
+  - seed rows may auto-pick `cheap` or `reference`
+  - `full` should require broader stable cross-rung evidence
+  - stale-age rows should fall back visibly rather than being trusted indefinitely
 - keep full upstream sequential
 - keep reduced rungs sliced across the upstream horizon
-- continue using the new calibration tool to fill out more preset / hardware rows before wiring the selector into `train_mlx.py`
+- continue using the calibration tool to fill out more preset / hardware rows before broadening the automatic selector beyond the shipped preset shapes

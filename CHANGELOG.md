@@ -29,7 +29,102 @@ On this hardware, the default canonical matched benchmark window for optimizatio
 
 ## Latest
 
-### New commit — calibration: Add preset calibration tooling foundation — score `4` — complexity `7`
+### New commit — calibration: Harden runtime eval selection against semantic drift — score `4` — complexity `15`
+
+**Human-directed, AI-shaped (4)**
+
+- Requested that the calibration automation broaden from an eval-policy seed into a practical operating-point search for new preset / hardware combinations.
+  - Meaning: `tools/calibrate_eval_policy.py` now exposes `train-grid`, a constrained training sweep that can cross `device_batch_size`, `total_batch_size`, `seq_len`, and `window_pattern`, while defaulting any omitted axes to the preset values. `train_mlx.py` now consumes the checked-in eval tradeoff table by default for shipped preset shapes when canonical eval settings are not manually overridden, but only on exact hardware-key matches.
+  - Motivation: the foundation was still underscoped. Real preset calibration needs to identify local training operating points, not just cheap / reference / full eval rungs, and the runtime selector needs to make calibration gaps explicit instead of silently applying the M5 row everywhere.
+  - Purpose: let new preset and hardware bring-up follow the same mechanical loop we have been doing manually: small training-grid search first, then eval batch and rung calibration on the chosen operating point, with the trainer automatically benefiting from measured rung tables only when the shape and hardware are actually covered.
+  - Promoted the training sweep from a batch-only interface to a true operating-point grid, while keeping `train-batch` as an alias so the initial foundation commands still work.
+  - Added `tokens_per_fwdbwd` and `grad_accum_steps` to each row so the accumulation shape is explicit in calibration artifacts rather than inferred from the arguments.
+  - Rewrote the calibration docs around the intended workflow: `train-grid -> eval-batch -> eval-rungs`, with an explicit warning to keep the grid small and interpretable.
+  - Made the runtime selector conservative: it only auto-selects cheap / reference / full for shipped preset shapes with no explicit canonical override, falls back to the default canonical settings for mutated shapes until they are calibrated, and also falls back when no exact hardware-key row exists.
+  - Added explicit calibration metadata to runtime config and summaries: hardware key, calibration status, calibration key, confidence, repeat count, measurement budget, measurement date, and policy version.
+  - Added a stale-row guard: if a checked-in calibration row carries the wrong policy version, the runtime now falls back visibly instead of silently trusting it.
+  - Added passive eval telemetry capture for ordinary eligible runs, stored outside git, so repeat evidence can accumulate without hand-running the calibration tool every time.
+  - Aggregated that telemetry into runtime freshness and richer effective-confidence signals, including telemetry count, commit/day spread, observed rungs, stable rungs, and last-seen date.
+  - Made confidence policy-driving instead of descriptive: low-confidence seed rows can auto-pick `cheap` or `reference`, but they no longer auto-escalate to `full` without broader stable cross-rung evidence.
+  - Added an age-based guard on top of schema versioning: stale-age rows now fall back visibly to the default canonical settings instead of being trusted indefinitely.
+  - Added `telemetry-summary` to the calibration CLI so the passive evidence base can be inspected directly instead of inferred from trainer logs.
+
+**Grounding**
+
+- Files:
+  - `CHANGELOG.md`
+  - `README.md`
+  - `docs/preset-calibration.md`
+  - `program_mlx.md`
+  - `autoresearch_mlx/eval_policy.py`
+  - `autoresearch_mlx/eval_telemetry.py`
+  - `autoresearch_mlx/constants.py`
+  - `train_mlx.py`
+  - `tools/calibrate_eval_policy.py`
+- Validation:
+  - `python3 -m py_compile train_mlx.py autoresearch_mlx/eval_policy.py autoresearch_mlx/eval_telemetry.py tools/calibrate_eval_policy.py`
+  - `./.venv/bin/python tools/calibrate_eval_policy.py telemetry-summary --preset m5-balanced`
+  - `./.venv/bin/python tools/calibrate_eval_policy.py train-grid --preset m5-fast --time-budget 0.2 --device-batches 1,2 --total-batches 512,1024 --json-out /tmp/calibrate_train_grid_batch_test.json`
+  - `./.venv/bin/python tools/calibrate_eval_policy.py train-grid --preset m5-fast --time-budget 0.2 --device-batches 2 --total-batches 1024 --seq-lens 256,512 --json-out /tmp/calibrate_train_grid_seq_test.json`
+  - `./.venv/bin/python tools/calibrate_eval_policy.py train-grid --preset m5-balanced --time-budget 1.5 --device-batches 4 --total-batches 2048 --window-patterns L,SSSL --json-out /tmp/calibrate_train_grid_window_test.json`
+  - `./.venv/bin/python train_mlx.py --preset m5-fast --time-budget 0.2 --no-checkpoint`
+  - `./.venv/bin/python - <<'PY' ... resolve_run_config(...) / choose_auto_eval_decision(...) ... PY` to verify default selection, long-run confidence capping, boosted-confidence promotion to `full`, and stale-age fallback
+- Measurements:
+  - The new `device_batch_size x total_batch_size` grid already surfaces a real operating-point choice on `m5-fast`:
+
+    | device batch | total batch | grad accum | steady tok/s | peak MB |
+    | ---: | ---: | ---: | ---: | ---: |
+    | `1` | `512` | `2` | `7296.8` | `107.1` |
+    | `2` | `512` | `1` | `32493.6` | `147.0` |
+    | `1` | `1024` | `4` | `28728.2` | `114.7` |
+    | `2` | `1024` | `2` | `39978.7` | `156.5` |
+
+  - The same command path now handles a constrained `seq_len` sweep without extra glue code:
+
+    | seq len | device batch | total batch | grad accum | steady tok/s | peak MB |
+    | ---: | ---: | ---: | ---: | ---: | ---: |
+    | `256` | `2` | `1024` | `2` | `23750.5` | `156.5` |
+    | `512` | `2` | `1024` | `1` | `30684.2` | `253.2` |
+
+  - And it can probe a small `window_pattern` candidate set on the same preset shell:
+
+    | window | steady tok/s | peak MB | steps |
+    | --- | ---: | ---: | ---: |
+    | `L` | `34663.7` | `950.2` | `23` |
+    | `SSSL` | `35698.2` | `950.2` | `26` |
+
+  - The short `window_pattern` probe is only a capability check for the new axis, not a recommendation to change preset defaults. The important point is that batch and shape axes now live under one mechanical sweep instead of separate ad hoc scripts.
+
+  - The richer aggregation policy now distinguishes repeated evidence from broad stable evidence:
+
+    | case | rung | status | effective confidence | freshness | telemetry | stable rungs | limited by |
+    | --- | --- | --- | --- | --- | ---: | --- | --- |
+    | `m5-balanced`, `300s` | `reference` | `calibrated` | `telemetry-repeated-single-hardware` | `fresh` | `42` | `reference` |  |
+    | `m5-balanced`, `8h` | `reference` | `calibrated-limited` | `telemetry-repeated-single-hardware` | `fresh` | `42` | `reference` | `confidence` |
+    | simulated broader stable evidence | `full` | `calibrated` | `telemetry-cross-session-stable` | `fresh` | `8` | `cheap,reference` |  |
+    | simulated stale row | `default` | `stale-age` | `telemetry-cross-session-stable` | `stale-age` | `8` | `cheap,reference` | `stale-age` |
+    | `m5-balanced` with `--seq-len 1024` | `default` | `shape-fallback` |  |  |  |  |
+    | `m5-balanced` on simulated `apple-m9-96gb-40gpu` | `default` | `hardware-unmatched` |  |  |  |  |
+
+  - `telemetry-summary` exposes the passive evidence directly for a real preset/hardware row:
+    - `m5-balanced` on `apple-m5-32gb-10gpu`: `eligible_count=42`, `commit_count=6`, `day_count=2`, `observed_rungs=reference`, `stable_rungs=reference`
+    - rung stats: `median_eval_seconds=13.552`, `rel_mad_eval_seconds=0.0089`, `stable_timing=true`
+
+  - A short real `m5-fast` run confirms that ordinary runs now append passive telemetry and feed it back into the next matching config:
+    - `canonical_eval_rung=cheap`
+    - run summary: `eval_calibration_status=calibrated`, `eval_calibration_effective_confidence=seed-single-checkpoint`, `eval_calibration_limited_by=None`
+    - telemetry ledger after the run: `~/.cache/autoresearch/eval_policy_telemetry.jsonl` exists and increments
+    - next config resolve for the same preset sees `eval_calibration_telemetry_count > 0`, `eval_calibration_commit_count > 0`, and `eval_calibration_last_seen_on=2026-03-10`
+    - `eval_hardware_key=apple-m5-32gb-10gpu`
+    - `eval_calibration_confidence=seed-single-checkpoint`
+    - `canonical_eval_seq_len=2048`
+    - `canonical_eval_tokens=262144`
+    - `canonical_eval_batch_size=2`
+    - `canonical_eval_slices=32`
+
+## Committed History
+
+### March 10, 2026 — `760fa75` — calibration: Add preset calibration tooling foundation — score `4` — complexity `7`
 
 **Human-directed, AI-shaped (4)**
 
@@ -88,8 +183,6 @@ On this hardware, the default canonical matched benchmark window for optimizatio
     | `m5-balanced` | `reference` (`5.78%`) | `full` (`0.638%`) |
     | `m5-large` | `cheap` (`1.96%`) | `reference` (`0.121%`) |
     | `m5-xlarge` | `cheap` (`2.18%`) | `reference` (`0.132%`) |
-
-## Committed History
 
 ### March 10, 2026 — `28fe7d9` — eval: Stratify canonical val sampling across the upstream horizon — score `3` — complexity `6`
 

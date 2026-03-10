@@ -6,6 +6,7 @@ import json
 import subprocess
 import sys
 import time
+from itertools import product
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -20,9 +21,12 @@ from autoresearch_mlx.data import Tokenizer, evaluate_bpb, make_dataloader
 from autoresearch_mlx.eval_policy import (
     DEFAULT_EVAL_HARDWARE_KEY,
     DEFAULT_EVAL_RUNGS,
+    EVAL_POLICY_VERSION,
     EvalRungSpec,
+    detect_current_hardware_key,
     default_eval_batch_size,
 )
+from autoresearch_mlx.eval_telemetry import summarize_eval_telemetry
 from autoresearch_mlx.model import GPT, GPTConfig
 from autoresearch_mlx.optim import MuonAdamW
 from train_mlx import PRESETS
@@ -34,6 +38,10 @@ def parse_int_list(value: str) -> list[int]:
 
 def parse_float_list(value: str) -> list[float]:
     return [float(item.strip()) for item in value.split(",") if item.strip()]
+
+
+def parse_string_list(value: str) -> list[str]:
+    return [item.strip() for item in value.split(",") if item.strip()]
 
 
 def parse_summary(stdout: str) -> dict[str, str | float | int]:
@@ -224,9 +232,33 @@ def run_eval_rungs(args) -> dict:
     }
 
 
-def run_train_batch_sweep(args) -> dict:
+def resolve_train_grid_axes(args) -> tuple[list[int], list[int], list[int], list[str]]:
+    preset = PRESETS[args.preset]
+    device_batches = args.device_batches or [preset.device_batch_size]
+    if args.total_batch_size is not None and args.total_batches is not None:
+        raise ValueError("Use either --total-batch-size or --total-batches, not both.")
+    if args.total_batch_size is not None:
+        total_batches = [args.total_batch_size]
+    elif args.total_batches is not None:
+        total_batches = args.total_batches
+    else:
+        total_batches = [preset.total_batch_size]
+    seq_lens = args.seq_lens or [preset.seq_len]
+    window_patterns = args.window_patterns or [preset.window_pattern]
+    return device_batches, total_batches, seq_lens, window_patterns
+
+
+def run_train_grid_sweep(args) -> dict:
+    device_batches, total_batches, seq_lens, window_patterns = resolve_train_grid_axes(args)
     rows: list[dict] = []
-    for batch_size in args.device_batches:
+    for seq_len, window_pattern, total_batch_size, batch_size in product(
+        seq_lens,
+        window_patterns,
+        total_batches,
+        device_batches,
+    ):
+        tokens_per_fwdbwd = batch_size * seq_len
+        grad_accum_steps = total_batch_size // tokens_per_fwdbwd if total_batch_size % tokens_per_fwdbwd == 0 else None
         cmd = [
             sys.executable,
             "train_mlx.py",
@@ -236,17 +268,26 @@ def run_train_batch_sweep(args) -> dict:
             str(args.time_budget),
             "--benchmark-skip-eval",
             "--no-checkpoint",
+            "--seq-len",
+            str(seq_len),
+            "--window-pattern",
+            window_pattern,
             "--device-batch-size",
             str(batch_size),
+            "--total-batch-size",
+            str(total_batch_size),
         ]
-        if args.total_batch_size is not None:
-            cmd.extend(["--total-batch-size", str(args.total_batch_size)])
         started = time.perf_counter()
         completed = subprocess.run(cmd, capture_output=True, text=True)
         wall_seconds = time.perf_counter() - started
         row = {
             "preset": args.preset,
+            "seq_len": seq_len,
+            "window_pattern": window_pattern,
             "device_batch_size": batch_size,
+            "total_batch_size": total_batch_size,
+            "tokens_per_fwdbwd": tokens_per_fwdbwd,
+            "grad_accum_steps": grad_accum_steps,
             "status": "ok" if completed.returncode == 0 else "error",
             "returncode": completed.returncode,
             "wall_seconds": wall_seconds,
@@ -268,12 +309,48 @@ def run_train_batch_sweep(args) -> dict:
     ok_rows = [row for row in rows if row["status"] == "ok" and row.get("steady_state_tok_per_sec") is not None]
     best = max(ok_rows, key=lambda row: row["steady_state_tok_per_sec"]) if ok_rows else None
     return {
-        "mode": "train-batch",
+        "mode": "train-grid",
         "preset": args.preset,
         "time_budget": args.time_budget,
-        "total_batch_size": args.total_batch_size,
+        "device_batches": device_batches,
+        "total_batches": total_batches,
+        "seq_lens": seq_lens,
+        "window_patterns": window_patterns,
         "rows": rows,
         "best_by_throughput": best,
+    }
+
+
+def run_telemetry_summary(args) -> dict:
+    summary = summarize_eval_telemetry(
+        args.preset,
+        hardware_key=args.hardware_key,
+        policy_version=args.policy_version,
+    )
+    return {
+        "mode": "telemetry-summary",
+        "preset": args.preset,
+        "hardware_key": args.hardware_key,
+        "policy_version": args.policy_version,
+        "eligible_count": summary.eligible_count,
+        "commit_count": summary.commit_count,
+        "day_count": summary.day_count,
+        "observed_rungs": list(summary.observed_rungs),
+        "stable_rungs": list(summary.stable_rungs),
+        "last_seen_on": summary.last_seen_on,
+        "last_seen_age_days": summary.last_seen_age_days,
+        "rung_stats": [
+            {
+                "rung": stat.rung_key,
+                "count": stat.count,
+                "commit_count": stat.commit_count,
+                "day_count": stat.day_count,
+                "median_eval_seconds": stat.median_eval_seconds,
+                "rel_mad_eval_seconds": stat.rel_mad_eval_seconds,
+                "stable_timing": stat.stable_timing,
+            }
+            for stat in summary.rung_stats
+        ],
     }
 
 
@@ -301,18 +378,55 @@ def build_parser() -> argparse.ArgumentParser:
     eval_rungs.add_argument("--batch-size", type=int, default=default_eval_batch_size(CANONICAL_EVAL_SEQ_LEN))
     eval_rungs.add_argument("--rungs", type=lambda value: [item.strip() for item in value.split(",") if item.strip()], default=["cheap", "reference", "full"])
     eval_rungs.add_argument("--budget-seconds", type=parse_float_list, default=parse_float_list("300,28800"))
-    eval_rungs.add_argument("--hardware-key", default=DEFAULT_EVAL_HARDWARE_KEY)
+    eval_rungs.add_argument("--hardware-key", default=detect_current_hardware_key())
     eval_rungs.add_argument("--no-prepacked-cache", action="store_true")
     eval_rungs.add_argument("--json-out")
     eval_rungs.add_argument("--markdown-out")
 
-    train_batch = subparsers.add_parser("train-batch", help="Sweep device batch sizes with short training runs.")
-    train_batch.add_argument("--preset", required=True, choices=tuple(PRESETS))
-    train_batch.add_argument("--time-budget", type=float, default=5.0)
-    train_batch.add_argument("--device-batches", type=parse_int_list, required=True)
-    train_batch.add_argument("--total-batch-size", type=int)
-    train_batch.add_argument("--json-out")
-    train_batch.add_argument("--markdown-out")
+    train_grid = subparsers.add_parser(
+        "train-grid",
+        aliases=["train-batch"],
+        help="Sweep short training operating points across constrained batch and shape axes.",
+    )
+    train_grid.add_argument("--preset", required=True, choices=tuple(PRESETS))
+    train_grid.add_argument("--time-budget", type=float, default=5.0)
+    train_grid.add_argument(
+        "--device-batches",
+        type=parse_int_list,
+        help="Comma-separated device_batch_size values. Defaults to the preset value.",
+    )
+    train_grid.add_argument(
+        "--total-batches",
+        type=parse_int_list,
+        help="Comma-separated total_batch_size values. Defaults to the preset value.",
+    )
+    train_grid.add_argument(
+        "--total-batch-size",
+        type=int,
+        help="Single total_batch_size value. Use --total-batches for a grid.",
+    )
+    train_grid.add_argument(
+        "--seq-lens",
+        type=parse_int_list,
+        help="Comma-separated training seq_len values. Defaults to the preset value.",
+    )
+    train_grid.add_argument(
+        "--window-patterns",
+        type=parse_string_list,
+        help="Comma-separated window_pattern values. Defaults to the preset value.",
+    )
+    train_grid.add_argument("--json-out")
+    train_grid.add_argument("--markdown-out")
+
+    telemetry_summary = subparsers.add_parser(
+        "telemetry-summary",
+        help="Summarize passive eval telemetry coverage for a preset/hardware/policy combination.",
+    )
+    telemetry_summary.add_argument("--preset", required=True, choices=tuple(PRESETS))
+    telemetry_summary.add_argument("--hardware-key", default=detect_current_hardware_key())
+    telemetry_summary.add_argument("--policy-version", type=int, default=EVAL_POLICY_VERSION)
+    telemetry_summary.add_argument("--json-out")
+    telemetry_summary.add_argument("--markdown-out")
 
     return parser
 
@@ -354,14 +468,34 @@ def main() -> None:
                 ("abs_error_vs_full", "abs error vs full"),
             ],
         )
+    elif args.command == "telemetry-summary":
+        payload = run_telemetry_summary(args)
+        rows = payload["rung_stats"]
+        write_markdown(
+            args.markdown_out,
+            rows,
+            columns=[
+                ("rung", "rung"),
+                ("count", "count"),
+                ("commit_count", "commits"),
+                ("day_count", "days"),
+                ("median_eval_seconds", "median eval sec"),
+                ("rel_mad_eval_seconds", "rel MAD"),
+                ("stable_timing", "stable"),
+            ],
+        )
     else:
-        payload = run_train_batch_sweep(args)
+        payload = run_train_grid_sweep(args)
         rows = payload["rows"]
         write_markdown(
             args.markdown_out,
             rows,
             columns=[
+                ("seq_len", "seq len"),
+                ("window_pattern", "window"),
                 ("device_batch_size", "device batch"),
+                ("total_batch_size", "total batch"),
+                ("grad_accum_steps", "grad accum"),
                 ("status", "status"),
                 ("steady_state_tok_per_sec", "steady tok/s"),
                 ("peak_vram_mb", "peak MB"),

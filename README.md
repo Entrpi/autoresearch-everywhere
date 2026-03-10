@@ -24,7 +24,7 @@ The MLX workflow is built around four files:
 
 For the full architecture, subsystem boundaries, feature-gap matrix, and flow diagrams, see [docs/mlx-port-architecture.md](docs/mlx-port-architecture.md).
 For a grounded history of changes, including measured effects and explicit provenance tiers, see [CHANGELOG.md](CHANGELOG.md).
-For the current preset / hardware calibration workflow and the new calibration tooling direction, see [docs/preset-calibration.md](docs/preset-calibration.md).
+For the current preset / hardware calibration workflow and the calibration tooling, including `train-grid`, `eval-batch`, `eval-rungs`, and `telemetry-summary`, see [docs/preset-calibration.md](docs/preset-calibration.md). Shipped preset shapes now use the checked-in eval tradeoff tables by default when canonical eval settings are not manually overridden, but only on exact hardware-key matches. The runtime surfaces calibration status, effective confidence, freshness, telemetry coverage, stable rung coverage, and last-seen date so underfilled or stale calibration is visible instead of implicit; unmatched or stale rows fall back visibly to the default canonical settings.
 
 Training still uses a **fixed 5-minute training budget** by default. `train_mlx.py` now supports `--time-budget-mode train|wall`, but the default `train` mode keeps the original intent: budget is accounted in accumulated optimizer-step time rather than raw elapsed wall time. `val_bpb` is now a fixed canonical BPB used for cross-preset comparisons, while `proxy_val_bpb` reports the same-shape local evaluation used for quick inspection. The default canonical eval now uses `seq_len=2048` with `262144` eval tokens, and its batch is auto-derived to target about `4096` tokens per eval step, so `256 -> 16`, `512 -> 8`, `1024 -> 4`, and `2048 -> 2` unless you override it. When prepacked validation rows are available, canonical eval samples evenly spaced contiguous slices across the first upstream-sized eval horizon instead of scoring just one deterministic prefix.
 
@@ -165,10 +165,10 @@ Current project snapshot from [CHANGELOG.md](CHANGELOG.md):
 
 | Metric | Value |
 | --- | --- |
-| Mean autonomy score | `3.34 / 6` |
-| Mean complexity | `6.79 / commit` |
-| Mean score per top-level bullet | `3.44 / 6` |
-| History covered | `29` commits across `9` subsystems |
+| Mean autonomy score | `3.36 / 6` |
+| Mean complexity | `7.07 / commit` |
+| Mean score per top-level bullet | `3.45 / 6` |
+| History covered | `30` commits across `9` subsystems |
 <!-- autonomy-golf-snapshot:end -->
 
 Refresh with:

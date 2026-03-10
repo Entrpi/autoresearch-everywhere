@@ -5,6 +5,7 @@ Usage: uv run train_mlx.py
 
 import argparse
 import gc
+import subprocess
 import statistics
 import sys
 import time
@@ -43,6 +44,13 @@ from autoresearch_mlx.checkpoints import (
     save_checkpoint,
 )
 from autoresearch_mlx.data import Tokenizer, evaluate_bpb, make_dataloader
+from autoresearch_mlx.eval_policy import (
+    EVAL_POLICY_VERSION,
+    choose_auto_eval_decision,
+    detect_current_hardware_key,
+    find_eval_calibration,
+)
+from autoresearch_mlx.eval_telemetry import EvalTelemetryRecord, append_eval_telemetry, now_iso
 from autoresearch_mlx.model import GPT, GPTConfig
 from autoresearch_mlx.optim import MuonAdamW
 
@@ -71,6 +79,27 @@ class RunConfig:
     canonical_eval_seq_len: int
     canonical_eval_tokens: int
     canonical_eval_batch_size: int
+    canonical_eval_rung: str | None
+    canonical_eval_slices: int
+    canonical_eval_reference_tokens: int | None
+    eval_hardware_key: str
+    eval_calibration_status: str
+    eval_calibration_key: str | None
+    eval_calibration_confidence: str | None
+    eval_calibration_effective_confidence: str | None
+    eval_calibration_freshness: str | None
+    eval_calibration_repeat_count: int | None
+    eval_calibration_measured_train_seconds: float | None
+    eval_calibration_measured_on: str | None
+    eval_calibration_telemetry_count: int | None
+    eval_calibration_commit_count: int | None
+    eval_calibration_day_count: int | None
+    eval_calibration_observed_rungs: str | None
+    eval_calibration_stable_rungs: str | None
+    eval_calibration_last_seen_on: str | None
+    eval_calibration_last_seen_age_days: int | None
+    eval_calibration_limited_by: str | None
+    eval_policy_version: int | None
     depth: int
     window_pattern: str
     device_batch_size: int
@@ -153,6 +182,243 @@ def default_canonical_eval_batch_size(seq_len: int) -> int:
     if seq_len <= 0:
         raise ValueError("canonical eval sequence length must be positive")
     return max(1, CANONICAL_EVAL_STEP_TOKENS // seq_len)
+
+
+def current_git_commit() -> str | None:
+    try:
+        return subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+    except Exception:
+        return None
+
+
+def uses_default_preset_shape(config: RunConfig) -> bool:
+    preset = PRESETS[config.preset]
+    return (
+        config.seq_len == preset.seq_len
+        and config.depth == preset.depth
+        and config.window_pattern == preset.window_pattern
+        and config.device_batch_size == preset.device_batch_size
+        and config.total_batch_size == preset.total_batch_size
+    )
+
+
+def resolve_eval_settings(
+    config: RunConfig,
+    *,
+    explicit_canonical_overrides: bool,
+) -> tuple[RunConfig, str | None]:
+    if config.smoke:
+        return replace(
+            config,
+            canonical_eval_rung="smoke",
+            canonical_eval_slices=1,
+            canonical_eval_reference_tokens=None,
+            eval_calibration_status="smoke",
+            eval_calibration_key=None,
+            eval_calibration_confidence=None,
+            eval_calibration_effective_confidence=None,
+            eval_calibration_freshness=None,
+            eval_calibration_repeat_count=None,
+            eval_calibration_measured_train_seconds=None,
+            eval_calibration_measured_on=None,
+            eval_calibration_telemetry_count=None,
+            eval_calibration_commit_count=None,
+            eval_calibration_day_count=None,
+            eval_calibration_observed_rungs=None,
+            eval_calibration_stable_rungs=None,
+            eval_calibration_last_seen_on=None,
+            eval_calibration_last_seen_age_days=None,
+            eval_calibration_limited_by=None,
+            eval_policy_version=EVAL_POLICY_VERSION,
+        ), None
+    if explicit_canonical_overrides:
+        return replace(
+            config,
+            canonical_eval_rung="manual",
+            canonical_eval_slices=1,
+            canonical_eval_reference_tokens=None,
+            eval_calibration_status="manual",
+            eval_calibration_key=None,
+            eval_calibration_confidence=None,
+            eval_calibration_effective_confidence=None,
+            eval_calibration_freshness=None,
+            eval_calibration_repeat_count=None,
+            eval_calibration_measured_train_seconds=None,
+            eval_calibration_measured_on=None,
+            eval_calibration_telemetry_count=None,
+            eval_calibration_commit_count=None,
+            eval_calibration_day_count=None,
+            eval_calibration_observed_rungs=None,
+            eval_calibration_stable_rungs=None,
+            eval_calibration_last_seen_on=None,
+            eval_calibration_last_seen_age_days=None,
+            eval_calibration_limited_by=None,
+            eval_policy_version=EVAL_POLICY_VERSION,
+        ), "manual canonical eval override"
+    if not uses_default_preset_shape(config):
+        return replace(
+            config,
+            canonical_eval_rung="default",
+            canonical_eval_slices=EVAL_SLICE_CAP,
+            canonical_eval_reference_tokens=EVAL_TOKENS,
+            canonical_eval_batch_size=default_canonical_eval_batch_size(config.canonical_eval_seq_len),
+            eval_calibration_status="shape-fallback",
+            eval_calibration_key=None,
+            eval_calibration_confidence=None,
+            eval_calibration_effective_confidence=None,
+            eval_calibration_freshness=None,
+            eval_calibration_repeat_count=None,
+            eval_calibration_measured_train_seconds=None,
+            eval_calibration_measured_on=None,
+            eval_calibration_telemetry_count=None,
+            eval_calibration_commit_count=None,
+            eval_calibration_day_count=None,
+            eval_calibration_observed_rungs=None,
+            eval_calibration_stable_rungs=None,
+            eval_calibration_last_seen_on=None,
+            eval_calibration_last_seen_age_days=None,
+            eval_calibration_limited_by=None,
+            eval_policy_version=EVAL_POLICY_VERSION,
+        ), "preset shape mutated; keeping default canonical eval settings until calibrated"
+
+    calibration = find_eval_calibration(
+        config.preset,
+        hardware_key=config.eval_hardware_key,
+    )
+    if calibration is None:
+        return replace(
+            config,
+            canonical_eval_rung="default",
+            canonical_eval_slices=EVAL_SLICE_CAP,
+            canonical_eval_reference_tokens=EVAL_TOKENS,
+            canonical_eval_batch_size=default_canonical_eval_batch_size(config.canonical_eval_seq_len),
+            eval_calibration_status="hardware-unmatched",
+            eval_calibration_key=None,
+            eval_calibration_confidence=None,
+            eval_calibration_effective_confidence=None,
+            eval_calibration_freshness=None,
+            eval_calibration_repeat_count=None,
+            eval_calibration_measured_train_seconds=None,
+            eval_calibration_measured_on=None,
+            eval_calibration_telemetry_count=None,
+            eval_calibration_commit_count=None,
+            eval_calibration_day_count=None,
+            eval_calibration_observed_rungs=None,
+            eval_calibration_stable_rungs=None,
+            eval_calibration_last_seen_on=None,
+            eval_calibration_last_seen_age_days=None,
+            eval_calibration_limited_by=None,
+            eval_policy_version=EVAL_POLICY_VERSION,
+        ), (
+            f"no eval calibration row for preset={config.preset} on hardware={config.eval_hardware_key}; "
+            "keeping default canonical eval settings"
+        )
+    if calibration.policy_version != EVAL_POLICY_VERSION:
+        return replace(
+            config,
+            canonical_eval_rung="default",
+            canonical_eval_slices=EVAL_SLICE_CAP,
+            canonical_eval_reference_tokens=EVAL_TOKENS,
+            canonical_eval_batch_size=default_canonical_eval_batch_size(config.canonical_eval_seq_len),
+            eval_calibration_status="stale-policy",
+            eval_calibration_key=calibration.key,
+            eval_calibration_confidence=calibration.confidence,
+            eval_calibration_effective_confidence=calibration.confidence,
+            eval_calibration_freshness="unknown",
+            eval_calibration_repeat_count=calibration.repeat_count,
+            eval_calibration_measured_train_seconds=calibration.measured_train_seconds,
+            eval_calibration_measured_on=calibration.measured_on,
+            eval_calibration_telemetry_count=0,
+            eval_calibration_commit_count=0,
+            eval_calibration_day_count=0,
+            eval_calibration_observed_rungs=None,
+            eval_calibration_stable_rungs=None,
+            eval_calibration_last_seen_on=None,
+            eval_calibration_last_seen_age_days=None,
+            eval_calibration_limited_by="policy-version",
+            eval_policy_version=EVAL_POLICY_VERSION,
+        ), (
+            f"calibration row {calibration.key} is policy_version={calibration.policy_version}, "
+            f"expected {EVAL_POLICY_VERSION}; keeping default canonical eval settings"
+        )
+
+    decision = choose_auto_eval_decision(
+        config.preset,
+        time_budget_sec=config.time_budget,
+        hardware_key=config.eval_hardware_key,
+    )
+    if decision.freshness == "stale-age":
+        return replace(
+            config,
+            canonical_eval_rung="default",
+            canonical_eval_slices=EVAL_SLICE_CAP,
+            canonical_eval_reference_tokens=EVAL_TOKENS,
+            canonical_eval_batch_size=default_canonical_eval_batch_size(config.canonical_eval_seq_len),
+            eval_calibration_status="stale-age",
+            eval_calibration_key=decision.calibration.key,
+            eval_calibration_confidence=decision.calibration.confidence,
+            eval_calibration_effective_confidence=decision.effective_confidence,
+            eval_calibration_freshness=decision.freshness,
+            eval_calibration_repeat_count=decision.calibration.repeat_count,
+            eval_calibration_measured_train_seconds=decision.calibration.measured_train_seconds,
+            eval_calibration_measured_on=decision.calibration.measured_on,
+            eval_calibration_telemetry_count=decision.telemetry_count,
+            eval_calibration_commit_count=decision.telemetry_commit_count,
+            eval_calibration_day_count=decision.telemetry_day_count,
+            eval_calibration_observed_rungs=",".join(decision.observed_rungs) or None,
+            eval_calibration_stable_rungs=",".join(decision.stable_rungs) or None,
+            eval_calibration_last_seen_on=decision.last_seen_on,
+            eval_calibration_last_seen_age_days=decision.last_seen_age_days,
+            eval_calibration_limited_by=decision.limited_by,
+            eval_policy_version=decision.calibration.policy_version,
+        ), (
+            f"calibration row {decision.calibration.key} is stale ({decision.last_seen_age_days}d old); "
+            "keeping default canonical eval settings until refreshed"
+        )
+    rung = decision.recommendation.rung
+    updated = replace(
+        config,
+        canonical_eval_seq_len=decision.calibration.seq_len,
+        canonical_eval_tokens=rung.spec.eval_tokens,
+        canonical_eval_batch_size=decision.calibration.batch_size,
+        canonical_eval_rung=rung.spec.key,
+        canonical_eval_slices=rung.spec.eval_slices,
+        canonical_eval_reference_tokens=rung.spec.reference_eval_tokens,
+        eval_calibration_status="calibrated" if decision.limited_by is None else "calibrated-limited",
+        eval_calibration_key=decision.calibration.key,
+        eval_calibration_confidence=decision.calibration.confidence,
+        eval_calibration_effective_confidence=decision.effective_confidence,
+        eval_calibration_freshness=decision.freshness,
+        eval_calibration_repeat_count=decision.calibration.repeat_count,
+        eval_calibration_measured_train_seconds=decision.calibration.measured_train_seconds,
+        eval_calibration_measured_on=decision.calibration.measured_on,
+        eval_calibration_telemetry_count=decision.telemetry_count,
+        eval_calibration_commit_count=decision.telemetry_commit_count,
+        eval_calibration_day_count=decision.telemetry_day_count,
+        eval_calibration_observed_rungs=",".join(decision.observed_rungs) or None,
+        eval_calibration_stable_rungs=",".join(decision.stable_rungs) or None,
+        eval_calibration_last_seen_on=decision.last_seen_on,
+        eval_calibration_last_seen_age_days=decision.last_seen_age_days,
+        eval_calibration_limited_by=decision.limited_by,
+        eval_policy_version=decision.calibration.policy_version,
+    )
+    selected_label = "auto-selected" if decision.limited_by is None else "auto-selected with safety cap"
+    reason = (
+        f"{selected_label} {rung.spec.key} eval rung from {decision.calibration.label}; "
+        f"projected overhead {decision.recommendation.projected_overhead_fraction * 100.0:.2f}% "
+        f"for time_budget={config.time_budget:.1f}s; effective_confidence={decision.effective_confidence}; "
+        f"freshness={decision.freshness}; telemetry_count={decision.telemetry_count}; "
+        f"commit_count={decision.telemetry_commit_count}; day_count={decision.telemetry_day_count}; "
+        f"stable_rungs={','.join(decision.stable_rungs) or 'none'}"
+    )
+    if decision.limited_by is not None:
+        reason += f"; limited_by={decision.limited_by}"
+    return updated, reason
 
 
 def verify_mlx_env() -> None:
@@ -358,7 +624,7 @@ MATRIX_LR = 0.04
 SCALAR_LR = 0.5
 WEIGHT_DECAY = 0.2
 ADAM_BETAS = (0.8, 0.95)
-WARMUP_RATIO = 0.0
+WARMUP_RATIO = 0.02
 WARMDOWN_RATIO = 0.5
 FINAL_LR_FRAC = 0.0
 UTILIZATION_WARMUP_STEPS = 1
@@ -393,7 +659,7 @@ PRESETS = {
         depth=4,
         window_pattern="L",
         device_batch_size=4,
-        total_batch_size=2048,
+        total_batch_size=12288,
     ),
     "m5-large": RunPreset(
         description="Larger M5 run when you want more model capacity and can accept slower updates.",
@@ -449,6 +715,27 @@ def resolve_run_config(args: argparse.Namespace) -> RunConfig:
         canonical_eval_seq_len=preset.canonical_eval_seq_len,
         canonical_eval_tokens=preset.canonical_eval_tokens,
         canonical_eval_batch_size=preset.canonical_eval_batch_size,
+        canonical_eval_rung=None,
+        canonical_eval_slices=EVAL_SLICE_CAP,
+        canonical_eval_reference_tokens=EVAL_TOKENS,
+        eval_hardware_key=detect_current_hardware_key(),
+        eval_calibration_status="unresolved",
+        eval_calibration_key=None,
+        eval_calibration_confidence=None,
+        eval_calibration_effective_confidence=None,
+        eval_calibration_freshness=None,
+        eval_calibration_repeat_count=None,
+        eval_calibration_measured_train_seconds=None,
+        eval_calibration_measured_on=None,
+        eval_calibration_telemetry_count=None,
+        eval_calibration_commit_count=None,
+        eval_calibration_day_count=None,
+        eval_calibration_observed_rungs=None,
+        eval_calibration_stable_rungs=None,
+        eval_calibration_last_seen_on=None,
+        eval_calibration_last_seen_age_days=None,
+        eval_calibration_limited_by=None,
+        eval_policy_version=EVAL_POLICY_VERSION,
         depth=preset.depth,
         window_pattern=preset.window_pattern,
         device_batch_size=preset.device_batch_size,
@@ -504,13 +791,20 @@ def resolve_run_config(args: argparse.Namespace) -> RunConfig:
             overrides[field] = value
     if overrides:
         config = replace(config, **overrides)
-    if not args.smoke and args.canonical_eval_batch_size is None:
+    explicit_canonical_overrides = any(
+        getattr(args, field) is not None
+        for field in ("canonical_eval_seq_len", "canonical_eval_tokens", "canonical_eval_batch_size")
+    )
+    if explicit_canonical_overrides and args.canonical_eval_batch_size is None:
         config = replace(
             config,
             canonical_eval_batch_size=default_canonical_eval_batch_size(config.canonical_eval_seq_len),
         )
 
-    return config
+    return resolve_eval_settings(
+        config,
+        explicit_canonical_overrides=explicit_canonical_overrides,
+    )[0]
 
 
 def resolve_resume_config(args: argparse.Namespace) -> RunConfig:
@@ -550,6 +844,27 @@ def resolve_resume_config(args: argparse.Namespace) -> RunConfig:
     run_config.setdefault("benchmark_warmup_steps", None)
     run_config.setdefault("benchmark_skip_eval", False)
     run_config.setdefault("no_checkpoint", False)
+    run_config.setdefault("canonical_eval_rung", None)
+    run_config.setdefault("canonical_eval_slices", EVAL_SLICE_CAP)
+    run_config.setdefault("canonical_eval_reference_tokens", EVAL_TOKENS)
+    run_config.setdefault("eval_hardware_key", detect_current_hardware_key())
+    run_config.setdefault("eval_calibration_status", "unknown")
+    run_config.setdefault("eval_calibration_key", None)
+    run_config.setdefault("eval_calibration_confidence", None)
+    run_config.setdefault("eval_calibration_effective_confidence", None)
+    run_config.setdefault("eval_calibration_freshness", None)
+    run_config.setdefault("eval_calibration_repeat_count", None)
+    run_config.setdefault("eval_calibration_measured_train_seconds", None)
+    run_config.setdefault("eval_calibration_measured_on", None)
+    run_config.setdefault("eval_calibration_telemetry_count", None)
+    run_config.setdefault("eval_calibration_commit_count", None)
+    run_config.setdefault("eval_calibration_day_count", None)
+    run_config.setdefault("eval_calibration_observed_rungs", None)
+    run_config.setdefault("eval_calibration_stable_rungs", None)
+    run_config.setdefault("eval_calibration_last_seen_on", None)
+    run_config.setdefault("eval_calibration_last_seen_age_days", None)
+    run_config.setdefault("eval_calibration_limited_by", None)
+    run_config.setdefault("eval_policy_version", EVAL_POLICY_VERSION)
     run_config.setdefault("time_budget_mode", TIME_BUDGET_MODE_TRAIN)
     run_config.setdefault("checkpoint_mode", CHECKPOINT_MODE_EXACT)
     run_config.setdefault("checkpoint_save_mode", CHECKPOINT_SAVE_MODE_SYNC)
@@ -735,6 +1050,50 @@ def resolve_checkpoint_settings(args: RunConfig, num_params: int) -> tuple[RunCo
     return resolved, reason
 
 
+def describe_eval_policy(args: RunConfig) -> str:
+    if args.canonical_eval_rung == "smoke":
+        return "smoke canonical eval"
+    if args.canonical_eval_rung == "manual":
+        return "manual canonical eval override"
+    if args.canonical_eval_rung == "default":
+        if args.eval_calibration_status == "shape-fallback":
+            return "default canonical eval settings (mutated preset shape is not yet calibrated)"
+        if args.eval_calibration_status == "hardware-unmatched":
+            return (
+                f"default canonical eval settings (no exact calibration row for hardware={args.eval_hardware_key})"
+            )
+        if args.eval_calibration_status == "stale-age":
+            return (
+                f"default canonical eval settings (calibration row {args.eval_calibration_key} is stale-age; "
+                f"last_seen_on={args.eval_calibration_last_seen_on}, age_days={args.eval_calibration_last_seen_age_days})"
+            )
+        if args.eval_calibration_status == "stale-policy":
+            return (
+                f"default canonical eval settings (calibration row {args.eval_calibration_key} is stale for "
+                f"policy_version={args.eval_policy_version})"
+            )
+        return "default canonical eval settings"
+    if args.canonical_eval_rung in {"cheap", "reference", "full"}:
+        reference = (
+            f", reference_eval_tokens={args.canonical_eval_reference_tokens}"
+            if args.canonical_eval_reference_tokens is not None
+            else ""
+        )
+        return (
+            f"auto-selected {args.canonical_eval_rung} rung for {args.preset} on {args.eval_hardware_key}; "
+            f"slices={args.canonical_eval_slices}{reference}; "
+            f"calibration={args.eval_calibration_key}; confidence={args.eval_calibration_confidence}; "
+            f"effective_confidence={args.eval_calibration_effective_confidence}; "
+            f"freshness={args.eval_calibration_freshness}; telemetry_count={args.eval_calibration_telemetry_count}; "
+            f"commit_count={args.eval_calibration_commit_count}; day_count={args.eval_calibration_day_count}; "
+            f"observed_rungs={args.eval_calibration_observed_rungs}; stable_rungs={args.eval_calibration_stable_rungs}; "
+            f"last_seen_on={args.eval_calibration_last_seen_on}; "
+            f"repeats={args.eval_calibration_repeat_count}; measured_on={args.eval_calibration_measured_on}; "
+            f"limited_by={args.eval_calibration_limited_by}"
+        )
+    return "canonical eval policy unresolved"
+
+
 def main() -> None:
     args = parse_args()
     if args.checkpoint_save_mode == CHECKPOINT_SAVE_MODE_ASYNC and args.checkpoint_mode != CHECKPOINT_MODE_EXACT:
@@ -774,6 +1133,27 @@ def main() -> None:
         f"canonical_eval_seq_len={args.canonical_eval_seq_len}, "
         f"canonical_eval_tokens={args.canonical_eval_tokens}, "
         f"canonical_eval_batch_size={args.canonical_eval_batch_size}, "
+        f"canonical_eval_rung={args.canonical_eval_rung}, "
+        f"canonical_eval_slices={args.canonical_eval_slices}, "
+        f"canonical_eval_reference_tokens={args.canonical_eval_reference_tokens}, "
+        f"eval_hardware_key={args.eval_hardware_key}, "
+        f"eval_calibration_status={args.eval_calibration_status}, "
+        f"eval_calibration_key={args.eval_calibration_key}, "
+        f"eval_calibration_confidence={args.eval_calibration_confidence}, "
+        f"eval_calibration_effective_confidence={args.eval_calibration_effective_confidence}, "
+        f"eval_calibration_freshness={args.eval_calibration_freshness}, "
+        f"eval_calibration_repeat_count={args.eval_calibration_repeat_count}, "
+        f"eval_calibration_measured_train_seconds={args.eval_calibration_measured_train_seconds}, "
+        f"eval_calibration_measured_on={args.eval_calibration_measured_on}, "
+        f"eval_calibration_telemetry_count={args.eval_calibration_telemetry_count}, "
+        f"eval_calibration_commit_count={args.eval_calibration_commit_count}, "
+        f"eval_calibration_day_count={args.eval_calibration_day_count}, "
+        f"eval_calibration_observed_rungs={args.eval_calibration_observed_rungs}, "
+        f"eval_calibration_stable_rungs={args.eval_calibration_stable_rungs}, "
+        f"eval_calibration_last_seen_on={args.eval_calibration_last_seen_on}, "
+        f"eval_calibration_last_seen_age_days={args.eval_calibration_last_seen_age_days}, "
+        f"eval_calibration_limited_by={args.eval_calibration_limited_by}, "
+        f"eval_policy_version={args.eval_policy_version}, "
         f"device_batch_size={args.device_batch_size}, total_batch_size={args.total_batch_size}, "
         f"smoke={args.smoke}, benchmark_warmup_steps={args.benchmark_warmup_steps if args.benchmark_warmup_steps is not None else 'auto'}, "
         f"benchmark_skip_eval={args.benchmark_skip_eval}, prefer_prepacked_cache={args.prefer_prepacked_cache}, "
@@ -784,6 +1164,7 @@ def main() -> None:
     print(f"Estimated FLOPs per token: {num_flops_per_token:e}")
     if checkpoint_resolution is not None:
         print(f"Checkpoint policy: {checkpoint_resolution}")
+    print(f"Eval policy: {describe_eval_policy(args)}")
 
     tokens_per_fwdbwd = args.device_batch_size * args.seq_len
     if args.total_batch_size % tokens_per_fwdbwd != 0:
@@ -1044,8 +1425,8 @@ def main() -> None:
             seq_len=args.canonical_eval_seq_len,
             eval_tokens=args.canonical_eval_tokens,
             prefer_prepacked_cache=args.prefer_prepacked_cache,
-            eval_slices=EVAL_SLICE_CAP,
-            reference_eval_tokens=EVAL_TOKENS,
+            eval_slices=args.canonical_eval_slices,
+            reference_eval_tokens=args.canonical_eval_reference_tokens,
         )
         canonical_eval_seconds = time.perf_counter() - t_canonical_eval_start
     total_wall_seconds = time.perf_counter() - t_start
@@ -1071,6 +1452,37 @@ def main() -> None:
     checkpoint_write_percent = percent(checkpoint_write_seconds, session_total_seconds)
     peak_vram_mb = mx.get_peak_memory() / 1024 / 1024
 
+    if val_bpb is not None:
+        recorded_at, recorded_on = now_iso()
+        telemetry_record = EvalTelemetryRecord(
+            recorded_at=recorded_at,
+            recorded_on=recorded_on,
+            commit=current_git_commit(),
+            preset=args.preset,
+            hardware_key=args.eval_hardware_key,
+            policy_version=args.eval_policy_version,
+            default_shape=uses_default_preset_shape(args),
+            smoke=args.smoke,
+            benchmark_skip_eval=args.benchmark_skip_eval,
+            calibration_status=args.eval_calibration_status,
+            canonical_rung=args.canonical_eval_rung,
+            canonical_eval_seq_len=args.canonical_eval_seq_len,
+            canonical_eval_tokens=args.canonical_eval_tokens,
+            canonical_eval_batch_size=args.canonical_eval_batch_size,
+            canonical_eval_slices=args.canonical_eval_slices,
+            canonical_eval_reference_tokens=args.canonical_eval_reference_tokens,
+            time_budget=args.time_budget,
+            time_budget_mode=args.time_budget_mode,
+            training_seconds=session_training_seconds,
+            total_seconds=session_total_seconds,
+            canonical_eval_seconds=canonical_eval_seconds,
+            val_bpb=float(val_bpb),
+        )
+        try:
+            append_eval_telemetry(telemetry_record)
+        except Exception as exc:
+            print(f"Eval telemetry: failed to append ({exc})")
+
     print("---")
     if val_bpb is None:
         print("val_bpb:          skipped")
@@ -1082,6 +1494,25 @@ def main() -> None:
     print(f"total_seconds:    {session_total_seconds:.1f}")
     print(f"time_budget_mode: {args.time_budget_mode}")
     print(f"budget_elapsed_seconds: {budget_elapsed_at_cutoff:.1f}")
+    print(f"canonical_rung:   {args.canonical_eval_rung}")
+    print(f"eval_hardware_key: {args.eval_hardware_key}")
+    print(f"eval_calibration_status: {args.eval_calibration_status}")
+    print(f"eval_calibration_key: {args.eval_calibration_key}")
+    print(f"eval_calibration_confidence: {args.eval_calibration_confidence}")
+    print(f"eval_calibration_effective_confidence: {args.eval_calibration_effective_confidence}")
+    print(f"eval_calibration_freshness: {args.eval_calibration_freshness}")
+    print(f"eval_calibration_repeat_count: {args.eval_calibration_repeat_count}")
+    print(f"eval_calibration_measured_train_seconds: {args.eval_calibration_measured_train_seconds}")
+    print(f"eval_calibration_measured_on: {args.eval_calibration_measured_on}")
+    print(f"eval_calibration_telemetry_count: {args.eval_calibration_telemetry_count}")
+    print(f"eval_calibration_commit_count: {args.eval_calibration_commit_count}")
+    print(f"eval_calibration_day_count: {args.eval_calibration_day_count}")
+    print(f"eval_calibration_observed_rungs: {args.eval_calibration_observed_rungs}")
+    print(f"eval_calibration_stable_rungs: {args.eval_calibration_stable_rungs}")
+    print(f"eval_calibration_last_seen_on: {args.eval_calibration_last_seen_on}")
+    print(f"eval_calibration_last_seen_age_days: {args.eval_calibration_last_seen_age_days}")
+    print(f"eval_calibration_limited_by: {args.eval_calibration_limited_by}")
+    print(f"eval_policy_version: {args.eval_policy_version}")
     print(f"peak_vram_mb:     {peak_vram_mb:.1f}")
     print(f"mfu_percent:      {telemetry_summary['mfu_percent']:.2f}")
     print(f"train_tflops:     {telemetry_summary['train_tflops']:.3f}")
@@ -1125,6 +1556,7 @@ def main() -> None:
         print(f"canonical_seq_len: {args.canonical_eval_seq_len}")
         print(f"canonical_tokens: {args.canonical_eval_tokens}")
         print(f"canonical_batch:  {args.canonical_eval_batch_size}")
+        print(f"canonical_slices: {args.canonical_eval_slices}")
 
 
 if __name__ == "__main__":
