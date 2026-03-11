@@ -3,11 +3,12 @@ One-time data preparation for autoresearch MLX experiments.
 Downloads data shards and trains a BPE tokenizer.
 
 Usage:
-    python prepare_mlx.py
-    python prepare_mlx.py --num-shards 8
+    uv run prepare.py
+    python -m autoresearch_mlx.prepare --num-shards 8
 """
 
 import argparse
+import os
 
 from autoresearch_mlx.constants import CACHE_DIR, DEFAULT_PREPACKED_SEQ_LENS, MAX_SHARD
 from autoresearch_mlx.data import (
@@ -35,7 +36,10 @@ def parse_seq_lens(raw: str) -> list[int]:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Prepare data and tokenizer for autoresearch MLX")
+    parser = argparse.ArgumentParser(
+        prog=os.environ.get("AUTORESEARCH_ENTRYPOINT_PROG"),
+        description="Prepare data and tokenizer for autoresearch MLX",
+    )
     parser.add_argument(
         "--num-shards",
         type=int,

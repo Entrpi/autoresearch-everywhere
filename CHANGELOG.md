@@ -29,7 +29,82 @@ On this hardware, the default canonical matched benchmark window for optimizatio
 
 ## Latest
 
-### New commit — calibration: Add one-button platform bring-up tool — score `4` — complexity `20`
+### New commit — platform: Add shared MLX/CUDA training-engine boundary — score `4` — complexity `15`
+
+**Human-directed, AI-shaped (4)**
+
+- Requested that the repo stop treating platform calibration as MLX-only and instead grow a real training-engine boundary, with CUDA first, ROCm later, and ANE after that.
+  - Meaning: added a shared engine contract under `autoresearch_platform/`, a first MLX engine adapter, a first CUDA engine adapter, and a safe CUDA runtime/config layer that can fingerprint NVIDIA hardware and surface architecture-specific capability metadata such as Hopper vs Blackwell flash-attention generation needs.
+  - Motivation: the one-button bring-up story was no longer enough on its own. Without a broader engine boundary, every new backend would still have required its own training-stack glue, and even CUDA was still effectively "the old file" instead of a participant in the calibrated platform story.
+  - Purpose: make the stack backend-extensible at the training-engine boundary so MLX and CUDA can share the same core hooks for train probes, local search, checkpoint minting, eval calibration, runtime capability reporting, and later promotion flow, while ROCm and ANE can follow the same path later.
+  - Refactored `tools/calibrate_platform.py` to select an engine with `--engine`, use engine-owned preset catalogs and hardware fingerprints, and capability-gate local search, checkpoint minting, eval-rung calibration, and promotion output instead of assuming the MLX path everywhere.
+  - Promoted `calibrate.py` to the top level as the public one-button bring-up entrypoint, while keeping `tools/calibrate_platform.py` as the implementation module underneath.
+  - Added `autoresearch_cuda/config.py` so the CUDA defaults are importable without accidentally executing the CUDA trainer or pulling MLX-specific calibration code into the dependency chain.
+  - Added `autoresearch_cuda/runtime.py` so CUDA architecture metadata is explicit: the runtime now treats A100/SM80, Ada RTX 40xx, Ada L40S-class, Hopper/SM90, RTX 50xx-class consumer Blackwell, B200-class Blackwell, and GB10/DGX Spark as distinct reference families, surfaces the preferred flash-attention generation for each current family, and carries an anticipated Vera Rubin family as a future slot without pretending its final capability or FA policy is already known.
+  - Gave `autoresearch_cuda/train.py` a narrow CLI override surface for preset, time budget, sequence length, depth, window pattern, and batch shape so the CUDA engine can run comparable train probes through the same orchestration layer.
+  - Made the CUDA trainer report architecture/runtime metadata and steady-state throughput in its final summary so engine-level consumers do not have to scrape the live progress line.
+  - Consolidated the public top-level surface around `prepare.py`, `train.py`, `calibrate.py`, and `program.md`, with thin engine-dispatch wrappers at the top level and the concrete CUDA implementation moved under `autoresearch_cuda/`.
+  - Made the consolidated surface actually usable as a front door by ensuring the generic wrapper help paths work even when secondary-engine runtime dependencies are absent, and by rewriting the primary README / generic agent instructions around the top-level entrypoints instead of MLX-specific script names.
+  - Finished the root cleanup by moving the remaining MLX-specific top-level files into engine or support directories: `train_mlx.py` -> `autoresearch_mlx/train.py`, `prepare_mlx.py` -> `autoresearch_mlx/prepare.py`, `program_mlx.md` -> `docs/program-mlx.md`, `analysis.ipynb` -> `notebooks/analysis.ipynb`, `progress.png` -> `docs/assets/progress.png`, and `results.tsv` -> `results/results.tsv`.
+  - Generalized the platform and architecture docs around the new engine boundary so the repo is no longer described as an MLX-only calibration stack.
+  - Kept the boundary honest: MLX is still the only engine with full eval-calibration and promotion support, while CUDA is documented as the first narrower secondary engine on the same contract rather than being presented as feature-complete.
+
+**Grounding**
+
+- Files:
+  - `CHANGELOG.md`
+  - `README.md`
+  - `docs/mlx-port-architecture.md`
+  - `docs/platform-calibration.md`
+  - `program.md`
+  - `docs/program-mlx.md`
+  - `autoresearch_mlx/prepare.py`
+  - `autoresearch_mlx/train.py`
+  - `notebooks/analysis.ipynb`
+  - `docs/assets/progress.png`
+  - `results/results.tsv`
+  - `calibrate.py`
+  - `prepare.py`
+  - `tools/calibrate_platform.py`
+  - `train.py`
+  - `autoresearch_platform/entrypoints.py`
+  - `autoresearch_platform/__init__.py`
+  - `autoresearch_platform/engines.py`
+  - `autoresearch_platform/mlx_engine.py`
+  - `autoresearch_platform/cuda_engine.py`
+  - `autoresearch_cuda/__init__.py`
+  - `autoresearch_cuda/config.py`
+  - `autoresearch_cuda/prepare.py`
+  - `autoresearch_cuda/runtime.py`
+  - `autoresearch_cuda/train.py`
+  - Validation:
+  - `python3 -m py_compile prepare.py train.py calibrate.py autoresearch_platform/entrypoints.py tools/calibrate_platform.py autoresearch_platform/engines.py autoresearch_platform/mlx_engine.py autoresearch_platform/cuda_engine.py autoresearch_cuda/config.py autoresearch_cuda/prepare.py autoresearch_cuda/runtime.py autoresearch_cuda/train.py`
+  - `./.venv/bin/python prepare.py --list-engines`
+  - `./.venv/bin/python train.py --list-engines`
+  - `./.venv/bin/python prepare.py --engine mlx --help`
+  - `./.venv/bin/python train.py --engine mlx --help`
+  - `./.venv/bin/python prepare.py --engine cuda --help`
+  - `./.venv/bin/python train.py --engine cuda --help`
+  - `./.venv/bin/python -c "from autoresearch_platform.engines import available_engines, get_engine; print(available_engines()); print(get_engine('mlx').default_platform_presets()); print(get_engine('cuda').reference_preset)"`
+  - `./.venv/bin/python -c "from autoresearch_cuda.runtime import detect_cuda_runtime_profile; print(detect_cuda_runtime_profile((9,0))); print(detect_cuda_runtime_profile((10,0)))"`
+  - `./.venv/bin/python calibrate.py --help`
+  - `./.venv/bin/python calibrate.py --engine mlx --mode fast --presets m5-fast,m5-balanced --coarse-time-budget 0.2 --ranking-time-budget 0.2 --local-search-time-budget 0.2 --eval-train-seconds 0.2 --eval-rungs cheap --output-dir /tmp/autoresearch_engine_boundary_smoke --force`
+  - `python3 tools/changelog_scores.py --group-by entry --format csv --include-latest --verify`
+- Measurements:
+  - The MLX smoke bring-up still completed end to end through the new engine boundary and emitted a full report under `/tmp/autoresearch_engine_boundary_smoke/report.md`.
+  - The engine registry now resolves both `mlx` and `cuda`, with MLX keeping the shipped preset families and CUDA exposing `upstream` as its first reference preset.
+  - The CUDA runtime classifier now reports:
+    - A100/SM80 -> preferred flash-attention generation `2`
+    - Ada `(8.9)` -> preferred flash-attention generation `2`
+    - Hopper `(9.0)` -> preferred flash-attention generation `3`
+    - Blackwell `(10.0)` -> preferred flash-attention generation `4`, with a separate GB10/DGX Spark carve-out when the device name identifies that system class
+  - The current boundary is intentionally asymmetric:
+    - `mlx` supports local search, checkpoint minting, eval-rung calibration, and promotion output
+    - `cuda` currently supports hardware fingerprinting and comparable train probes, but not checkpoint-backed eval calibration yet
+
+## Committed History
+
+### March 11, 2026 — `d641b72` — calibration: Add one-button platform bring-up tool — score `4` — complexity `20`
 
 **Human-directed, AI-shaped (4)**
 
@@ -37,7 +112,7 @@ On this hardware, the default canonical matched benchmark window for optimizatio
   - Meaning: added `tools/calibrate_platform.py` as a real orchestrator that fingerprints the machine, runs a coarse preset envelope, ranks feasible preset families with short comparable training runs, performs a local operating-point search inside the winner, mints a checkpoint there, calibrates eval rungs on that checkpoint, and emits a Markdown/JSON bring-up bundle with a candidate new default for the autoresearch stage on that hardware.
   - Motivation: the existing calibration stack had the right primitives but still assumed a human who already knew which preset family to target and which subcommands to sequence. The missing product layer was the actual bring-up experience for a new user on unfamiliar hardware.
   - Purpose: let a new user clone the repo, run one long calibration command, and get a grounded starting zone, a candidate new default, lower and upper bounds, and an explicit relationship to the M5 and upstream-style references.
-  - Reused the existing calibration machinery instead of duplicating it: the platform tool builds around `train_mlx.py` probes plus the existing `eval-rungs` logic from `tools/calibrate_eval_policy.py`.
+  - Reused the existing calibration machinery instead of duplicating it: the platform tool builds around `autoresearch_mlx/train.py` probes plus the existing `eval-rungs` logic from `tools/calibrate_eval_policy.py`.
   - Added stage-aware `fast` and `full` bring-up modes so the same tool can serve as either a quick first-default finder or a longer recommendation pass.
   - Made the output directory resumable: each major phase now records an input-keyed JSON artifact and later reruns reuse those artifacts unless `--force` is set.
   - Replaced the earlier hand-tuned weighted family chooser with a frontier-based selector plus pressure-aware memory shaping: rank candidates on measured quality, throughput, and eval overhead, keep the primary Pareto front, then choose the point closest to the ideal measured frontier while treating memory as a small tie-break cost below `50%` of unified memory and a progressively real penalty as pressure rises.
@@ -66,8 +141,8 @@ On this hardware, the default canonical matched benchmark window for optimizatio
   - `autoresearch_mlx/eval_policy.py`
   - `tools/calibrate_platform.py`
   - `tools/calibrate_eval_policy.py`
-  - `train_mlx.py`
-  - `program_mlx.md`
+  - `autoresearch_mlx/train.py`
+  - `docs/program-mlx.md`
 - Validation:
   - `python3 -m py_compile tools/calibrate_platform.py tools/calibrate_eval_policy.py autoresearch_mlx/eval_policy.py`
   - `python3 tools/changelog_scores.py --group-by entry --format csv --include-latest --verify`
@@ -99,14 +174,12 @@ On this hardware, the default canonical matched benchmark window for optimizatio
   - The candidate ranking now exposes the selection story in the report, including `Pareto` membership, `frontier_distance`, `selection_distance`, and memory-fraction pressure bands.
   - This was a bounded pipeline validation, not a final platform calibration. The smoke invocation used only `cheap,reference` eval rungs and `0.2s` training budgets, so the resulting default block is useful as a correctness check on the orchestration path, not as a production recommendation.
 
-## Committed History
-
 ### March 11, 2026 — `871cc3f` — calibration: Harden runtime eval selection against semantic drift — score `4` — complexity `15`
 
 **Human-directed, AI-shaped (4)**
 
 - Requested that the calibration automation broaden from an eval-policy seed into a practical operating-point search for new preset / hardware combinations.
-  - Meaning: `tools/calibrate_eval_policy.py` now exposes `train-grid`, a constrained training sweep that can cross `device_batch_size`, `total_batch_size`, `seq_len`, and `window_pattern`, while defaulting any omitted axes to the preset values. `train_mlx.py` now consumes the checked-in eval tradeoff table by default for shipped preset shapes when canonical eval settings are not manually overridden, but only on exact hardware-key matches.
+  - Meaning: `tools/calibrate_eval_policy.py` now exposes `train-grid`, a constrained training sweep that can cross `device_batch_size`, `total_batch_size`, `seq_len`, and `window_pattern`, while defaulting any omitted axes to the preset values. `autoresearch_mlx/train.py` now consumes the checked-in eval tradeoff table by default for shipped preset shapes when canonical eval settings are not manually overridden, but only on exact hardware-key matches.
   - Motivation: the foundation was still underscoped. Real preset calibration needs to identify local training operating points, not just cheap / reference / full eval rungs, and the runtime selector needs to make calibration gaps explicit instead of silently applying the M5 row everywhere.
   - Purpose: let new preset and hardware bring-up follow the same mechanical loop we have been doing manually: small training-grid search first, then eval batch and rung calibration on the chosen operating point, with the trainer automatically benefiting from measured rung tables only when the shape and hardware are actually covered.
   - Promoted the training sweep from a batch-only interface to a true operating-point grid, while keeping `train-batch` as an alias so the initial foundation commands still work.
@@ -127,19 +200,19 @@ On this hardware, the default canonical matched benchmark window for optimizatio
   - `CHANGELOG.md`
   - `README.md`
   - `docs/preset-calibration.md`
-  - `program_mlx.md`
+  - `docs/program-mlx.md`
   - `autoresearch_mlx/eval_policy.py`
   - `autoresearch_mlx/eval_telemetry.py`
   - `autoresearch_mlx/constants.py`
-  - `train_mlx.py`
+  - `autoresearch_mlx/train.py`
   - `tools/calibrate_eval_policy.py`
 - Validation:
-  - `python3 -m py_compile train_mlx.py autoresearch_mlx/eval_policy.py autoresearch_mlx/eval_telemetry.py tools/calibrate_eval_policy.py`
+  - `python3 -m py_compile autoresearch_mlx/train.py autoresearch_mlx/eval_policy.py autoresearch_mlx/eval_telemetry.py tools/calibrate_eval_policy.py`
   - `./.venv/bin/python tools/calibrate_eval_policy.py telemetry-summary --preset m5-balanced`
   - `./.venv/bin/python tools/calibrate_eval_policy.py train-grid --preset m5-fast --time-budget 0.2 --device-batches 1,2 --total-batches 512,1024 --json-out /tmp/calibrate_train_grid_batch_test.json`
   - `./.venv/bin/python tools/calibrate_eval_policy.py train-grid --preset m5-fast --time-budget 0.2 --device-batches 2 --total-batches 1024 --seq-lens 256,512 --json-out /tmp/calibrate_train_grid_seq_test.json`
   - `./.venv/bin/python tools/calibrate_eval_policy.py train-grid --preset m5-balanced --time-budget 1.5 --device-batches 4 --total-batches 2048 --window-patterns L,SSSL --json-out /tmp/calibrate_train_grid_window_test.json`
-  - `./.venv/bin/python train_mlx.py --preset m5-fast --time-budget 0.2 --no-checkpoint`
+  - `./.venv/bin/python -m autoresearch_mlx.train --preset m5-fast --time-budget 0.2 --no-checkpoint`
   - `./.venv/bin/python - <<'PY' ... resolve_run_config(...) / choose_auto_eval_decision(...) ... PY` to verify default selection, long-run confidence capping, boosted-confidence promotion to `full`, and stale-age fallback
 - Measurements:
   - The new `device_batch_size x total_batch_size` grid already surfaces a real operating-point choice on `m5-fast`:
@@ -202,7 +275,7 @@ On this hardware, the default canonical matched benchmark window for optimizatio
   - Meaning: the repo now has a first-pass calibration layer with a checked-in `eval_policy.py` for current M5 rung data and a `tools/calibrate_eval_policy.py` CLI that can sweep train-side device batches, eval batches, and cheap/reference/full eval rungs.
   - Motivation: an eval-only selector would underscope the real problem. We also need a mechanical way to identify train-side batch sweet spots and other preset / hardware operating points instead of rediscovering them manually.
   - Purpose: turn the recent manual `fast / balanced / large / xlarge` policy work into a repeatable calibration loop that can be rerun for new preset shapes and future hardware.
-  - Kept the trainer behavior unchanged for now; this is an offline calibration layer, not a new default selector wired into `train_mlx.py`.
+  - Kept the trainer behavior unchanged for now; this is an offline calibration layer, not a new default selector wired into `autoresearch_mlx/train.py`.
   - Seeded the policy module with the current M5 calibrations for `m5-fast`, `m5-balanced`, `m5-large`, and `m5-xlarge`.
   - Made the calibration CLI able to reuse existing checkpoints or mint a fresh short checkpoint for rung measurement, so it can be used incrementally rather than only as a full re-benchmark pass.
 
@@ -271,14 +344,14 @@ On this hardware, the default canonical matched benchmark window for optimizatio
 - Files:
   - `autoresearch_mlx/data.py`
   - `autoresearch_mlx/constants.py`
-  - `train_mlx.py`
+  - `autoresearch_mlx/train.py`
   - `README.md`
-  - `program_mlx.md`
+  - `docs/program-mlx.md`
 - Validation:
   - Reused the saved `m5-balanced` 2-minute checkpoint at `/tmp/autoresearch_balanced_2min_compare` to isolate eval behavior from training variance.
   - Swept upstream-horizon slice counts at `seq=2048` for both the cheap canonical budget and the Trevin-sized budget.
-  - `python3 -m py_compile train_mlx.py autoresearch_mlx/constants.py autoresearch_mlx/data.py`
-  - `./.venv/bin/python train_mlx.py --preset m5-balanced --time-budget 0.2 --eval-tokens 4096 --canonical-eval-tokens 4096 --no-checkpoint`
+  - `python3 -m py_compile autoresearch_mlx/train.py autoresearch_mlx/constants.py autoresearch_mlx/data.py`
+  - `./.venv/bin/python -m autoresearch_mlx.train --preset m5-balanced --time-budget 0.2 --eval-tokens 4096 --canonical-eval-tokens 4096 --no-checkpoint`
 - Measurements:
   - On the same saved `m5-balanced` 2-minute checkpoint, the upstream-horizon slice sweep picked a clear rule:
 
@@ -349,12 +422,12 @@ On this hardware, the default canonical matched benchmark window for optimizatio
 - Files:
   - `autoresearch_mlx/constants.py`
   - `README.md`
-  - `program_mlx.md`
-  - `train_mlx.py`
+  - `docs/program-mlx.md`
+  - `autoresearch_mlx/train.py`
 - Validation:
   - Reused the saved `m5-balanced` 2-minute checkpoint at `/tmp/autoresearch_balanced_2min_compare` to isolate eval behavior from training variance.
   - Swept canonical eval batches at `seq=256`, `seq=512`, `seq=1024`, and `seq=2048` with a hard `20s` timeout per candidate.
-  - `python3 -m py_compile train_mlx.py autoresearch_mlx/constants.py`
+  - `python3 -m py_compile autoresearch_mlx/train.py autoresearch_mlx/constants.py`
 - Measurements:
   - On the same saved `m5-balanced` 2-minute checkpoint, the canonical-style BPB estimates tightened from shorter-sequence local estimates toward the upstream-shaped contract as sequence length increased:
     - `seq=256`: `1.660391`
@@ -397,7 +470,7 @@ On this hardware, the default canonical matched benchmark window for optimizatio
   - `docs/autonomy-golf.md`
   - `docs/autonomy-golf-agent.md`
   - `docs/autonomy-golf-checklist.md`
-  - `program_mlx.md`
+  - `docs/program-mlx.md`
   - `tools/changelog_scores.py`
   - `tools/render_autonomy_badge.py`
   - `docs/autonomy-golf-badge.svg`
@@ -414,7 +487,7 @@ On this hardware, the default canonical matched benchmark window for optimizatio
 **Human-directed, AI-shaped (4)**
 
 - Requested the budget split that had been discussed earlier: keep the original training-time objective for core research changes, but add a separate wall-clock mode for checkpointing and orchestration work.
-  - Added explicit `train` vs `wall` budget accounting to `train_mlx.py` instead of overloading one stop condition to serve both goals.
+  - Added explicit `train` vs `wall` budget accounting to `autoresearch_mlx/train.py` instead of overloading one stop condition to serve both goals.
   - Kept `train` as the default so the main autoresearch loop still optimizes on actual training time rather than incidental wall-clock blockage.
   - Added explicit reporting of which budget mode was active and how much budget-counted time elapsed in the invocation.
   - Included the budget mode in automatic checkpoint directory slugs so train-budget and wall-budget runs do not collide on the same auto checkpoint path.
@@ -422,18 +495,18 @@ On this hardware, the default canonical matched benchmark window for optimizatio
 **Grounding**
 
 - Files:
-  - `train_mlx.py`
+  - `autoresearch_mlx/train.py`
   - `autoresearch_mlx/checkpoint_policy.py`
   - `README.md`
-  - `program_mlx.md`
+  - `docs/program-mlx.md`
   - `docs/mlx-port-architecture.md`
   - `CHANGELOG.md`
 - Validation:
-  - `python3 -m py_compile train_mlx.py autoresearch_mlx/checkpoint_policy.py`
+  - `python3 -m py_compile autoresearch_mlx/train.py autoresearch_mlx/checkpoint_policy.py`
   - `./.venv/bin/python - <<'PY' ...` to verify that automatic checkpoint paths now differ between `time_budget_mode=train` and `time_budget_mode=wall`
-  - `./.venv/bin/python train_mlx.py --smoke`
-  - `./.venv/bin/python train_mlx.py --smoke --time-budget-mode wall --benchmark-skip-eval --no-checkpoint`
-  - `./.venv/bin/python train_mlx.py --resume-from /tmp/autoresearch_budget_mode_resume --time-budget 1.5 --time-budget-mode wall --no-checkpoint`
+  - `./.venv/bin/python -m autoresearch_mlx.train --smoke`
+  - `./.venv/bin/python -m autoresearch_mlx.train --smoke --time-budget-mode wall --benchmark-skip-eval --no-checkpoint`
+  - `./.venv/bin/python -m autoresearch_mlx.train --resume-from /tmp/autoresearch_budget_mode_resume --time-budget 1.5 --time-budget-mode wall --no-checkpoint`
 - Measurements:
   - Budget-mode smoke summary:
 
@@ -460,7 +533,7 @@ On this hardware, the default canonical matched benchmark window for optimizatio
 - Files:
   - `tools/profile_resume_convergence.py`
   - `README.md`
-  - `program_mlx.md`
+  - `docs/program-mlx.md`
   - `docs/mlx-port-architecture.md`
   - `CHANGELOG.md`
 - Validation:
@@ -509,15 +582,15 @@ On this hardware, the default canonical matched benchmark window for optimizatio
 - Files:
   - `autoresearch_mlx/checkpoints.py`
   - `autoresearch_mlx/checkpoint_policy.py`
-  - `train_mlx.py`
+  - `autoresearch_mlx/train.py`
 - Validation:
-  - `python3 -m py_compile train_mlx.py autoresearch_mlx/checkpoints.py autoresearch_mlx/checkpoint_policy.py`
-  - `./.venv/bin/python train_mlx.py --smoke --checkpoint-save-mode async --checkpoint-path /tmp/autoresearch_async_smoke --checkpoint-interval 0.5`
-  - `./.venv/bin/python train_mlx.py --resume-from /tmp/autoresearch_async_smoke --time-budget 1.5 --checkpoint-save-mode async`
-  - `./.venv/bin/python train_mlx.py --preset m5-large --time-budget 20 --benchmark-skip-eval --checkpoint-mode exact --checkpoint-save-mode sync --checkpoint-path /tmp/autoresearch_exact_sync_large --checkpoint-interval 2`
-  - `./.venv/bin/python train_mlx.py --preset m5-large --time-budget 20 --benchmark-skip-eval --checkpoint-mode exact --checkpoint-save-mode async --checkpoint-path /tmp/autoresearch_exact_async_large --checkpoint-interval 2`
-  - `./.venv/bin/python train_mlx.py --preset m5-xlarge --time-budget 60 --benchmark-skip-eval --checkpoint-mode exact --checkpoint-save-mode sync --checkpoint-path /tmp/autoresearch_exact_sync_xlarge --checkpoint-interval 2`
-  - `./.venv/bin/python train_mlx.py --preset m5-xlarge --time-budget 60 --benchmark-skip-eval --checkpoint-mode exact --checkpoint-save-mode async --checkpoint-path /tmp/autoresearch_exact_async_xlarge --checkpoint-interval 2`
+  - `python3 -m py_compile autoresearch_mlx/train.py autoresearch_mlx/checkpoints.py autoresearch_mlx/checkpoint_policy.py`
+  - `./.venv/bin/python -m autoresearch_mlx.train --smoke --checkpoint-save-mode async --checkpoint-path /tmp/autoresearch_async_smoke --checkpoint-interval 0.5`
+  - `./.venv/bin/python -m autoresearch_mlx.train --resume-from /tmp/autoresearch_async_smoke --time-budget 1.5 --checkpoint-save-mode async`
+  - `./.venv/bin/python -m autoresearch_mlx.train --preset m5-large --time-budget 20 --benchmark-skip-eval --checkpoint-mode exact --checkpoint-save-mode sync --checkpoint-path /tmp/autoresearch_exact_sync_large --checkpoint-interval 2`
+  - `./.venv/bin/python -m autoresearch_mlx.train --preset m5-large --time-budget 20 --benchmark-skip-eval --checkpoint-mode exact --checkpoint-save-mode async --checkpoint-path /tmp/autoresearch_exact_async_large --checkpoint-interval 2`
+  - `./.venv/bin/python -m autoresearch_mlx.train --preset m5-xlarge --time-budget 60 --benchmark-skip-eval --checkpoint-mode exact --checkpoint-save-mode sync --checkpoint-path /tmp/autoresearch_exact_sync_xlarge --checkpoint-interval 2`
+  - `./.venv/bin/python -m autoresearch_mlx.train --preset m5-xlarge --time-budget 60 --benchmark-skip-eval --checkpoint-mode exact --checkpoint-save-mode async --checkpoint-path /tmp/autoresearch_exact_async_xlarge --checkpoint-interval 2`
   - `./.venv/bin/python - <<'PY' ... > results/analysis/exact_async_abab_summary.json`
   - `./.venv/bin/python - <<'PY' ... > results/analysis/exact_async_process_abab_summary.json`
   - `./.venv/bin/python - <<'PY' ... > results/analysis/exact_async_wallclock_60s.json`
@@ -578,18 +651,18 @@ On this hardware, the default canonical matched benchmark window for optimizatio
 
 - Files:
   - `README.md`
-  - `program_mlx.md`
+  - `docs/program-mlx.md`
   - `docs/mlx-port-architecture.md`
   - `autoresearch_mlx/checkpoint_policy.py`
   - `tools/checkpoint_tradeoff.py`
-  - `train_mlx.py`
+  - `autoresearch_mlx/train.py`
   - `CHANGELOG.md`
 - Validation:
-  - `python3 -m py_compile autoresearch_mlx/checkpoint_policy.py tools/checkpoint_tradeoff.py train_mlx.py`
-  - `./.venv/bin/python train_mlx.py --preset m5-large --time-budget 20 --benchmark-skip-eval --no-checkpoint`
-  - `./.venv/bin/python train_mlx.py --preset m5-large --time-budget 20 --benchmark-skip-eval --checkpoint-mode weights_only --checkpoint-path /tmp/autoresearch_m5_large_weights_only --checkpoint-interval 2`
-  - `./.venv/bin/python train_mlx.py --preset m5-xlarge --time-budget 60 --benchmark-skip-eval --no-checkpoint`
-  - `./.venv/bin/python train_mlx.py --preset m5-xlarge --time-budget 60 --benchmark-skip-eval --checkpoint-mode weights_only --checkpoint-path /tmp/autoresearch_m5_xlarge_weights_only --checkpoint-interval 2`
+  - `python3 -m py_compile autoresearch_mlx/checkpoint_policy.py tools/checkpoint_tradeoff.py autoresearch_mlx/train.py`
+  - `./.venv/bin/python -m autoresearch_mlx.train --preset m5-large --time-budget 20 --benchmark-skip-eval --no-checkpoint`
+  - `./.venv/bin/python -m autoresearch_mlx.train --preset m5-large --time-budget 20 --benchmark-skip-eval --checkpoint-mode weights_only --checkpoint-path /tmp/autoresearch_m5_large_weights_only --checkpoint-interval 2`
+  - `./.venv/bin/python -m autoresearch_mlx.train --preset m5-xlarge --time-budget 60 --benchmark-skip-eval --no-checkpoint`
+  - `./.venv/bin/python -m autoresearch_mlx.train --preset m5-xlarge --time-budget 60 --benchmark-skip-eval --checkpoint-mode weights_only --checkpoint-path /tmp/autoresearch_m5_xlarge_weights_only --checkpoint-interval 2`
   - Verified via `.venv` Python snippet that `choose_auto_checkpoint_decision(...)` now resolves exact to `2m` and `weights_only` to `1m` on both calibrated parameter bands.
   - Verified via `.venv` Python snippet that `resolve_checkpoint_settings(...)` prints the same mode-aware `2m` vs `1m` result for `m5-large`, including distinct auto checkpoint paths per mode.
   - `env PYTHONPATH=/Users/ent/Codex/autoresearch ./.venv/bin/python tools/checkpoint_tradeoff.py`
@@ -627,19 +700,19 @@ On this hardware, the default canonical matched benchmark window for optimizatio
 
 - Files:
   - `README.md`
-  - `program_mlx.md`
+  - `docs/program-mlx.md`
   - `docs/mlx-port-architecture.md`
   - `autoresearch_mlx/checkpoint_policy.py`
   - `autoresearch_mlx/checkpoints.py`
   - `tools/checkpoint_tradeoff.py`
   - `tools/profile_checkpoint_path.py`
   - `tools/profile_resume_ready.py`
-  - `train_mlx.py`
+  - `autoresearch_mlx/train.py`
   - `CHANGELOG.md`
 - Validation:
-  - `python3 -m py_compile autoresearch_mlx/checkpoint_policy.py autoresearch_mlx/checkpoints.py tools/checkpoint_tradeoff.py tools/profile_checkpoint_path.py tools/profile_resume_ready.py train_mlx.py`
-  - `./.venv/bin/python train_mlx.py --smoke --checkpoint-mode weights_only --checkpoint-path /tmp/autoresearch_weights_only_smoke --checkpoint-interval 0.5`
-  - `./.venv/bin/python train_mlx.py --resume-from /tmp/autoresearch_weights_only_smoke --time-budget 1.5 --checkpoint-mode weights_only`
+  - `python3 -m py_compile autoresearch_mlx/checkpoint_policy.py autoresearch_mlx/checkpoints.py tools/checkpoint_tradeoff.py tools/profile_checkpoint_path.py tools/profile_resume_ready.py autoresearch_mlx/train.py`
+  - `./.venv/bin/python -m autoresearch_mlx.train --smoke --checkpoint-mode weights_only --checkpoint-path /tmp/autoresearch_weights_only_smoke --checkpoint-interval 0.5`
+  - `./.venv/bin/python -m autoresearch_mlx.train --resume-from /tmp/autoresearch_weights_only_smoke --time-budget 1.5 --checkpoint-mode weights_only`
   - `./.venv/bin/python tools/profile_resume_ready.py --preset m5-large --checkpoint-mode exact --resume-steps 2 --repeats 3 --json-out results/analysis/m5_large_exact_resume_ready_v2.json`
   - `./.venv/bin/python tools/profile_resume_ready.py --preset m5-large --checkpoint-mode weights_only --resume-steps 2 --repeats 3 --json-out results/analysis/m5_large_weights_only_resume_ready_v2.json`
   - `./.venv/bin/python tools/profile_resume_ready.py --preset m5-xlarge --checkpoint-mode exact --resume-steps 2 --repeats 3 --json-out results/analysis/m5_xlarge_exact_resume_ready_v2.json`
@@ -683,10 +756,10 @@ On this hardware, the default canonical matched benchmark window for optimizatio
 - Files:
   - `autoresearch_mlx/checkpoint_policy.py`
   - `tools/checkpoint_tradeoff.py`
-  - `train_mlx.py`
+  - `autoresearch_mlx/train.py`
   - `CHANGELOG.md`
 - Validation:
-  - `python3 -m py_compile autoresearch_mlx/checkpoint_policy.py tools/checkpoint_tradeoff.py train_mlx.py`
+  - `python3 -m py_compile autoresearch_mlx/checkpoint_policy.py tools/checkpoint_tradeoff.py autoresearch_mlx/train.py`
   - `env PYTHONPATH=/Users/ent/Codex/autoresearch ./.venv/bin/python tools/checkpoint_tradeoff.py`
 - Measurements:
   - Updated scenario table with measured resume-ready penalties and a clean split between fixed save overhead and projected total waste:
@@ -746,14 +819,14 @@ On this hardware, the default canonical matched benchmark window for optimizatio
 **Grounding**
 
 - Files:
-  - `train_mlx.py`
-  - `program_mlx.md`
+  - `autoresearch_mlx/train.py`
+  - `docs/program-mlx.md`
   - `CHANGELOG.md`
 - Validation:
-  - `python3 -m py_compile train_mlx.py`
+  - `python3 -m py_compile autoresearch_mlx/train.py`
   - `python3 tools/changelog_scores.py --group-by entry --format csv --include-latest --verify`
-  - `./.venv/bin/python train_mlx.py --preset m5-fast --time-budget 5 --benchmark-skip-eval --no-checkpoint`
-  - `./.venv/bin/python train_mlx.py --preset m5-fast --time-budget 5 --benchmark-warmup-steps 62 --benchmark-skip-eval --no-checkpoint`
+  - `./.venv/bin/python -m autoresearch_mlx.train --preset m5-fast --time-budget 5 --benchmark-skip-eval --no-checkpoint`
+  - `./.venv/bin/python -m autoresearch_mlx.train --preset m5-fast --time-budget 5 --benchmark-warmup-steps 62 --benchmark-skip-eval --no-checkpoint`
 - Measurements:
   - Detection rule:
     - The auto cutoff compares early-step windows against a trailing reference window taken from the end of the run instead of guessing a fixed warmup length ahead of time.
@@ -814,7 +887,7 @@ On this hardware, the default canonical matched benchmark window for optimizatio
   - `autoresearch_mlx/data.py`
   - `CHANGELOG.md`
 - Validation:
-  - `python3 -m py_compile autoresearch_mlx/data.py train_mlx.py tools/profile_loader_path.py`
+  - `python3 -m py_compile autoresearch_mlx/data.py autoresearch_mlx/train.py tools/profile_loader_path.py`
   - `./.venv/bin/python tools/profile_loader_path.py --preset m5-balanced --steps 80 --warmup-steps 5 --no-prepacked-cache`
   - `./.venv/bin/python /tmp/autoresearch_livepack_before/tools/profile_loader_path.py --preset m5-balanced --steps 80 --warmup-steps 5 --no-prepacked-cache`
   - `./.venv/bin/python tools/profile_loader_path.py --preset m5-large --steps 80 --warmup-steps 5 --no-prepacked-cache`
@@ -840,21 +913,21 @@ On this hardware, the default canonical matched benchmark window for optimizatio
 
 - Requested that we understand the apparent `m5-xlarge` prepacked regression rather than guess at it.
   - Added a focused loader-path profiling harness that separates `next(loader)`, forced `mx.eval(x, y)`, gradient computation, and optimizer update timing.
-  - Added warmup-aware benchmark reporting to `train_mlx.py`, including startup/warmup seconds and steady-state tokens-per-second, with an option to skip eval noise during benchmarking.
+  - Added warmup-aware benchmark reporting to `autoresearch_mlx/train.py`, including startup/warmup seconds and steady-state tokens-per-second, with an option to skip eval noise during benchmarking.
   - Used it to test whether the observed xlarge regression was actually in the prepacked loader path or was just run-level noise.
 
 **Grounding**
 
 - Files:
-  - `train_mlx.py`
+  - `autoresearch_mlx/train.py`
   - `tools/profile_loader_path.py`
-  - `program_mlx.md`
+  - `docs/program-mlx.md`
   - `CHANGELOG.md`
 - Validation:
-  - `python3 -m py_compile train_mlx.py tools/profile_loader_path.py`
-  - `./.venv/bin/python train_mlx.py --smoke --benchmark-warmup-steps 1 --benchmark-skip-eval --no-checkpoint`
-  - `./.venv/bin/python train_mlx.py --preset m5-xlarge --time-budget 60 --benchmark-warmup-steps 5 --benchmark-skip-eval --no-checkpoint`
-  - `./.venv/bin/python train_mlx.py --preset m5-xlarge --time-budget 60 --benchmark-warmup-steps 5 --benchmark-skip-eval --no-checkpoint --no-prepacked-cache`
+  - `python3 -m py_compile autoresearch_mlx/train.py tools/profile_loader_path.py`
+  - `./.venv/bin/python -m autoresearch_mlx.train --smoke --benchmark-warmup-steps 1 --benchmark-skip-eval --no-checkpoint`
+  - `./.venv/bin/python -m autoresearch_mlx.train --preset m5-xlarge --time-budget 60 --benchmark-warmup-steps 5 --benchmark-skip-eval --no-checkpoint`
+  - `./.venv/bin/python -m autoresearch_mlx.train --preset m5-xlarge --time-budget 60 --benchmark-warmup-steps 5 --benchmark-skip-eval --no-checkpoint --no-prepacked-cache`
   - repeated `ABAB` run using the same two commands above
   - `python3 -m py_compile tools/profile_loader_path.py`
   - `./.venv/bin/python tools/profile_loader_path.py --preset m5-xlarge --steps 80 --warmup-steps 5`
@@ -900,34 +973,34 @@ On this hardware, the default canonical matched benchmark window for optimizatio
 **AI-identified within brief, human-approved (2)**
 
 - Surfaced making the shipped M5 presets use prepacked caches as the normal prepared-state fast path instead of treating them as an extra opt-in, and the user refreshed that priority.
-  - Switched `prepare_mlx.py` to build the shipped prepacked cache coverage by default.
+  - Switched `autoresearch_mlx/prepare.py` to build the shipped prepacked cache coverage by default.
   - Added an explicit opt-out path for intentionally leaving the live packing fallback in place.
   - Tightened the loader logging so missing prepacked coverage is visible instead of silently falling through to token-cache/live packing.
 
 **Grounding**
 
 - Files:
-  - `prepare_mlx.py`
+  - `autoresearch_mlx/prepare.py`
   - `autoresearch_mlx/data.py`
   - `README.md`
-  - `program_mlx.md`
+  - `docs/program-mlx.md`
   - `docs/mlx-port-architecture.md`
   - `CHANGELOG.md`
 - Validation:
-  - `python3 -m py_compile prepare_mlx.py autoresearch_mlx/data.py`
-  - `./.venv/bin/python prepare_mlx.py --num-shards 1`
-  - `./.venv/bin/python train_mlx.py --preset m5-large --time-budget 0.2 --eval-tokens 512 --canonical-eval-tokens 512`
-  - `./.venv/bin/python train_mlx.py --preset m5-xlarge --time-budget 0.2 --eval-tokens 512 --canonical-eval-tokens 512`
-  - `./.venv/bin/python train_mlx.py --preset m5-large --time-budget 60 --eval-tokens 512 --canonical-eval-tokens 512`
-  - `./.venv/bin/python train_mlx.py --preset m5-large --time-budget 60 --eval-tokens 512 --canonical-eval-tokens 512 --no-prepacked-cache`
-  - `./.venv/bin/python train_mlx.py --preset m5-xlarge --time-budget 60 --eval-tokens 512 --canonical-eval-tokens 512`
-  - `./.venv/bin/python train_mlx.py --preset m5-xlarge --time-budget 60 --eval-tokens 512 --canonical-eval-tokens 512 --no-prepacked-cache`
-  - `./.venv/bin/python train_mlx.py --preset m5-balanced --time-budget 60 --eval-tokens 512 --canonical-eval-tokens 512`
-  - `./.venv/bin/python train_mlx.py --preset m5-balanced --time-budget 60 --eval-tokens 512 --canonical-eval-tokens 512 --no-prepacked-cache`
-  - `./.venv/bin/python train_mlx.py --preset m5-fast --time-budget 60 --eval-tokens 512 --canonical-eval-tokens 512`
-  - `./.venv/bin/python train_mlx.py --preset m5-fast --time-budget 60 --eval-tokens 512 --canonical-eval-tokens 512 --no-prepacked-cache`
+  - `python3 -m py_compile autoresearch_mlx/prepare.py autoresearch_mlx/data.py`
+  - `./.venv/bin/python -m autoresearch_mlx.prepare --num-shards 1`
+  - `./.venv/bin/python -m autoresearch_mlx.train --preset m5-large --time-budget 0.2 --eval-tokens 512 --canonical-eval-tokens 512`
+  - `./.venv/bin/python -m autoresearch_mlx.train --preset m5-xlarge --time-budget 0.2 --eval-tokens 512 --canonical-eval-tokens 512`
+  - `./.venv/bin/python -m autoresearch_mlx.train --preset m5-large --time-budget 60 --eval-tokens 512 --canonical-eval-tokens 512`
+  - `./.venv/bin/python -m autoresearch_mlx.train --preset m5-large --time-budget 60 --eval-tokens 512 --canonical-eval-tokens 512 --no-prepacked-cache`
+  - `./.venv/bin/python -m autoresearch_mlx.train --preset m5-xlarge --time-budget 60 --eval-tokens 512 --canonical-eval-tokens 512`
+  - `./.venv/bin/python -m autoresearch_mlx.train --preset m5-xlarge --time-budget 60 --eval-tokens 512 --canonical-eval-tokens 512 --no-prepacked-cache`
+  - `./.venv/bin/python -m autoresearch_mlx.train --preset m5-balanced --time-budget 60 --eval-tokens 512 --canonical-eval-tokens 512`
+  - `./.venv/bin/python -m autoresearch_mlx.train --preset m5-balanced --time-budget 60 --eval-tokens 512 --canonical-eval-tokens 512 --no-prepacked-cache`
+  - `./.venv/bin/python -m autoresearch_mlx.train --preset m5-fast --time-budget 60 --eval-tokens 512 --canonical-eval-tokens 512`
+  - `./.venv/bin/python -m autoresearch_mlx.train --preset m5-fast --time-budget 60 --eval-tokens 512 --canonical-eval-tokens 512 --no-prepacked-cache`
 - Measurements:
-  - Default `prepare_mlx.py --num-shards 1` behavior on the existing cache directory detected the raw data, tokenizer, and token caches, then built the missing shipped prepacked coverage automatically:
+  - Default `autoresearch_mlx/prepare.py --num-shards 1` behavior on the existing cache directory detected the raw data, tokenizer, and token caches, then built the missing shipped prepacked coverage automatically:
     - `train seq_len=1024`
     - `train seq_len=2048`
     - `val seq_len=1024`
@@ -972,22 +1045,22 @@ On this hardware, the default canonical matched benchmark window for optimizatio
 **Grounding**
 
 - Files:
-  - `train_mlx.py`
+  - `autoresearch_mlx/train.py`
   - `autoresearch_mlx/checkpoints.py`
-  - `program_mlx.md`
+  - `docs/program-mlx.md`
   - `docs/mlx-port-architecture.md`
   - `CHANGELOG.md`
 - Validation:
-  - `python3 -m py_compile train_mlx.py autoresearch_mlx/checkpoints.py`
-  - `./.venv/bin/python train_mlx.py --smoke`
-  - `./.venv/bin/python train_mlx.py --preset m5-balanced --time-budget 20 --eval-tokens 512 --canonical-eval-tokens 512`
-  - `./.venv/bin/python train_mlx.py --preset m5-fast --time-budget 20 --eval-tokens 512 --canonical-eval-tokens 512`
-  - `./.venv/bin/python train_mlx.py --preset m5-large --time-budget 20 --eval-tokens 512 --canonical-eval-tokens 512`
-  - `./.venv/bin/python train_mlx.py --preset m5-xlarge --time-budget 20 --eval-tokens 512 --canonical-eval-tokens 512`
-  - `./.venv/bin/python train_mlx.py --smoke --checkpoint-path /tmp/autoresearch_util_resume_smoke --checkpoint-interval 0.5`
-  - `./.venv/bin/python train_mlx.py --resume-from /tmp/autoresearch_util_resume_smoke --time-budget 1.5`
-  - `./.venv/bin/python train_mlx.py --smoke --checkpoint-path /tmp/autoresearch_resume_metrics --checkpoint-interval 0.5`
-  - `./.venv/bin/python train_mlx.py --resume-from /tmp/autoresearch_resume_metrics --time-budget 1.5`
+  - `python3 -m py_compile autoresearch_mlx/train.py autoresearch_mlx/checkpoints.py`
+  - `./.venv/bin/python -m autoresearch_mlx.train --smoke`
+  - `./.venv/bin/python -m autoresearch_mlx.train --preset m5-balanced --time-budget 20 --eval-tokens 512 --canonical-eval-tokens 512`
+  - `./.venv/bin/python -m autoresearch_mlx.train --preset m5-fast --time-budget 20 --eval-tokens 512 --canonical-eval-tokens 512`
+  - `./.venv/bin/python -m autoresearch_mlx.train --preset m5-large --time-budget 20 --eval-tokens 512 --canonical-eval-tokens 512`
+  - `./.venv/bin/python -m autoresearch_mlx.train --preset m5-xlarge --time-budget 20 --eval-tokens 512 --canonical-eval-tokens 512`
+  - `./.venv/bin/python -m autoresearch_mlx.train --smoke --checkpoint-path /tmp/autoresearch_util_resume_smoke --checkpoint-interval 0.5`
+  - `./.venv/bin/python -m autoresearch_mlx.train --resume-from /tmp/autoresearch_util_resume_smoke --time-budget 1.5`
+  - `./.venv/bin/python -m autoresearch_mlx.train --smoke --checkpoint-path /tmp/autoresearch_resume_metrics --checkpoint-interval 0.5`
+  - `./.venv/bin/python -m autoresearch_mlx.train --resume-from /tmp/autoresearch_resume_metrics --time-budget 1.5`
 - Measurements:
   - `20s` profile comparison runs (`512` proxy/canonical eval tokens):
 
@@ -1021,7 +1094,7 @@ On this hardware, the default canonical matched benchmark window for optimizatio
 
 **Human-directed, AI-shaped (4)**
 
-- Requested that the checkpoint-frequency selector be wired into `train_mlx.py` as a default-on behavior for runs longer than 5 minutes.
+- Requested that the checkpoint-frequency selector be wired into `autoresearch_mlx/train.py` as a default-on behavior for runs longer than 5 minutes.
   - Added a shared checkpoint-policy module and used it from the trainer so long runs now auto-select a checkpoint cadence from the measured save-cost calibrations.
   - Made `--checkpoint-path` keep the default cadence selector unless `--checkpoint-interval` is explicitly pinned.
   - Added `--no-checkpoint` as the explicit escape hatch for disabling the automatic long-run behavior.
@@ -1029,17 +1102,17 @@ On this hardware, the default canonical matched benchmark window for optimizatio
 **Grounding**
 
 - Files:
-  - `train_mlx.py`
+  - `autoresearch_mlx/train.py`
   - `README.md`
-  - `program_mlx.md`
+  - `docs/program-mlx.md`
   - `CHANGELOG.md`
 - Validation:
-  - `python3 -m py_compile train_mlx.py autoresearch_mlx/checkpoint_policy.py tools/checkpoint_tradeoff.py`
+  - `python3 -m py_compile autoresearch_mlx/train.py autoresearch_mlx/checkpoint_policy.py tools/checkpoint_tradeoff.py`
   - `python3 tools/changelog_scores.py --group-by entry --format csv --include-latest --verify`
-  - interrupted startup probe: `.venv/bin/python train_mlx.py --preset m5-balanced --time-budget 301 --eval-tokens 512 --canonical-eval-tokens 512`
-  - interrupted startup probe: `.venv/bin/python train_mlx.py --preset m5-balanced --time-budget 301 --checkpoint-path /tmp/autoresearch-policy-existing-path --eval-tokens 512 --canonical-eval-tokens 512`
-  - interrupted startup probe: `.venv/bin/python train_mlx.py --preset m5-balanced --time-budget 301 --no-checkpoint --eval-tokens 512 --canonical-eval-tokens 512`
-  - interrupted behavior probe: `.venv/bin/python train_mlx.py --smoke --time-budget 10 --checkpoint-interval 0.5`
+  - interrupted startup probe: `.venv/bin/python -m autoresearch_mlx.train --preset m5-balanced --time-budget 301 --eval-tokens 512 --canonical-eval-tokens 512`
+  - interrupted startup probe: `.venv/bin/python -m autoresearch_mlx.train --preset m5-balanced --time-budget 301 --checkpoint-path /tmp/autoresearch-policy-existing-path --eval-tokens 512 --canonical-eval-tokens 512`
+  - interrupted startup probe: `.venv/bin/python -m autoresearch_mlx.train --preset m5-balanced --time-budget 301 --no-checkpoint --eval-tokens 512 --canonical-eval-tokens 512`
+  - interrupted behavior probe: `.venv/bin/python -m autoresearch_mlx.train --smoke --time-budget 10 --checkpoint-interval 0.5`
 - Confirmed behavior:
   - `time_budget > 300s` with no checkpoint flags now auto-selects `checkpoint_interval=120.0` and an automatic checkpoint directory for `m5-balanced`.
   - `time_budget > 300s` with an explicit `--checkpoint-path` but no interval now keeps the provided path and still auto-selects `checkpoint_interval=120.0`.
@@ -1130,16 +1203,16 @@ On this hardware, the default canonical matched benchmark window for optimizatio
 - Files:
   - `autoresearch_mlx/checkpoints.py`
   - `autoresearch_mlx/data.py`
-  - `train_mlx.py`
+  - `autoresearch_mlx/train.py`
   - `README.md`
   - `docs/mlx-port-architecture.md`
-  - `program_mlx.md`
+  - `docs/program-mlx.md`
   - `CHANGELOG.md`
 - Validation:
-  - `python3 -m py_compile train_mlx.py autoresearch_mlx/data.py autoresearch_mlx/checkpoints.py`
-  - `./.venv/bin/python train_mlx.py --smoke --checkpoint-path /tmp/autoresearch_resume_smoke2 --checkpoint-interval 0.5`
-  - `./.venv/bin/python train_mlx.py --resume-from /tmp/autoresearch_resume_smoke2 --time-budget 1.5`
-  - `./.venv/bin/python train_mlx.py --smoke --checkpoint-path /tmp/autoresearch_resume_smoke3 --checkpoint-interval 0.5`
+  - `python3 -m py_compile autoresearch_mlx/train.py autoresearch_mlx/data.py autoresearch_mlx/checkpoints.py`
+  - `./.venv/bin/python -m autoresearch_mlx.train --smoke --checkpoint-path /tmp/autoresearch_resume_smoke2 --checkpoint-interval 0.5`
+  - `./.venv/bin/python -m autoresearch_mlx.train --resume-from /tmp/autoresearch_resume_smoke2 --time-budget 1.5`
+  - `./.venv/bin/python -m autoresearch_mlx.train --smoke --checkpoint-path /tmp/autoresearch_resume_smoke3 --checkpoint-interval 0.5`
   - matched `60s` preset reruns with `--eval-tokens 512 --canonical-eval-tokens 512` for:
     - `m5-fast`
     - `m5-balanced`
@@ -1173,18 +1246,18 @@ On this hardware, the default canonical matched benchmark window for optimizatio
 - Requested the next optimization pass on lazy-growing the model caches after the current priority review.
   - Replaced the fixed `sequence_len * 10` RoPE cache with a smaller startup cache that grows up to the configured model sequence length.
   - Reworked local-attention mask caching to keep one growable mask per window size and slice it for shorter requests instead of caching separate masks per exact sequence length.
-  - Prewarmed runtime caches in `train_mlx.py` before compiling the train step so cache growth stays out of the compiled hot path.
+  - Prewarmed runtime caches in `autoresearch_mlx/train.py` before compiling the train step so cache growth stays out of the compiled hot path.
 
 **Grounding**
 
 - Files:
   - `autoresearch_mlx/model.py`
-  - `train_mlx.py`
+  - `autoresearch_mlx/train.py`
   - `CHANGELOG.md`
 - Validation:
-  - `python3 -m py_compile train_mlx.py autoresearch_mlx/model.py`
-  - `./.venv/bin/python train_mlx.py --smoke`
-  - `./.venv/bin/python train_mlx.py --preset m5-xlarge --time-budget 0.01 --eval-tokens 512 --canonical-eval-tokens 512`
+  - `python3 -m py_compile autoresearch_mlx/train.py autoresearch_mlx/model.py`
+  - `./.venv/bin/python -m autoresearch_mlx.train --smoke`
+  - `./.venv/bin/python -m autoresearch_mlx.train --preset m5-xlarge --time-budget 0.01 --eval-tokens 512 --canonical-eval-tokens 512`
   - matched A/B benchmark on `m5-xlarge` against the last committed cache behavior from `2be14fe`
 - Measurements:
   - matched `m5-xlarge` run (`5s`, `512` eval tokens):
@@ -1212,7 +1285,7 @@ On this hardware, the default canonical matched benchmark window for optimizatio
   - `tools/changelog_scores.py`
   - `CHANGELOG.md`
   - `README.md`
-  - `program_mlx.md`
+  - `docs/program-mlx.md`
 - Validation:
   - `python3 -m py_compile tools/changelog_scores.py`
   - `python3 tools/changelog_scores.py --group-by entry --format csv --include-latest --verify`
@@ -1225,7 +1298,7 @@ On this hardware, the default canonical matched benchmark window for optimizatio
 
 **Human-directed, AI-shaped (4)**
 
-- Implemented split-and-sequence-length keyed prepacked row caches, an opt-in `prepare_mlx.py` build path, runtime preference with fallback, and a trainer flag to disable the caches for ablations.
+- Implemented split-and-sequence-length keyed prepacked row caches, an opt-in `autoresearch_mlx/prepare.py` build path, runtime preference with fallback, and a trainer flag to disable the caches for ablations.
 
 **AI-identified within brief, human-approved (2)**
 
@@ -1236,15 +1309,15 @@ On this hardware, the default canonical matched benchmark window for optimizatio
 - Files:
   - `autoresearch_mlx/constants.py`
   - `autoresearch_mlx/data.py`
-  - `prepare_mlx.py`
-  - `train_mlx.py`
+  - `autoresearch_mlx/prepare.py`
+  - `autoresearch_mlx/train.py`
   - `README.md`
-  - `program_mlx.md`
+  - `docs/program-mlx.md`
   - `docs/mlx-port-architecture.md`
 - Validation:
-  - `python3 -m py_compile prepare_mlx.py train_mlx.py autoresearch_mlx/data.py autoresearch_mlx/constants.py`
-  - `./.venv/bin/python prepare_mlx.py --num-shards 1 --build-prepacked-cache --prepacked-seq-lens 256,512`
-  - `./.venv/bin/python train_mlx.py --smoke`
+  - `python3 -m py_compile autoresearch_mlx/prepare.py autoresearch_mlx/train.py autoresearch_mlx/data.py autoresearch_mlx/constants.py`
+  - `./.venv/bin/python -m autoresearch_mlx.prepare --num-shards 1 --build-prepacked-cache --prepacked-seq-lens 256,512`
+  - `./.venv/bin/python -m autoresearch_mlx.train --smoke`
   - matched A/B benchmark on `m5-fast` against the live token-cache packing path using `--no-prepacked-cache`
 - Measured effect on `m5-fast` (`2s`, matched settings):
   - step-0 latency: `48 ms -> 37 ms` (`-22.9%`)
@@ -1289,7 +1362,7 @@ On this hardware, the default canonical matched benchmark window for optimizatio
 - Added `CHANGELOG.md` and integrated it into the repo workflow.
   - Seeded it with grounded history for the MLX port, evaluation split, preset/token-cache work, and the streamed-accumulation change.
   - Linked the changelog from `README.md`.
-  - Updated `program_mlx.md` so future experiment loops keep the changelog current.
+  - Updated `docs/program-mlx.md` so future experiment loops keep the changelog current.
 
 **AI-identified within brief, human-shaped (3)**
 
@@ -1300,7 +1373,7 @@ On this hardware, the default canonical matched benchmark window for optimizatio
 - Files:
   - `CHANGELOG.md`
   - `README.md`
-  - `program_mlx.md`
+  - `docs/program-mlx.md`
 - Validation:
   - docs/process only; no code-path tests were needed
 
@@ -1315,10 +1388,10 @@ On this hardware, the default canonical matched benchmark window for optimizatio
 **Grounding**
 
 - Files:
-  - `train_mlx.py`
+  - `autoresearch_mlx/train.py`
   - `docs/mlx-port-architecture.md`
 - Validation:
-  - `python3 -m py_compile train_mlx.py`
+  - `python3 -m py_compile autoresearch_mlx/train.py`
   - matched A/B benchmark on `m5-large` against the previous committed training loop from `e06f85c`
 - Measured effect on `m5-large` (`5s`, matched settings):
   - steady-state throughput: `15,278.9 tok/s -> 15,279.2 tok/s` (`+0.00%`, effectively flat)
@@ -1349,16 +1422,16 @@ On this hardware, the default canonical matched benchmark window for optimizatio
 **Grounding**
 
 - Files:
-  - `prepare_mlx.py`
-  - `train_mlx.py`
+  - `autoresearch_mlx/prepare.py`
+  - `autoresearch_mlx/train.py`
   - `autoresearch_mlx/data.py`
   - `README.md`
-  - `program_mlx.md`
+  - `docs/program-mlx.md`
   - `docs/mlx-port-architecture.md`
 - Validation:
-  - `python3 -m py_compile prepare_mlx.py train_mlx.py tools/overnight_mlx.py autoresearch_mlx/*.py`
-  - `./.venv/bin/python prepare_mlx.py --num-shards 1`
-  - `./.venv/bin/python train_mlx.py --smoke`
+  - `python3 -m py_compile autoresearch_mlx/prepare.py autoresearch_mlx/train.py tools/overnight_mlx.py autoresearch_mlx/*.py`
+  - `./.venv/bin/python -m autoresearch_mlx.prepare --num-shards 1`
+  - `./.venv/bin/python -m autoresearch_mlx.train --smoke`
   - multiple fixed-budget runs on the reference M5 MacBook Pro (`32 GB`, `10 GPU cores`)
 - Measured effect of token caching, isolated by swapping only the data path back to the pre-cache implementation:
   - `m5-fast`:
@@ -1395,15 +1468,15 @@ On this hardware, the default canonical matched benchmark window for optimizatio
 **Grounding**
 
 - Files:
-  - `train_mlx.py`
+  - `autoresearch_mlx/train.py`
   - `tools/overnight_mlx.py`
   - `tools/launch_overnight_mlx.sh`
   - `tools/detach_exec.py`
   - `README.md`
-  - `program_mlx.md`
+  - `docs/program-mlx.md`
   - `docs/mlx-port-architecture.md`
 - Validation:
-  - `python3 -m py_compile train_mlx.py overnight_mlx.py autoresearch_mlx/*.py`
+  - `python3 -m py_compile autoresearch_mlx/train.py overnight_mlx.py autoresearch_mlx/*.py`
   - `python3 -m py_compile tools/overnight_mlx.py tools/detach_exec.py`
   - `./tools/launch_overnight_mlx.sh tooling-dry-run 0.01 --dry-run`
   - detached one-experiment sweep via the launcher path
@@ -1425,18 +1498,18 @@ On this hardware, the default canonical matched benchmark window for optimizatio
 **Grounding**
 
 - Files:
-  - `prepare_mlx.py`
-  - `train_mlx.py`
+  - `autoresearch_mlx/prepare.py`
+  - `autoresearch_mlx/train.py`
   - `autoresearch_mlx/data.py`
   - `autoresearch_mlx/model.py`
   - `autoresearch_mlx/optim.py`
-  - `program_mlx.md`
+  - `docs/program-mlx.md`
   - `README.md`
   - `pyproject.toml`
 - Validation:
-  - `python3 -m py_compile prepare_mlx.py train_mlx.py autoresearch_mlx/*.py`
-  - `./.venv/bin/python prepare_mlx.py --num-shards 1`
-  - `./.venv/bin/python train_mlx.py --smoke`
+  - `python3 -m py_compile autoresearch_mlx/prepare.py autoresearch_mlx/train.py autoresearch_mlx/*.py`
+  - `./.venv/bin/python -m autoresearch_mlx.prepare --num-shards 1`
+  - `./.venv/bin/python -m autoresearch_mlx.train --smoke`
 - Smoke-test result immediately before the baseline commit:
   - canonical `val_bpb`: `2.187049`
   - `training_seconds`: `1.0`

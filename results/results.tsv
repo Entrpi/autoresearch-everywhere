@@ -1,0 +1,11 @@
+commit	val_bpb	memory_gb	status	description
+500114a	2.440458	1.002	keep	"run_tag=overnight-smoke-20260309-0318-escalated branch=codex/autoresearch-2026-03-09-overnight exp=balanced_baseline seed=1000 desc=Default M5 baseline. args=""--preset m5-balanced"""
+500114a	1.519007	1.002	keep	"run_tag=test30-20260309-0949 branch=codex/autoresearch-2026-03-09-overnight exp=balanced_baseline seed=1000 desc=Default M5 baseline. args=""--preset m5-balanced"""
+500114a	1.441896	1.557	keep	"run_tag=test30-20260309-0949 branch=codex/autoresearch-2026-03-09-overnight exp=balanced_bigbatch seed=1001 desc=Balanced shape with more gradient accumulation. args=""--preset m5-balanced --total-batch-size 4096"""
+500114a			crash	"run_tag=test30-20260309-0949 branch=codex/autoresearch-2026-03-09-overnight exp=balanced_smallbatch seed=1002 desc=Balanced shape with lower total batch size. args=""--preset m5-balanced --total-batch-size 1024"""
+500114a	1.548087	0.805	discard	"run_tag=test30-20260309-0949 branch=codex/autoresearch-2026-03-09-overnight exp=mid_context seed=1003 desc=Slightly shorter context to trade context for updates. args=""--preset m5-balanced --seq-len 384 --device-batch-size 4 --total-batch-size 1536"""
+500114a	1.479208	2.043	discard	"run_tag=test30-20260309-0949 branch=codex/autoresearch-2026-03-09-overnight exp=large_768 seed=1004 desc=Larger model with moderated context length. args=""--preset m5-large --seq-len 768 --device-batch-size 2 --total-batch-size 3072"""
+c3b3d8d			crash	"run_tag=canonical-smoke-20260309-1 branch=codex/autoresearch-mlx exp=balanced_baseline seed=1000 desc=Default M5 baseline. proxy_val_bpb=n/a canonical_seq_len=n/a canonical_tokens=n/a args=""--preset m5-balanced"""
+c3b3d8d	2.509401	1.002	keep	"run_tag=canonical-check-20260309 branch=codex/autoresearch-mlx exp=balanced_baseline seed=1000 desc=Default M5 baseline. proxy_val_bpb=2.473907 canonical_seq_len=256 canonical_tokens=512 args=""--preset m5-balanced"""
+c3b3d8d			crash	"run_tag=post-move-smoke-20260309 branch=codex/autoresearch-mlx exp=balanced_baseline seed=1000 desc=Default M5 baseline. proxy_val_bpb=n/a canonical_seq_len=n/a canonical_tokens=n/a args=""--preset m5-balanced"""
+760fa75	1.528165	1.002	keep	"run_tag=swiglu-warmup branch=codex/autoresearch-mlx exp=swiglu_warmup seed=1000 desc=SwiGLU MLP + 2% warmup. args=""--preset m5-balanced"""

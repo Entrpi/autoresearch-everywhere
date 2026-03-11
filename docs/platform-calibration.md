@@ -1,6 +1,6 @@
 # Platform Calibration
 
-This note describes the implemented one-button platform bring-up flow for new hardware, plus the closely related post-change revalidation path for meaningful autoresearch changes.
+This note describes the implemented one-button platform bring-up flow for new hardware, plus the closely related post-change revalidation path for meaningful autoresearch changes. The bring-up stack now sits on a shared training-engine boundary so the same workflow can host MLX first, CUDA second, and later ROCm or ANE without each backend becoming its own orchestration fork.
 
 ## User Story
 
@@ -47,10 +47,19 @@ The signatures are intentionally simpler than this judgment. They exist to stop 
 The current command is:
 
 ```bash
-uv run tools/calibrate_platform.py
+uv run calibrate.py
 ```
 
-By default, that command sweeps only the practical MLX preset families. The slower `upstream` preset remains available as an explicit opt-in reference, but it is too expensive on typical local MLX hardware to belong in the default one-button path.
+By default, that command means `--engine mlx` and sweeps only the practical MLX preset families. The slower `upstream` preset remains available as an explicit opt-in reference, but it is too expensive on typical local MLX hardware to belong in the default one-button path.
+
+The same front door now also accepts `--engine cuda`. That path already shares:
+
+- hardware fingerprinting
+- comparable train probes
+- coarse envelope / ranking / zone reporting
+- candidate-default reporting
+
+but it does not yet share the full MLX-only checkpoint-backed eval-calibration and promotion path. That is intentional: the training-engine boundary is real first, feature parity second.
 
 That command may take a long time, but it now leaves behind:
 
@@ -65,6 +74,11 @@ Those outputs are now also stamped with runtime and eval signatures, so the repo
 
 The current stack already provides most of the underlying pieces:
 
+- `autoresearch_platform/`
+  - shared engine contract and backend registry
+- `autoresearch_cuda/`
+  - safe CUDA defaults and architecture/runtime metadata
+  - explicit reference-family handling for A100/SM80, Ada RTX 40xx, Ada L40S-class, Hopper/SM90, RTX 50xx-class consumer Blackwell, B200-class Blackwell, a GB10/DGX Spark carve-out, and an anticipated Vera Rubin slot
 - `tools/calibrate_eval_policy.py`
   - `train-grid`
   - `eval-batch`
@@ -74,10 +88,19 @@ The current stack already provides most of the underlying pieces:
   - checked-in preset x hardware eval tradeoff tables
 - `autoresearch_mlx/eval_telemetry.py`
   - passive evidence from ordinary runs
-- `train_mlx.py`
+- `autoresearch_mlx/train.py`
   - conservative runtime selector that exposes calibration status, confidence, freshness, and coverage
 
-The missing layer is orchestration and reporting. The user should not need to know which subcommands to run or how to interpret the raw tables.
+The missing layer used to be orchestration and reporting. It is now the engine-specific depth of implementation. MLX currently exercises the whole stack; CUDA is the first narrower engine on the same boundary; ROCm and ANE should follow the same pattern rather than introducing new top-level orchestration.
+
+The important point is that this boundary is not just for the calibration command itself. It is meant to be the shared contract for the important training-stack features that future engines need to plug into:
+
+- hardware fingerprinting
+- train probes and local search
+- checkpoint minting
+- eval calibration
+- runtime capability reporting
+- promotion-ready output for new defaults
 
 ## Bring-Up Phases
 
@@ -247,7 +270,7 @@ It should not silently rewrite checked-in policy files on the first pass.
 
 ## Current Implementation
 
-`tools/calibrate_platform.py` is an orchestrator, not a separate measurement engine. It reuses the existing training and eval calibration machinery and writes a stable bring-up bundle under `results/analysis/` or the caller's chosen output directory.
+`calibrate.py` is the public bring-up entrypoint, with `tools/calibrate_platform.py` as the implementation module underneath. It is an orchestrator, not a separate measurement engine. It reuses the existing training and eval calibration machinery and writes a stable bring-up bundle under `results/analysis/` or the caller's chosen output directory.
 
 It now has two stage-aware operating modes:
 

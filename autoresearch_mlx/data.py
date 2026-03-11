@@ -225,13 +225,13 @@ def load_token_bytes() -> np.ndarray:
 def _split_parquet_paths(split: str) -> list[Path]:
     parquet_paths = list_parquet_files()
     if not parquet_paths:
-        raise RuntimeError("No parquet files found. Run prepare_mlx.py first.")
+        raise RuntimeError("No parquet files found. Run prepare.py first.")
 
     val_path = DATA_DIR / VAL_FILENAME
     if split == "train":
         parquet_paths = [path for path in parquet_paths if path != val_path]
         if not parquet_paths:
-            raise RuntimeError("No training shards available. Run prepare_mlx.py with at least 1 training shard.")
+            raise RuntimeError("No training shards available. Run prepare.py with at least 1 training shard.")
     else:
         parquet_paths = [val_path]
     return parquet_paths
@@ -277,7 +277,7 @@ def build_token_cache(tokenizer: Tokenizer, tokenizer_batch_size: int = 128) -> 
     TOKEN_CACHE_DIR.mkdir(parents=True, exist_ok=True)
     parquet_paths = list_parquet_files()
     if not parquet_paths:
-        raise RuntimeError("No parquet files found. Run prepare_mlx.py first.")
+        raise RuntimeError("No parquet files found. Run prepare.py first.")
     if tokenizer.fingerprint is None:
         raise RuntimeError("Tokenizer fingerprint missing; token cache cannot be validated.")
     if tokenizer.get_vocab_size() > np.iinfo(np.uint16).max:

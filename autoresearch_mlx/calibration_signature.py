@@ -18,7 +18,7 @@ TRAIN_MLX_PRESET_NODES = (
 EVAL_SIGNATURE_FILES = (
     ("autoresearch_mlx/constants.py", None),
     ("autoresearch_mlx/data.py", None),
-    ("train_mlx.py", TRAIN_MLX_PRESET_NODES),
+    ("autoresearch_mlx/train.py", TRAIN_MLX_PRESET_NODES),
 )
 
 RUNTIME_SIGNATURE_FILES = (
@@ -26,7 +26,7 @@ RUNTIME_SIGNATURE_FILES = (
     ("autoresearch_mlx/data.py", None),
     ("autoresearch_mlx/model.py", None),
     ("autoresearch_mlx/optim.py", None),
-    ("train_mlx.py", TRAIN_MLX_PRESET_NODES),
+    ("autoresearch_mlx/train.py", TRAIN_MLX_PRESET_NODES),
 )
 
 

@@ -1,10 +1,14 @@
 """
 Autoresearch pretraining script for MLX on Apple Silicon.
-Usage: uv run train_mlx.py
+Use via the generic top-level entrypoint:
+    uv run train.py
+or directly as:
+    python -m autoresearch_mlx.train
 """
 
 import argparse
 import gc
+import os
 import subprocess
 import statistics
 import sys
@@ -502,7 +506,7 @@ def resolve_eval_settings(
 
 def verify_mlx_env() -> None:
     if sys.platform != "darwin":
-        raise RuntimeError(f"train_mlx.py requires macOS. Detected platform: {sys.platform}")
+        raise RuntimeError(f"autoresearch_mlx.train requires macOS. Detected platform: {sys.platform}")
     if not mx.is_available(mx.gpu) or not mx.metal.is_available():
         raise RuntimeError("MLX GPU/Metal is not available. This script expects Apple Silicon with Metal.")
     print("Environment verified: macOS detected with MLX Metal GPU support available.")
@@ -535,11 +539,8 @@ def get_lr_multiplier(progress: float) -> float:
     return cooldown + (1.0 - cooldown) * FINAL_LR_FRAC
 
 
-MUON_RAMP_TOKENS = 300 * 12288  # 300 steps at tuned batch=12288
-
-def get_muon_momentum(step: int, total_batch_size: int = 12288) -> float:
-    ramp_steps = max(1, MUON_RAMP_TOKENS // total_batch_size)
-    frac = min(step / ramp_steps, 1.0)
+def get_muon_momentum(step: int) -> float:
+    frac = min(step / 300, 1.0)
     return (1.0 - frac) * 0.85 + frac * 0.95
 
 
@@ -996,7 +997,10 @@ def resolve_resume_config(args: argparse.Namespace) -> RunConfig:
 
 
 def parse_args() -> RunConfig:
-    parser = argparse.ArgumentParser(description="Run autoresearch pretraining with MLX on Apple Silicon.")
+    parser = argparse.ArgumentParser(
+        prog=os.environ.get("AUTORESEARCH_ENTRYPOINT_PROG"),
+        description="Run autoresearch pretraining with MLX on Apple Silicon.",
+    )
     parser.add_argument(
         "--preset",
         choices=tuple(PRESETS),
@@ -1413,7 +1417,7 @@ def main() -> None:
     while budget_elapsed_seconds() < args.time_budget:
         progress = min(budget_elapsed_seconds() / args.time_budget, 1.0)
         lrm = get_lr_multiplier(progress)
-        muon_momentum = get_muon_momentum(step, args.total_batch_size)
+        muon_momentum = get_muon_momentum(step)
         muon_weight_decay = get_weight_decay(progress)
         optimizer.set_schedule(
             lr_multiplier=lrm,

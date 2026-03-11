@@ -34,7 +34,7 @@ from autoresearch_mlx.checkpoints import (
 from autoresearch_mlx.data import Tokenizer, make_dataloader, restore_loader_state, serialize_loader_state
 from autoresearch_mlx.model import GPT
 from autoresearch_mlx.optim import MuonAdamW
-from train_mlx import (
+from autoresearch_mlx.train import (
     ADAM_BETAS,
     EMBEDDING_LR,
     MATRIX_LR,

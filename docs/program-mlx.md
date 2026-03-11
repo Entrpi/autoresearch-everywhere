@@ -10,14 +10,14 @@ To set up a new MLX experiment, work with the user to:
 2. Create a fresh branch `autoresearch/<tag>` from the current main branch.
 3. Read the in-scope files:
    - `README.md`
-   - `prepare_mlx.py`
-   - `train_mlx.py`
+   - `autoresearch_mlx/prepare.py`
+   - `autoresearch_mlx/train.py`
    - `autoresearch_mlx/data.py`
    - `autoresearch_mlx/model.py`
    - `autoresearch_mlx/optim.py`
-4. Verify that `~/.cache/autoresearch/` contains data shards, `tokenizer.pkl`, `token_bytes.npy`, and the `token_cache/` directory. If not, tell the human to run `uv run prepare_mlx.py`.
+4. Verify that `~/.cache/autoresearch/` contains data shards, `tokenizer.pkl`, `token_bytes.npy`, and the `token_cache/` directory. If not, tell the human to run `uv run prepare.py --engine mlx`.
    Optional: if `prepacked_cache/` is present, the runtime will use it automatically for matching sequence lengths.
-5. Initialize `results.tsv` with the header row if it does not exist.
+5. Initialize `results/results.tsv` with the header row if it does not exist.
 6. Confirm setup and start experimenting.
 
 ## Experimentation
@@ -25,22 +25,22 @@ To set up a new MLX experiment, work with the user to:
 Each experiment runs on Apple Silicon using MLX. The default loop uses a fixed 5-minute training-time budget, not a raw wall-clock budget. Launch it with:
 
 ```bash
-uv run train_mlx.py
+uv run train.py --engine mlx
 ```
 
-The default preset in `train_mlx.py` is `m5-balanced`. Useful alternatives:
+The default preset in `autoresearch_mlx/train.py` is `m5-balanced`. Useful alternatives through the generic top-level entrypoint are:
 
 ```bash
-uv run train_mlx.py --preset m5-fast
-uv run train_mlx.py --preset m5-large
-uv run train_mlx.py --preset m5-xlarge
-uv run train_mlx.py --preset upstream
+uv run train.py --engine mlx --preset m5-fast
+uv run train.py --engine mlx --preset m5-large
+uv run train.py --engine mlx --preset m5-xlarge
+uv run train.py --engine mlx --preset upstream
 ```
 
-Use `uv run train_mlx.py --no-prepacked-cache` when you explicitly want to benchmark or debug the live packing path instead of the optional prepacked row caches.
-Use `uv run train_mlx.py --benchmark-skip-eval` when you want a warmup-aware comparison that separates startup cost from steady-state throughput. By default, the trainer auto-detects the warmup cutoff statistically from step-time stabilization and reports `warmup_done_step`. Use `--benchmark-warmup-steps <N>` only when you need a fixed override for an ablation or apples-to-apples replay.
+Use `uv run train.py --engine mlx --no-prepacked-cache` when you explicitly want to benchmark or debug the live packing path instead of the optional prepacked row caches.
+Use `uv run train.py --engine mlx --benchmark-skip-eval` when you want a warmup-aware comparison that separates startup cost from steady-state throughput. By default, the trainer auto-detects the warmup cutoff statistically from step-time stabilization and reports `warmup_done_step`. Use `--benchmark-warmup-steps <N>` only when you need a fixed override for an ablation or apples-to-apples replay.
 Use `--time-budget-mode train` for core training-path changes and `--time-budget-mode wall` for checkpointing or orchestration changes where elapsed wall time is the metric you actually care about. `train` remains the default and preserves the original autoresearch intent.
-When the task is to calibrate a preset or a hardware profile rather than mutate the trainer itself, prefer the dedicated calibration path in `docs/preset-calibration.md` and `tools/calibrate_eval_policy.py`. Use `train-grid` for constrained operating-point sweeps, `eval-batch` for eval batch calibration, and `eval-rungs` for cheap/reference/full policy tables. The trainer now consumes the checked-in eval tradeoff table by default for shipped preset shapes, but only on exact hardware-key matches and matching code signatures; calibrating a preset is how you earn broader automatic runtime coverage. When the task is larger than one preset and is really about bringing the repo up on unfamiliar hardware, use `docs/platform-calibration.md` and `uv run tools/calibrate_platform.py` as the one-button platform bring-up path. The same tool is also the right revalidation path after meaningful model or runtime changes. Prefer `--mode fast` for a first safe default, `--mode full` for a stronger recommendation, rerun in the same output directory unless you explicitly need `--force`, and inspect the emitted promotion bundle before treating the resulting default or eval row as ready to check in. The default bring-up sweep intentionally leaves out `upstream`; only add it via `--presets ...,upstream` when you explicitly want the slower upstream-style reference in the same run.
+When the task is to calibrate a preset or a hardware profile rather than mutate the trainer itself, prefer the dedicated calibration path in `docs/preset-calibration.md` and `tools/calibrate_eval_policy.py`. Use `train-grid` for constrained operating-point sweeps, `eval-batch` for eval batch calibration, and `eval-rungs` for cheap/reference/full policy tables. The trainer now consumes the checked-in eval tradeoff table by default for shipped preset shapes, but only on exact hardware-key matches and matching code signatures; calibrating a preset is how you earn broader automatic runtime coverage. When the task is larger than one preset and is really about bringing the repo up on unfamiliar hardware, use `docs/platform-calibration.md` and `uv run calibrate.py` as the one-button platform bring-up path. `calibrate.py` is the public entrypoint, backed by `tools/calibrate_platform.py`. That tool now sits on a shared training-engine boundary: `--engine mlx` is the full-featured default, `--engine cuda` is the first narrower secondary engine, and ROCm / ANE should follow the same contract instead of growing separate orchestration trees. The point is not just shared calibration. It is a stack where different training engines can hook into the same important features over time: hardware fingerprinting, train probes, local search, checkpoint minting, eval calibration, runtime capability reporting, and promotion-ready outputs. On CUDA, treat architecture-family differences as first-class policy inputs: A100/SM80, Ada RTX 40xx, Ada L40S-class, Hopper/SM90, RTX 50xx-class consumer Blackwell, B200-class Blackwell, GB10/DGX Spark, and anticipated Vera Rubin-class hardware should not all be lumped into one generic "CUDA" bucket. The same tool is also the right revalidation path after meaningful model or runtime changes. Prefer `--mode fast` for a first safe default, `--mode full` for a stronger recommendation, rerun in the same output directory unless you explicitly need `--force`, and inspect the emitted promotion bundle before treating the resulting default or eval row as ready to check in. The default MLX bring-up sweep intentionally leaves out `upstream`; only add it via `--presets ...,upstream` when you explicitly want the slower upstream-style reference in the same run.
 Do not treat the code-signature checks as the main trigger for rerunning platform calibration. They are a conservative backstop. Use agent judgment first. If your findings suggest a change could generalize across preset shapes or hardware classes, rerun platform calibration proactively even before a signature mismatch appears. Typical triggers include:
 
 - architecture changes such as SwiGLU, attention rewrites, normalization changes, or other block-level substitutions that change compute or memory shape
@@ -50,17 +50,17 @@ Do not treat the code-signature checks as the main trigger for rerunning platfor
 
 Treat signatures as the tripwire that prevents silent over-trust when judgment or process misses something, not as a substitute for proactive recalibration after important findings.
 
-`uv run prepare_mlx.py` now builds the shipped prepacked row caches by default so `m5-fast`, `m5-balanced`, `m5-large`, and `m5-xlarge` all have a prepared fast path. Use `uv run prepare_mlx.py --skip-prepacked-cache` only when you intentionally want the live packing fallback.
+`uv run prepare.py --engine mlx` now builds the shipped prepacked row caches by default so `m5-fast`, `m5-balanced`, `m5-large`, and `m5-xlarge` all have a prepared fast path. Use `uv run prepare.py --engine mlx --skip-prepacked-cache` only when you intentionally want the live packing fallback.
 
-For runs above 5 minutes, `train_mlx.py` now enables exact full-state checkpoints by default using the repo's conservative checkpoint-frequency selector. Use `--checkpoint-path` to choose the checkpoint directory while keeping that selector, `--checkpoint-interval` to pin the cadence, or `--no-checkpoint` to disable it. Exact sync remains the default checkpoint path. `weights_only` remains in-tree only as a failed approximate-resume experiment for historical comparison and targeted ablations. `--checkpoint-save-mode async` is available for exact background writes when wall-clock deadline behavior matters, but it is still an optional experimental variant rather than the default path.
+For runs above 5 minutes, `autoresearch_mlx/train.py` now enables exact full-state checkpoints by default using the repo's conservative checkpoint-frequency selector. Use `--checkpoint-path` to choose the checkpoint directory while keeping that selector, `--checkpoint-interval` to pin the cadence, or `--no-checkpoint` to disable it. Exact sync remains the default checkpoint path. `weights_only` remains in-tree only as a failed approximate-resume experiment for historical comparison and targeted ablations. `--checkpoint-save-mode async` is available for exact background writes when wall-clock deadline behavior matters, but it is still an optional experimental variant rather than the default path.
 
 What you CAN do:
-- Modify `train_mlx.py`.
+- Modify `autoresearch_mlx/train.py`.
 - Modify `autoresearch_mlx/model.py`.
 - Modify `autoresearch_mlx/optim.py`.
 
 What you CANNOT do:
-- Modify `prepare_mlx.py`.
+- Modify `autoresearch_mlx/prepare.py`.
 - Modify `autoresearch_mlx/data.py`.
 - Add new dependencies unless the human explicitly asks for that.
 - Change the BPB metric or the fixed time budget.
@@ -163,10 +163,10 @@ Do not land fully human-authored code changes on this branch. The `Fully human (
 1. Inspect the current branch and commit.
 2. Try one idea.
 3. Commit the change.
-4. Run `uv run train_mlx.py > run.log 2>&1`.
+4. Run `uv run train.py --engine mlx > run.log 2>&1`.
 5. Extract the results from `run.log`.
 6. If the run crashes, inspect the traceback, fix obvious bugs, and retry a small number of times.
-7. Record the result in `results.tsv`.
+7. Record the result in `results/results.tsv`.
 8. Update `CHANGELOG.md` if the run led to a meaningful code or workflow change.
 9. Keep only improvements on canonical `val_bpb`.
 

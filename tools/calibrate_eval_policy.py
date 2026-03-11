@@ -33,7 +33,7 @@ from autoresearch_mlx.eval_policy import (
 from autoresearch_mlx.eval_telemetry import summarize_eval_telemetry
 from autoresearch_mlx.model import GPT, GPTConfig
 from autoresearch_mlx.optim import MuonAdamW
-from train_mlx import PRESETS
+from autoresearch_mlx.train import PRESETS
 
 
 def parse_int_list(value: str) -> list[int]:
@@ -84,7 +84,8 @@ def ensure_checkpoint(
         return checkpoint_path
     cmd = [
         sys.executable,
-        "train_mlx.py",
+        "-m",
+        "autoresearch_mlx.train",
         "--preset",
         preset,
         "--time-budget",
@@ -269,7 +270,8 @@ def run_train_grid_sweep(args) -> dict:
         grad_accum_steps = total_batch_size // tokens_per_fwdbwd if total_batch_size % tokens_per_fwdbwd == 0 else None
         cmd = [
             sys.executable,
-            "train_mlx.py",
+            "-m",
+            "autoresearch_mlx.train",
             "--preset",
             args.preset,
             "--time-budget",

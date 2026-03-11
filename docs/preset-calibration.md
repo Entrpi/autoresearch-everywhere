@@ -2,7 +2,7 @@
 
 This note captures the current research direction for turning the recent manual eval-policy work into a reusable preset calibration system.
 
-If the goal is new-machine bring-up rather than refining one known preset / hardware pair, also see `docs/platform-calibration.md` and `tools/calibrate_platform.py`. That layer sits above the lower-level calibration subcommands described here and turns them into one orchestrated bring-up report with a candidate new default for the autoresearch stage on that hardware, resumable phase artifacts, confidence-bearing reference comparisons, and a promotion bundle for the resulting default/calibration artifacts.
+If the goal is new-machine bring-up rather than refining one known preset / hardware pair, also see `docs/platform-calibration.md` and `calibrate.py`. That layer sits above the lower-level calibration subcommands described here and turns them into one orchestrated bring-up report with a candidate new default for the autoresearch stage on that hardware, resumable phase artifacts, confidence-bearing reference comparisons, and a promotion bundle for the resulting default/calibration artifacts.
 
 The same calibration machinery also now serves as the revalidation path after meaningful autoresearch changes. If the model, optimizer, attention path, or eval implementation changes enough to alter runtime or eval signatures, the old calibration should be treated as suspect even on the same hardware.
 The important nuance is that signature drift is not the preferred trigger. Agent judgment should normally fire first. If the findings suggest the change could generalize across preset shapes or hardware classes, rerun calibration proactively even before a signature mismatch forces the issue.
@@ -36,7 +36,7 @@ The repo now has the first three pieces of the intended shape:
 
 1. `autoresearch_mlx/eval_policy.py`
 2. `tools/calibrate_eval_policy.py`
-3. runtime integration in `train_mlx.py`
+3. runtime integration in `autoresearch_mlx/train.py`
 4. generated JSON artifacts for raw calibration runs
 
 ### `autoresearch_mlx/eval_policy.py`
@@ -98,7 +98,7 @@ Implemented modes:
 
 The tool can reuse an existing checkpoint or mint a fresh short checkpoint for rung calibration.
 
-### `train_mlx.py`
+### `autoresearch_mlx/train.py`
 
 The trainer now uses the checked-in eval tradeoff table by default:
 

@@ -2,7 +2,7 @@
 
 ## Scope
 
-This document describes the current MLX architecture in this fork of [karpathy/autoresearch](https://github.com/karpathy/autoresearch).
+This document describes the current platform architecture in this fork of [karpathy/autoresearch](https://github.com/karpathy/autoresearch), with MLX as the fully featured primary engine today.
 
 It is centered on the current user story:
 
@@ -15,22 +15,27 @@ So this is no longer just a report about a training script port. It is a report 
 
 ## Executive Summary
 
-The MLX path now has five meaningful subsystems:
+The current platform has six meaningful subsystems:
 
-1. platform bring-up orchestration
-2. runtime eval policy and telemetry
-3. training engine
-4. data and evaluation substrate
-5. optional local sweep tooling
+1. training-engine boundary and backend adapters
+2. platform bring-up orchestration
+3. runtime eval policy and telemetry
+4. training engine
+5. data and evaluation substrate
+6. optional local sweep tooling
 
 The architectural center of gravity has moved upward. Early in the port, the main problem was "make autoresearch run on Apple Silicon." The main problem now is "make a new machine discover its own best starting point in a measured, inspectable way."
 
 That shift changed the role of several files:
 
-- `tools/calibrate_platform.py` is now the front door for unfamiliar hardware
+- `autoresearch_platform/` is now the training-engine boundary where MLX and CUDA meet the same shared contract for train probes, local search, checkpoint minting, eval calibration, runtime capability reporting, and platform bring-up
+- `autoresearch_cuda/` now holds safe CUDA defaults and architecture/runtime metadata, including explicit reference-family handling for A100/SM80, Ada RTX 40xx, Ada L40S-class, Hopper/SM90, RTX 50xx-class consumer Blackwell, B200-class Blackwell, a GB10/DGX Spark carve-out, an anticipated Vera Rubin slot, and later ROCm parity
+- `calibrate.py` is now the front door for unfamiliar hardware, backed by `tools/calibrate_platform.py`
 - `autoresearch_mlx/eval_policy.py` is now runtime policy, not just a static table
 - `autoresearch_mlx/eval_telemetry.py` turns ordinary runs into passive calibration evidence
-- `train_mlx.py` is both the trainer and the runtime policy consumer
+- `autoresearch_mlx/train.py` is both the trainer and the runtime policy consumer
+
+The repo root is intentionally generic now. User-facing entrypoints stay at the top level (`prepare.py`, `train.py`, `calibrate.py`, `program.md`), while engine-specific implementation files live under `autoresearch_*` and supporting materials live under `docs/`, `tools/`, `results/`, and `notebooks/`.
 
 ## New User Story
 
@@ -41,17 +46,17 @@ There are now two first-class ways to enter the system.
 If the user is effectively on the calibrated M5 reference machine, they can:
 
 1. run `uv sync`
-2. run `uv run prepare_mlx.py`
-3. run `uv run train_mlx.py --smoke`
+2. run `uv run prepare.py`
+3. run `uv run train.py --smoke`
 4. start normal experiments
 
 ### Unfamiliar hardware
 
-If the user is on a new Apple Silicon configuration, the intended path is:
+If the user is on a new hardware configuration, the intended path is:
 
 1. run `uv sync`
-2. run `uv run prepare_mlx.py`
-3. run `uv run tools/calibrate_platform.py --mode fast`
+2. run `uv run prepare.py`
+3. run `uv run calibrate.py --mode fast`
 4. optionally rerun with `--mode full`
 5. review the report and promotion bundle
 6. adopt the emitted candidate default for that hardware
@@ -62,49 +67,91 @@ That is the new idealized bring-up loop. The rest of the architecture exists to 
 
 ```mermaid
 flowchart TD
-    A["User / Agent"] --> B["tools/calibrate_platform.py"]
-    A --> C["train_mlx.py"]
+    A["User / Agent"] --> B["prepare.py"]
+    A --> C["train.py"]
+    A --> D["calibrate.py"]
+
+    subgraph S0["Engine Boundary"]
+        B --> E["autoresearch_platform/*"]
+        C --> E
+        D --> E
+        E --> E1["MLX engine"]
+        E --> E2["CUDA engine"]
+        E --> E3["future ROCm / ANE engines"]
+    end
 
     subgraph S1["Platform Bring-Up Orchestration"]
-        B --> B1["hardware fingerprint"]
-        B --> B2["coarse preset envelope"]
-        B --> B3["candidate family ranking"]
-        B --> B4["local operating-point search"]
-        B --> B5["candidate checkpoint"]
-        B --> B6["eval rung calibration"]
-        B --> B7["report + promotion bundle"]
+        D --> B1["hardware fingerprint"]
+        D --> B2["coarse preset envelope"]
+        D --> B3["candidate family ranking"]
+        D --> B4["local operating-point search"]
+        D --> B5["candidate checkpoint"]
+        D --> B6["eval rung calibration"]
+        D --> B7["report + promotion bundle"]
     end
 
     subgraph S2["Runtime Eval Policy and Telemetry"]
-        C --> P1["autoresearch_mlx.eval_policy"]
-        C --> P2["autoresearch_mlx.eval_telemetry"]
+        E1 --> P1["autoresearch_mlx.eval_policy"]
+        E1 --> P2["autoresearch_mlx.eval_telemetry"]
         P1 --> P3["checked-in rung tables"]
         P2 --> P4["local telemetry ledger"]
     end
 
     subgraph S3["Training Engine"]
-        C --> T1["autoresearch_mlx.model"]
-        C --> T2["autoresearch_mlx.optim"]
-        C --> T3["MLX Metal runtime"]
+        E1 --> T1["autoresearch_mlx.model"]
+        E1 --> T2["autoresearch_mlx.optim"]
+        E1 --> T3["MLX Metal runtime"]
     end
 
     subgraph S4["Data and Evaluation Substrate"]
-        D["prepare_mlx.py"] --> D1["autoresearch_mlx.data"]
+        E1 --> D1["autoresearch_mlx.data"]
         D1 --> D2["token cache"]
         D1 --> D3["prepacked cache"]
         D1 --> D4["BPB evaluation"]
     end
 
     subgraph S5["Optional Local Sweep Tooling"]
-        O1["tools/overnight_mlx.py"] --> C
+        O1["tools/overnight_mlx.py"] --> E1
     end
 
-    B --> C
-    C --> D1
     B --> D1
+    C --> D1
 ```
 
-## Subsystem 1: Platform Bring-Up Orchestration
+## Subsystem 1: Training-Engine Boundary
+
+### Purpose
+
+This subsystem exists so backend inclusion happens once at a shared contract, not by duplicating top-level workflows. Platform bring-up is the first major consumer, but the boundary is intentionally broader than that.
+
+### Main files
+
+- `autoresearch_platform/engines.py`
+- `autoresearch_platform/mlx_engine.py`
+- `autoresearch_platform/cuda_engine.py`
+- `autoresearch_cuda/`
+
+### Responsibilities
+
+The shared engine contract now owns or prepares to own:
+
+- hardware fingerprinting
+- preset catalogs and default engine presets
+- comparable train probes
+- local-search axes
+- checkpoint minting
+- eval calibration
+- runtime capability and architecture reporting
+
+That means new engines should be added by implementing this contract first, then teaching the rest of the stack to consume their capabilities, rather than by creating new top-level orchestration trees.
+
+### Current state
+
+- MLX is the first fully featured engine on this boundary.
+- CUDA is the first narrower secondary engine.
+- ROCm and ANE should be added as new training engines on the same boundary.
+
+## Subsystem 2: Platform Bring-Up Orchestration
 
 ### Purpose
 
@@ -112,7 +159,7 @@ This subsystem exists so a user on new hardware does not need to understand the 
 
 ### Main file
 
-- `tools/calibrate_platform.py`
+- `calibrate.py`
 
 ### Responsibilities
 
@@ -160,7 +207,7 @@ For automation:
 - machine-readable promotion outputs
 - a stable structure for later fleet-style hardware bring-up
 
-## Subsystem 2: Runtime Eval Policy and Telemetry
+## Subsystem 3: Runtime Eval Policy and Telemetry
 
 ### Purpose
 
@@ -170,7 +217,7 @@ This subsystem prevents the runtime from silently over-trusting thin calibration
 
 - `autoresearch_mlx/eval_policy.py`
 - `autoresearch_mlx/eval_telemetry.py`
-- policy consumption inside `train_mlx.py`
+- policy consumption inside `autoresearch_mlx/train.py`
 
 ### Responsibilities
 
@@ -221,7 +268,7 @@ For reduced-budget rungs, the eval path uses evenly spaced slices across the fir
 
 This is the key reason the runtime can now auto-pick different canonical fidelity levels for `5m` versus `8h` runs.
 
-## Subsystem 3: Training Engine
+## Subsystem 4: Training Engine
 
 ### Purpose
 
@@ -229,7 +276,7 @@ This is the MLX-native replacement for upstream `train.py`.
 
 ### Main files
 
-- `train_mlx.py`
+- `autoresearch_mlx/train.py`
 - `autoresearch_mlx/model.py`
 - `autoresearch_mlx/optim.py`
 
@@ -249,7 +296,7 @@ The training engine is responsible for:
 
 The trainer is no longer just "the thing that trains." It is now also the place where calibrated runtime policy becomes live behavior.
 
-That means a summary from `train_mlx.py` now carries much more than loss and throughput. It can also say:
+That means a summary from `autoresearch_mlx/train.py` now carries much more than loss and throughput. It can also say:
 
 - which canonical eval rung was chosen
 - why it was allowed
@@ -258,7 +305,7 @@ That means a summary from `train_mlx.py` now carries much more than loss and thr
 
 That is a meaningful architectural change from the earlier MLX port.
 
-## Subsystem 4: Data and Evaluation Substrate
+## Subsystem 5: Data and Evaluation Substrate
 
 ### Purpose
 
@@ -266,7 +313,7 @@ This subsystem keeps the training and calibration paths reproducible.
 
 ### Main files
 
-- `prepare_mlx.py`
+- `autoresearch_mlx/prepare.py`
 - `autoresearch_mlx/data.py`
 - `autoresearch_mlx/constants.py`
 
@@ -292,7 +339,7 @@ This layer used to look like a pure backend translation concern. It now matters 
 
 So the data plane is now part of the calibration substrate, not just a prerequisite for training.
 
-## Subsystem 5: Optional Local Sweep Tooling
+## Subsystem 6: Optional Local Sweep Tooling
 
 ### Purpose
 
@@ -339,11 +386,11 @@ That means this fork is no longer best described as "upstream, but on MLX." It i
 
 | Area | Upstream CUDA path | Current MLX path | Meaning |
 | --- | --- | --- | --- |
-| Training entry | Single mutable `train.py` | `train_mlx.py` plus MLX modules | Maintainability over single-file purity |
+| Training entry | Single mutable `train.py` | `autoresearch_mlx/train.py` plus MLX modules | Maintainability over single-file purity |
 | Hardware assumption | Fast NVIDIA GPU | Calibrated Apple Silicon workstation classes | Local hardware fit is explicit |
 | Eval policy | One heavy fixed final eval | `cheap/reference/full` rung ladder with confidence gates | Eval fidelity now scales with budget and trust |
 | Runtime trust model | Implicit | Hardware key, freshness, confidence, telemetry | Semantic drift is surfaced instead of hidden |
-| New-machine onboarding | Human decides what to try | `tools/calibrate_platform.py` finds a candidate default | Bring-up is part of the product |
+| New-machine onboarding | Human decides what to try | `calibrate.py` finds a candidate default | Bring-up is part of the product |
 | Promotion path | Human copies ideas manually | Promotion bundle emitted automatically | Measurement now points at adoption |
 | Long unattended sweeps | External/manual | Optional `tools/` local sweep layer | Useful, but no longer central |
 
@@ -367,10 +414,10 @@ Passive telemetry now feeds runtime trust, but the strongest policy promotion st
 
 The simplest correct way to think about the current repo is:
 
-- `prepare_mlx.py` makes the data plane reproducible
-- `train_mlx.py` runs the research loop
+- `autoresearch_mlx/prepare.py` makes the data plane reproducible
+- `autoresearch_mlx/train.py` runs the research loop
 - `eval_policy.py` decides how much evaluation fidelity the runtime is allowed to trust
 - `eval_telemetry.py` lets ordinary runs strengthen or age that trust
-- `calibrate_platform.py` is the one-button path that turns an unfamiliar machine into a measured default for the rest of the system
+- `calibrate.py` is the one-button path that turns an unfamiliar machine into a measured default for the rest of the system
 
 That is the current architecture. The port is no longer just an MLX training path. It is an MLX research platform with explicit machine bring-up.

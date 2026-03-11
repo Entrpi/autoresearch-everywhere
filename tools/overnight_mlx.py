@@ -3,7 +3,7 @@
 Round-robin overnight sweep runner for the MLX autoresearch port.
 
 This does not mutate code. It executes a curated set of M5-safe training shapes,
-captures per-run logs, and appends a compact summary to results.tsv.
+captures per-run logs, and appends a compact summary to results/results.tsv.
 """
 
 from __future__ import annotations
@@ -23,9 +23,9 @@ from typing import Iterable
 
 
 ROOT = Path(__file__).resolve().parent.parent
-TRAIN_SCRIPT = ROOT / "train_mlx.py"
+TRAIN_MODULE = "autoresearch_mlx.train"
 PYTHON_BIN = ROOT / ".venv" / "bin" / "python"
-RESULTS_FILE = ROOT / "results.tsv"
+RESULTS_FILE = ROOT / "results/results.tsv"
 ARTIFACTS_DIR = ROOT / "results" / "overnight"
 RESULTS_HEADER = ["commit", "val_bpb", "memory_gb", "status", "description"]
 SUMMARY_PATTERN = re.compile(r"^([a-z_]+):\s+(.+)$")
@@ -58,8 +58,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--duration-hours", type=float, default=8.0, help="Wall-clock duration for the sweep.")
     parser.add_argument("--max-experiments", type=int, help="Optional cap on the number of experiments.")
     parser.add_argument("--base-seed", type=int, default=1000, help="Seed assigned to the first run.")
-    parser.add_argument("--time-budget-override", type=float, help="Optional override for train_mlx.py --time-budget.")
-    parser.add_argument("--eval-tokens-override", type=int, help="Optional override for train_mlx.py --eval-tokens.")
+    parser.add_argument("--time-budget-override", type=float, help="Optional override for autoresearch_mlx.train --time-budget.")
+    parser.add_argument("--eval-tokens-override", type=int, help="Optional override for autoresearch_mlx.train --eval-tokens.")
     parser.add_argument("--dry-run", action="store_true", help="Print the plan and exit without running.")
     return parser.parse_args()
 
@@ -165,7 +165,7 @@ def write_json(path: Path, payload: dict) -> None:
 
 
 def experiment_command(experiment: Experiment, seed: int, args: argparse.Namespace) -> list[str]:
-    command = [str(PYTHON_BIN), str(TRAIN_SCRIPT), *experiment.args, "--seed", str(seed)]
+    command = [str(PYTHON_BIN), "-m", TRAIN_MODULE, *experiment.args, "--seed", str(seed)]
     if args.time_budget_override is not None:
         command.extend(["--time-budget", str(args.time_budget_override)])
     if args.eval_tokens_override is not None:

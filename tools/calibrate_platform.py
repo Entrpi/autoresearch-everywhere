@@ -4,44 +4,28 @@ from __future__ import annotations
 import argparse
 import json
 import math
-import platform
 import statistics
-import subprocess
 import sys
-import time
 from dataclasses import asdict, dataclass
 from datetime import date, datetime
 from pathlib import Path
-from types import SimpleNamespace
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from autoresearch_mlx.eval_policy import (  # noqa: E402
-    DEFAULT_EVAL_HARDWARE_KEY,
-    EVAL_POLICY_VERSION,
-    choose_auto_eval_decision,
-    find_eval_calibration,
-    detect_current_hardware_key,
-)
-from autoresearch_mlx.calibration_signature import (  # noqa: E402
-    current_eval_semantics_signature,
-    current_runtime_shape_signature,
-)
+from autoresearch_mlx.eval_policy import DEFAULT_EVAL_HARDWARE_KEY, EVAL_POLICY_VERSION, find_eval_calibration  # noqa: E402
 from autoresearch_mlx.eval_telemetry import summarize_eval_telemetry  # noqa: E402
-from autoresearch_mlx.constants import MAX_SEQ_LEN  # noqa: E402
-from train_mlx import PRESETS  # noqa: E402
-from tools.calibrate_eval_policy import (  # noqa: E402
-    default_eval_batch_size,
-    parse_summary,
-    run_eval_rungs,
+from autoresearch_platform.engines import (  # noqa: E402
+    DEFAULT_ENGINE_NAME,
+    HardwareFingerprint,
+    ProbeResult,
+    TrainingEngine,
+    available_engines,
+    get_engine,
 )
 
-
-PRESET_ORDER = ("m5-fast", "m5-balanced", "m5-large", "m5-xlarge", "upstream")
-DEFAULT_PLATFORM_PRESETS = ("m5-fast", "m5-balanced", "m5-large", "m5-xlarge")
 M5_REFERENCE_DEFAULT_PRESET = "m5-balanced"
 PLATFORM_CALIBRATION_SCHEMA_VERSION = 2
 
@@ -82,58 +66,6 @@ M5_TRAIN_REFERENCE = {
     "m5-large": {"steady_state_tok_per_sec": 14600.0, "peak_vram_mb": 1944.3},
     "m5-xlarge": {"steady_state_tok_per_sec": 7800.0, "peak_vram_mb": 4294.2},
 }
-
-
-@dataclass(frozen=True)
-class HardwareFingerprint:
-    hardware_key: str
-    platform: str
-    machine: str
-    processor: str
-    python_version: str
-    macos_version: str | None
-    mlx_version: str | None
-    unified_memory_bytes: int | None
-    unified_memory_gb: float | None
-    chip_model: str | None
-    gpu_cores: int | None
-
-
-@dataclass(frozen=True)
-class ProbeResult:
-    preset: str
-    stage: str
-    seq_len: int
-    depth: int
-    window_pattern: str
-    device_batch_size: int
-    total_batch_size: int
-    grad_accum_steps: int | None
-    status: str
-    returncode: int
-    wall_seconds: float
-    stdout_path: str
-    stderr_path: str
-    val_bpb: float | None = None
-    proxy_val_bpb: float | None = None
-    steady_state_tok_per_sec: float | None = None
-    peak_vram_mb: float | None = None
-    training_seconds: float | None = None
-    total_seconds: float | None = None
-    eval_percent: float | None = None
-    optimizer_percent: float | None = None
-    accum_percent: float | None = None
-    control_overhead_percent: float | None = None
-    canonical_rung: str | None = None
-    canonical_seq_len: int | None = None
-    canonical_tokens: int | None = None
-    canonical_batch: int | None = None
-    canonical_slices: int | None = None
-    eval_calibration_status: str | None = None
-    eval_calibration_effective_confidence: str | None = None
-    eval_calibration_freshness: str | None = None
-    eval_calibration_limited_by: str | None = None
-    error_tail: str | None = None
 
 
 @dataclass(frozen=True)
@@ -207,33 +139,9 @@ def save_phase(output_dir: Path, phase: str, *, inputs: dict, payload: dict) -> 
     return wrapped
 
 
-def command_label(parts: list[str]) -> str:
-    return "_".join(
-        part.replace("--", "").replace("/", "_").replace("=", "_").replace(",", "_")
-        for part in parts
-    )
-
-
-def run_command(cmd: list[str], *, logs_dir: Path, label: str) -> tuple[subprocess.CompletedProcess[str], float, Path, Path]:
-    stdout_path = logs_dir / f"{label}.stdout.log"
-    stderr_path = logs_dir / f"{label}.stderr.log"
-    started = time.perf_counter()
-    completed = subprocess.run(cmd, capture_output=True, text=True)
-    wall_seconds = time.perf_counter() - started
-    stdout_path.write_text(completed.stdout)
-    stderr_path.write_text(completed.stderr)
-    return completed, wall_seconds, stdout_path, stderr_path
-
-
-def infer_grad_accum(seq_len: int, device_batch_size: int, total_batch_size: int) -> int | None:
-    tokens_per_fwdbwd = seq_len * device_batch_size
-    if tokens_per_fwdbwd <= 0 or total_batch_size % tokens_per_fwdbwd != 0:
-        return None
-    return total_batch_size // tokens_per_fwdbwd
-
-
 def run_train_probe(
     *,
+    engine: TrainingEngine,
     preset: str,
     time_budget: float,
     logs_dir: Path,
@@ -246,226 +154,39 @@ def run_train_probe(
     total_batch_size: int | None = None,
     no_checkpoint: bool = True,
 ) -> ProbeResult:
-    preset_config = PRESETS[preset]
-    resolved_seq_len = seq_len if seq_len is not None else preset_config.seq_len
-    resolved_window = window_pattern if window_pattern is not None else preset_config.window_pattern
-    resolved_device_batch = device_batch_size if device_batch_size is not None else preset_config.device_batch_size
-    resolved_total_batch = total_batch_size if total_batch_size is not None else preset_config.total_batch_size
-    resolved_depth = preset_config.depth
-    grad_accum_steps = infer_grad_accum(resolved_seq_len, resolved_device_batch, resolved_total_batch)
-    if grad_accum_steps is None:
-        raise ValueError(
-            f"Invalid total batch {resolved_total_batch} for seq_len={resolved_seq_len}, "
-            f"device_batch_size={resolved_device_batch}"
-        )
-
-    cmd = [
-        sys.executable,
-        "train_mlx.py",
-        "--preset",
-        preset,
-        "--time-budget",
-        str(time_budget),
-        "--seq-len",
-        str(resolved_seq_len),
-        "--window-pattern",
-        resolved_window,
-        "--device-batch-size",
-        str(resolved_device_batch),
-        "--total-batch-size",
-        str(resolved_total_batch),
-    ]
-    if benchmark_skip_eval:
-        cmd.append("--benchmark-skip-eval")
-    if no_checkpoint:
-        cmd.append("--no-checkpoint")
-    if checkpoint_path is not None:
-        cmd.extend(["--checkpoint-path", str(checkpoint_path)])
-
-    label = command_label(
-        [
-            stage,
-            preset,
-            f"seq{resolved_seq_len}",
-            f"db{resolved_device_batch}",
-            f"tb{resolved_total_batch}",
-            resolved_window,
-        ]
-    )
-    completed, wall_seconds, stdout_path, stderr_path = run_command(cmd, logs_dir=logs_dir, label=label)
-    summary = parse_summary(completed.stdout) if completed.returncode == 0 else {}
-    error_tail = None
-    if completed.returncode != 0:
-        error_tail = "\n".join(completed.stderr.splitlines()[-12:])
-
-    return ProbeResult(
+    return engine.run_train_probe(
         preset=preset,
+        time_budget=time_budget,
+        logs_dir=logs_dir,
         stage=stage,
-        seq_len=resolved_seq_len,
-        depth=resolved_depth,
-        window_pattern=resolved_window,
-        device_batch_size=resolved_device_batch,
-        total_batch_size=resolved_total_batch,
-        grad_accum_steps=grad_accum_steps,
-        status="ok" if completed.returncode == 0 else "error",
-        returncode=completed.returncode,
-        wall_seconds=wall_seconds,
-        stdout_path=str(stdout_path),
-        stderr_path=str(stderr_path),
-        val_bpb=_get_float(summary, "val_bpb"),
-        proxy_val_bpb=_get_float(summary, "proxy_val_bpb"),
-        steady_state_tok_per_sec=_get_float(summary, "steady_state_tok_per_sec"),
-        peak_vram_mb=_get_float(summary, "peak_vram_mb"),
-        training_seconds=_get_float(summary, "training_seconds"),
-        total_seconds=_get_float(summary, "total_seconds"),
-        eval_percent=_get_float(summary, "eval_percent"),
-        optimizer_percent=_get_float(summary, "optimizer_percent"),
-        accum_percent=_get_float(summary, "accum_percent"),
-        control_overhead_percent=_control_overhead_percent(summary),
-        canonical_rung=_get_str(summary, "canonical_rung"),
-        canonical_seq_len=_get_int(summary, "canonical_seq_len"),
-        canonical_tokens=_get_int(summary, "canonical_tokens"),
-        canonical_batch=_get_int(summary, "canonical_batch"),
-        canonical_slices=_get_int(summary, "canonical_slices"),
-        eval_calibration_status=_get_str(summary, "eval_calibration_status"),
-        eval_calibration_effective_confidence=_get_str(summary, "eval_calibration_effective_confidence"),
-        eval_calibration_freshness=_get_str(summary, "eval_calibration_freshness"),
-        eval_calibration_limited_by=_get_str(summary, "eval_calibration_limited_by"),
-        error_tail=error_tail,
+        benchmark_skip_eval=benchmark_skip_eval,
+        checkpoint_path=checkpoint_path,
+        seq_len=seq_len,
+        window_pattern=window_pattern,
+        device_batch_size=device_batch_size,
+        total_batch_size=total_batch_size,
+        no_checkpoint=no_checkpoint,
     )
 
 
-def _get_float(summary: dict, key: str) -> float | None:
-    value = summary.get(key)
-    if value is None:
-        return None
-    try:
-        return float(value)
-    except (TypeError, ValueError):
-        return None
-
-
-def _get_int(summary: dict, key: str) -> int | None:
-    value = summary.get(key)
-    if value is None:
-        return None
-    try:
-        return int(value)
-    except (TypeError, ValueError):
-        return None
-
-
-def _get_str(summary: dict, key: str) -> str | None:
-    value = summary.get(key)
-    if value is None:
-        return None
-    text = str(value)
-    if text == "None":
-        return None
-    return text
-
-
-def _control_overhead_percent(summary: dict) -> float | None:
-    optimizer = _get_float(summary, "optimizer_percent")
-    accum = _get_float(summary, "accum_percent")
-    if optimizer is None and accum is None:
-        return None
-    return float(optimizer or 0.0) + float(accum or 0.0)
-
-
-def detect_hardware_fingerprint() -> HardwareFingerprint:
-    hardware_key = detect_current_hardware_key()
-    macos_version = None
-    mlx_version = None
-    memsize = None
-    chip_model = None
-    gpu_cores = None
-
-    if sys.platform == "darwin":
-        try:
-            macos_version = subprocess.run(
-                ["sw_vers", "-productVersion"],
-                check=True,
-                capture_output=True,
-                text=True,
-            ).stdout.strip()
-        except Exception:
-            macos_version = None
-        try:
-            memsize = int(
-                subprocess.run(
-                    ["sysctl", "-n", "hw.memsize"],
-                    check=True,
-                    capture_output=True,
-                    text=True,
-                ).stdout.strip()
-            )
-        except Exception:
-            memsize = None
-        try:
-            displays = subprocess.run(
-                ["system_profiler", "SPDisplaysDataType"],
-                check=True,
-                capture_output=True,
-                text=True,
-            ).stdout
-            import re
-
-            chip_match = re.search(r"Chipset Model:\s*(Apple\s+[A-Za-z0-9]+)", displays)
-            if chip_match is None:
-                chip_match = re.search(r"^(Apple\s+[A-Za-z0-9]+):\s*$", displays, re.MULTILINE)
-            gpu_match = re.search(r"Total Number of Cores:\s*(\d+)", displays)
-            if chip_match is not None:
-                chip_model = chip_match.group(1)
-            if gpu_match is not None:
-                gpu_cores = int(gpu_match.group(1))
-        except Exception:
-            pass
-
-    try:
-        import importlib.metadata
-
-        mlx_version = importlib.metadata.version("mlx")
-    except Exception:
-        mlx_version = None
-
-    unified_memory_gb = None
-    if memsize is not None:
-        unified_memory_gb = memsize / (1024**3)
-
-    return HardwareFingerprint(
-        hardware_key=hardware_key,
-        platform=platform.platform(),
-        machine=platform.machine(),
-        processor=platform.processor(),
-        python_version=platform.python_version(),
-        macos_version=macos_version,
-        mlx_version=mlx_version,
-        unified_memory_bytes=memsize,
-        unified_memory_gb=unified_memory_gb,
-        chip_model=chip_model,
-        gpu_cores=gpu_cores,
-    )
-
-
-def default_output_dir(*, hardware_key: str) -> Path:
+def default_output_dir(*, engine_name: str, hardware_key: str) -> Path:
     tag = current_timestamp_label()
-    return REPO_ROOT / "results" / "analysis" / f"platform_calibration_{hardware_key}_{tag}"
+    return REPO_ROOT / "results" / "analysis" / f"platform_calibration_{engine_name}_{hardware_key}_{tag}"
 
 
-def select_presets(requested: list[str]) -> list[str]:
-    allowed = [preset for preset in PRESET_ORDER if preset in PRESETS]
+def select_presets(engine: TrainingEngine, requested: list[str]) -> list[str]:
     if not requested:
-        return allowed
-    selected = [preset for preset in requested if preset in PRESETS]
-    missing = [preset for preset in requested if preset not in PRESETS]
+        return list(engine.default_platform_presets())
+    allowed = list(engine.preset_order())
+    selected = [preset for preset in requested if preset in engine.preset_catalog()]
+    missing = [preset for preset in requested if preset not in engine.preset_catalog()]
     if missing:
         raise ValueError(f"Unknown presets: {missing}")
     return selected
 
 
-def preset_index(preset: str) -> int:
-    return PRESET_ORDER.index(preset)
+def preset_index(engine: TrainingEngine, preset: str) -> int:
+    return engine.preset_order().index(preset)
 
 
 def resolve_mode_spec(mode: str) -> PlatformModeSpec:
@@ -487,23 +208,12 @@ def resolved_eval_rungs(value: list[str] | None, *, mode: str) -> list[str]:
     return list(resolve_mode_spec(mode).eval_rungs)
 
 
-def default_local_seq_lens(preset: str, *, mode: str) -> list[int]:
-    preset_config = PRESETS[preset]
-    if mode == MODE_FAST:
-        return [preset_config.seq_len]
-    candidates = [preset_config.seq_len]
-    doubled = min(MAX_SEQ_LEN, preset_config.seq_len * 2)
-    if doubled != preset_config.seq_len:
-        candidates.append(doubled)
-    return sorted(set(candidates))
+def default_local_seq_lens(engine: TrainingEngine, preset: str, *, mode: str) -> list[int]:
+    return engine.default_local_seq_lens(preset, mode=mode)
 
 
-def default_local_window_patterns(preset: str, *, mode: str) -> list[str]:
-    preset_config = PRESETS[preset]
-    patterns = [preset_config.window_pattern]
-    if mode == MODE_FULL and preset_config.window_pattern == "L" and preset_config.seq_len >= 1024:
-        patterns.append("SSSL")
-    return list(dict.fromkeys(patterns))
+def default_local_window_patterns(engine: TrainingEngine, preset: str, *, mode: str) -> list[str]:
+    return engine.default_local_window_patterns(preset, mode=mode)
 
 
 def estimate_eval_overhead_fraction(row: ProbeResult, ranking_time_budget: float) -> float:
@@ -566,15 +276,15 @@ def _pareto_front(flags: list[tuple[float, ...]]) -> list[bool]:
 def _memory_pressure_metrics(
     *,
     peak_vram_mb: float | None,
-    unified_memory_gb: float | None,
+    total_memory_gb: float | None,
     fallback_score: float,
 ) -> tuple[float, str, float, float]:
     if peak_vram_mb is None:
         return (None, "unknown", fallback_score, 0.1 * (1.0 - fallback_score))
-    if unified_memory_gb is None or unified_memory_gb <= 0:
+    if total_memory_gb is None or total_memory_gb <= 0:
         return (None, "relative-only", fallback_score, 0.1 * (1.0 - fallback_score))
 
-    total_memory_mb = unified_memory_gb * 1024.0
+    total_memory_mb = total_memory_gb * 1024.0
     memory_fraction = peak_vram_mb / max(total_memory_mb, 1e-9)
 
     if memory_fraction <= 0.50:
@@ -608,6 +318,7 @@ def _memory_pressure_metrics(
 def rank_candidate_families(
     rows: list[ProbeResult],
     *,
+    engine: TrainingEngine,
     hardware_key: str,
     hardware: HardwareFingerprint,
     ranking_time_budget: float,
@@ -615,8 +326,10 @@ def rank_candidate_families(
     candidates = [
         row
         for row in rows
-        if row.status == "ok" and row.preset != "upstream" and row.val_bpb is not None
+        if row.status == "ok" and row.preset != engine.reference_preset and row.val_bpb is not None
     ]
+    if not candidates:
+        candidates = [row for row in rows if row.status == "ok" and row.val_bpb is not None]
     if not candidates:
         raise RuntimeError("No successful ranking runs available to choose a candidate family.")
 
@@ -628,7 +341,7 @@ def rank_candidate_families(
     memory_metrics = [
         _memory_pressure_metrics(
             peak_vram_mb=candidates[index].peak_vram_mb,
-            unified_memory_gb=hardware.unified_memory_gb,
+            total_memory_gb=hardware.memory_gb,
             fallback_score=relative_memory_scores[index],
         )
         for index in range(len(candidates))
@@ -704,12 +417,14 @@ def rank_candidate_families(
 def choose_candidate_family(
     rows: list[ProbeResult],
     *,
+    engine: TrainingEngine,
     hardware_key: str,
     hardware: HardwareFingerprint,
     ranking_time_budget: float,
 ) -> RankedProbe:
     return rank_candidate_families(
         rows,
+        engine=engine,
         hardware_key=hardware_key,
         hardware=hardware,
         ranking_time_budget=ranking_time_budget,
@@ -779,43 +494,28 @@ def classify_zones(*, presets: list[str], candidate: RankedProbe, probe_by_prese
     return zones
 
 
-def local_batch_candidates(preset: str, *, seq_len: int) -> list[tuple[int, int]]:
-    preset_config = PRESETS[preset]
-    base_device_batch = preset_config.device_batch_size
-    base_tokens = base_device_batch * preset_config.seq_len
-    base_grad_accum = max(1, preset_config.total_batch_size // base_tokens)
-
-    device_batches = sorted({max(1, base_device_batch // 2), base_device_batch, base_device_batch * 2})
-    grad_accum_candidates = sorted({max(1, base_grad_accum // 2), base_grad_accum, base_grad_accum * 2})
-
-    combos: list[tuple[int, int]] = []
-    for device_batch in device_batches:
-        for grad_accum in grad_accum_candidates:
-            total_batch = device_batch * seq_len * grad_accum
-            combos.append((device_batch, total_batch))
-    return sorted(set(combos))
-
-
 def run_local_search(
     *,
+    engine: TrainingEngine,
     preset: str,
     time_budget: float,
     logs_dir: Path,
     seq_lens: list[int] | None,
     window_patterns: list[str] | None,
 ) -> list[ProbeResult]:
-    preset_config = PRESETS[preset]
+    preset_config = engine.preset_catalog()[preset]
     seq_candidates = seq_lens or [preset_config.seq_len]
     window_candidates = window_patterns or [preset_config.window_pattern]
     rows: list[ProbeResult] = []
     for seq_len in seq_candidates:
         for window_pattern in window_candidates:
-            for device_batch, total_batch in local_batch_candidates(preset, seq_len=seq_len):
+            for device_batch, total_batch in engine.local_batch_candidates(preset, seq_len=seq_len):
                 tokens_per_fwdbwd = seq_len * device_batch
                 if total_batch % tokens_per_fwdbwd != 0:
                     continue
                 rows.append(
                     run_train_probe(
+                        engine=engine,
                         preset=preset,
                         time_budget=time_budget,
                         logs_dir=logs_dir,
@@ -853,29 +553,6 @@ def select_best_local_row(rows: list[ProbeResult]) -> ProbeResult:
     return plateau_rows[0]
 
 
-def run_eval_calibration(
-    *,
-    preset: str,
-    checkpoint_dir: Path,
-    hardware_key: str,
-    rungs: list[str],
-    budget_seconds: list[float],
-    markdown_path: Path | None = None,
-) -> dict:
-    args = SimpleNamespace(
-        preset=preset,
-        checkpoint=str(checkpoint_dir),
-        seq_len=PRESETS[preset].canonical_eval_seq_len,
-        batch_size=default_eval_batch_size(PRESETS[preset].canonical_eval_seq_len),
-        rungs=rungs,
-        budget_seconds=budget_seconds,
-        hardware_key=hardware_key,
-        no_prepacked_cache=False,
-        markdown_out=str(markdown_path) if markdown_path is not None else None,
-    )
-    return run_eval_rungs(args)
-
-
 def compare_to_m5_reference(*, preset: str, eval_rows: list[dict], train_probe: ProbeResult) -> dict | None:
     reference = find_eval_calibration(preset, hardware_key=DEFAULT_EVAL_HARDWARE_KEY)
     train_reference = M5_TRAIN_REFERENCE.get(preset)
@@ -885,7 +562,7 @@ def compare_to_m5_reference(*, preset: str, eval_rows: list[dict], train_probe: 
     comparison = {
         "reference_preset": preset,
         "reference_hardware_key": DEFAULT_EVAL_HARDWARE_KEY,
-        "candidate_family_vs_m5_default": family_relation_to_m5(preset),
+        "candidate_family_vs_m5_default": family_relation_to_m5(get_engine(DEFAULT_ENGINE_NAME), preset),
         "rungs": {},
         "train_reference": train_reference,
     }
@@ -917,9 +594,11 @@ def compare_to_m5_reference(*, preset: str, eval_rows: list[dict], train_probe: 
     return comparison
 
 
-def family_relation_to_m5(preset: str) -> str:
-    current = preset_index(preset)
-    reference = preset_index(M5_REFERENCE_DEFAULT_PRESET)
+def family_relation_to_m5(engine: TrainingEngine, preset: str) -> str:
+    if preset not in engine.preset_order() or M5_REFERENCE_DEFAULT_PRESET not in engine.preset_order():
+        return "not-applicable"
+    current = preset_index(engine, preset)
+    reference = preset_index(engine, M5_REFERENCE_DEFAULT_PRESET)
     if current == reference:
         return "same-family"
     if current < reference:
@@ -964,20 +643,17 @@ def build_eval_calibration_row(
     measured_train_seconds: float,
     confidence: str | None,
     mode: str,
+    calibration_signatures: dict[str, str | None],
 ) -> dict:
-    current_signatures = {
-        "eval_semantics_signature": current_eval_semantics_signature(),
-        "runtime_shape_signature": current_runtime_shape_signature(),
-    }
     row_payload = {
         "key": f"{preset}_{hardware.hardware_key}",
-        "label": f"{preset} eval ladder on {hardware.chip_model or hardware.hardware_key}",
+        "label": f"{preset} eval ladder on {hardware.accelerator_model or hardware.hardware_key}",
         "hardware_key": hardware.hardware_key,
         "preset": preset,
         "seq_len": eval_payload["rows"][0]["seq_len"],
         "batch_size": eval_payload["rows"][0]["batch_size"],
         "source": (
-            f"Generated by tools/calibrate_platform.py on {hardware.hardware_key} "
+            f"Generated by calibrate.py on {hardware.hardware_key} "
             f"using mode={mode} from a {measured_train_seconds:g}s checkpoint."
         ),
         "policy_version": EVAL_POLICY_VERSION,
@@ -985,8 +661,8 @@ def build_eval_calibration_row(
         "measured_train_seconds": measured_train_seconds,
         "repeat_count": 1,
         "measured_on": date.today().isoformat(),
-        "eval_semantics_signature": current_signatures["eval_semantics_signature"],
-        "runtime_shape_signature": current_signatures["runtime_shape_signature"],
+        "eval_semantics_signature": calibration_signatures["eval_semantics_signature"],
+        "runtime_shape_signature": calibration_signatures["runtime_shape_signature"],
         "notes": "Promotion candidate emitted by the one-button platform bring-up tool.",
         "rungs": {},
     }
@@ -1039,6 +715,8 @@ def build_eval_calibration_snippet(row: dict) -> str:
 
 def build_platform_default_snippet(hardware_key: str, candidate_default: dict) -> str:
     payload = {
+        "engine": candidate_default["engine"],
+        "backend_family": candidate_default["backend_family"],
         "preset": candidate_default["preset"],
         "seq_len": candidate_default["seq_len"],
         "depth": candidate_default["depth"],
@@ -1060,14 +738,10 @@ def write_promotion_bundle(
     measured_train_seconds: float,
     confidence: str | None,
     mode: str,
+    calibration_signatures: dict[str, str | None],
 ) -> dict:
     promotion_dir = output_dir / "promotion"
     promotion_dir.mkdir(parents=True, exist_ok=True)
-    current_signatures = {
-        "eval_semantics_signature": current_eval_semantics_signature(),
-        "runtime_shape_signature": current_runtime_shape_signature(),
-    }
-
     eval_row = build_eval_calibration_row(
         preset=candidate_default["preset"],
         hardware=hardware,
@@ -1075,6 +749,7 @@ def write_promotion_bundle(
         measured_train_seconds=measured_train_seconds,
         confidence=confidence,
         mode=mode,
+        calibration_signatures=calibration_signatures,
     )
     missing_rungs = [rung for rung in ("cheap", "reference", "full") if rung not in eval_row["rungs"]]
     eval_calibration_promotable = len(missing_rungs) == 0 and all(
@@ -1111,8 +786,8 @@ def write_promotion_bundle(
                 "",
                 "This bundle contains the bring-up tool's promotion-ready artifacts.",
                 "",
-                f"- Eval semantics signature: `{current_signatures['eval_semantics_signature']}`",
-                f"- Runtime shape signature: `{current_signatures['runtime_shape_signature']}`",
+            f"- Eval semantics signature: `{calibration_signatures['eval_semantics_signature']}`",
+            f"- Runtime shape signature: `{calibration_signatures['runtime_shape_signature']}`",
                 f"- Platform default JSON: `{platform_default_json_path.name}`",
                 f"- Platform default Python fragment: `{platform_default_pyfrag_path.name}`",
                 f"- Eval calibration JSON: `{eval_row_json_path.name}`",
@@ -1135,8 +810,8 @@ def write_promotion_bundle(
         "readme": str(summary_path),
         "eval_calibration_key": eval_row["key"],
         "confidence": eval_row["confidence"],
-        "eval_semantics_signature": current_signatures["eval_semantics_signature"],
-        "runtime_shape_signature": current_signatures["runtime_shape_signature"],
+        "eval_semantics_signature": calibration_signatures["eval_semantics_signature"],
+        "runtime_shape_signature": calibration_signatures["runtime_shape_signature"],
     }
 
 
@@ -1183,6 +858,8 @@ def write_report(path: Path, *, payload: dict) -> None:
         "# Platform Calibration Report",
         "",
         f"- Generated: `{payload['generated_at']}`",
+        f"- Engine: `{fingerprint['engine']}`",
+        f"- Backend family: `{fingerprint['backend_family']}`",
         f"- Hardware key: `{fingerprint['hardware_key']}`",
         f"- Eval semantics signature: `{payload['calibration_signatures']['eval_semantics_signature']}`",
         f"- Runtime shape signature: `{payload['calibration_signatures']['runtime_shape_signature']}`",
@@ -1201,12 +878,20 @@ def write_report(path: Path, *, payload: dict) -> None:
         markdown_table(
             [fingerprint],
             [
+                ("engine", "Engine"),
+                ("backend_family", "Backend"),
                 ("hardware_key", "Hardware key"),
-                ("chip_model", "Chip"),
-                ("gpu_cores", "GPU cores"),
-                ("unified_memory_gb", "Unified memory (GB)"),
-                ("macos_version", "macOS"),
-                ("mlx_version", "MLX"),
+                ("accelerator_vendor", "Vendor"),
+                ("accelerator_model", "Accelerator"),
+                ("accelerator_architecture", "Architecture"),
+                ("accelerator_compute_capability", "Compute capability"),
+                ("accelerator_cores", "Accelerator cores"),
+                ("memory_gb", "Memory (GB)"),
+                ("os_version", "OS"),
+                ("runtime_version", "Runtime"),
+                ("driver_version", "Driver"),
+                ("attention_backend", "Attention backend"),
+                ("flash_attention_generation", "Preferred FA gen"),
                 ("python_version", "Python"),
             ],
         ),
@@ -1325,12 +1010,14 @@ def run_platform_calibration(args) -> dict:
     )
     eval_train_seconds = resolved_budget(args.eval_train_seconds, mode=mode, field="eval_train_seconds")
     eval_rungs = resolved_eval_rungs(args.eval_rungs, mode=mode)
-    presets = select_presets(args.presets)
-    hardware = detect_hardware_fingerprint()
-    output_dir = Path(args.output_dir) if args.output_dir else default_output_dir(hardware_key=hardware.hardware_key)
+    engine = get_engine(args.engine)
+    presets = select_presets(engine, args.presets)
+    hardware = engine.detect_hardware_fingerprint()
+    output_dir = Path(args.output_dir) if args.output_dir else default_output_dir(engine_name=engine.name, hardware_key=hardware.hardware_key)
     logs_dir = output_dir / "logs"
     output_dir.mkdir(parents=True, exist_ok=True)
     logs_dir.mkdir(parents=True, exist_ok=True)
+    calibration_signatures = engine.calibration_signatures()
 
     hardware_inputs = {
         "schema_version": PLATFORM_CALIBRATION_SCHEMA_VERSION,
@@ -1355,6 +1042,7 @@ def run_platform_calibration(args) -> dict:
     if coarse_phase is None:
         coarse_rows = [
             run_train_probe(
+                engine=engine,
                 preset=preset,
                 time_budget=coarse_time_budget,
                 logs_dir=logs_dir,
@@ -1376,10 +1064,12 @@ def run_platform_calibration(args) -> dict:
     ranking_presets = [
         row.preset
         for row in coarse_rows
-        if row.status == "ok" and row.preset != "upstream"
+        if row.status == "ok" and row.preset != engine.reference_preset
     ]
     if not ranking_presets:
-        raise RuntimeError("No successful non-reference presets were found during the coarse envelope.")
+        ranking_presets = [row.preset for row in coarse_rows if row.status == "ok"]
+    if not ranking_presets:
+        raise RuntimeError("No successful presets were found during the coarse envelope.")
 
     ranking_inputs = {
         "schema_version": PLATFORM_CALIBRATION_SCHEMA_VERSION,
@@ -1392,6 +1082,7 @@ def run_platform_calibration(args) -> dict:
     if ranking_phase is None:
         ranking_rows = [
             run_train_probe(
+                engine=engine,
                 preset=preset,
                 time_budget=ranking_time_budget,
                 logs_dir=logs_dir,
@@ -1403,6 +1094,7 @@ def run_platform_calibration(args) -> dict:
         ]
         ranked_candidates = rank_candidate_families(
             ranking_rows,
+            engine=engine,
             hardware_key=hardware.hardware_key,
             hardware=hardware,
             ranking_time_budget=ranking_time_budget,
@@ -1443,95 +1135,112 @@ def run_platform_calibration(args) -> dict:
     ]
     candidate_family = ranked_candidates[0]
 
-    local_seq_lens = args.local_seq_lens or default_local_seq_lens(candidate_family.probe.preset, mode=mode)
-    local_window_patterns = args.local_window_patterns or default_local_window_patterns(candidate_family.probe.preset, mode=mode)
-    local_inputs = {
-        "schema_version": PLATFORM_CALIBRATION_SCHEMA_VERSION,
-        "mode": mode,
-        "preset": candidate_family.probe.preset,
-        "time_budget": local_search_time_budget,
-        "seq_lens": local_seq_lens,
-        "window_patterns": local_window_patterns,
-    }
-    local_phase = load_phase_if_matching(output_dir, "local_search", local_inputs, force=args.force)
-    if local_phase is None:
-        local_rows = run_local_search(
-            preset=candidate_family.probe.preset,
-            time_budget=local_search_time_budget,
-            logs_dir=logs_dir,
-            seq_lens=local_seq_lens,
-            window_patterns=local_window_patterns,
-        )
-        best_local = select_best_local_row(local_rows)
-        local_phase = save_phase(
-            output_dir,
-            "local_search",
-            inputs=local_inputs,
-            payload={"time_budget": local_search_time_budget, "rows": [asdict(row) for row in local_rows], "winner": asdict(best_local)},
-        )
-    local_rows = [probe_from_dict(row) for row in local_phase["payload"]["rows"]]
-    best_local = probe_from_dict(local_phase["payload"]["winner"])
+    if engine.capabilities.supports_local_search:
+        local_seq_lens = args.local_seq_lens or default_local_seq_lens(engine, candidate_family.probe.preset, mode=mode)
+        local_window_patterns = args.local_window_patterns or default_local_window_patterns(engine, candidate_family.probe.preset, mode=mode)
+        local_inputs = {
+            "schema_version": PLATFORM_CALIBRATION_SCHEMA_VERSION,
+            "mode": mode,
+            "preset": candidate_family.probe.preset,
+            "time_budget": local_search_time_budget,
+            "seq_lens": local_seq_lens,
+            "window_patterns": local_window_patterns,
+        }
+        local_phase = load_phase_if_matching(output_dir, "local_search", local_inputs, force=args.force)
+        if local_phase is None:
+            local_rows = run_local_search(
+                engine=engine,
+                preset=candidate_family.probe.preset,
+                time_budget=local_search_time_budget,
+                logs_dir=logs_dir,
+                seq_lens=local_seq_lens,
+                window_patterns=local_window_patterns,
+            )
+            best_local = select_best_local_row(local_rows)
+            local_phase = save_phase(
+                output_dir,
+                "local_search",
+                inputs=local_inputs,
+                payload={"time_budget": local_search_time_budget, "rows": [asdict(row) for row in local_rows], "winner": asdict(best_local)},
+            )
+        local_rows = [probe_from_dict(row) for row in local_phase["payload"]["rows"]]
+        best_local = probe_from_dict(local_phase["payload"]["winner"])
+    else:
+        local_rows = [candidate_family.probe]
+        best_local = candidate_family.probe
 
     candidate_checkpoint = output_dir / "candidate_checkpoint"
-    candidate_checkpoint.parent.mkdir(parents=True, exist_ok=True)
-    checkpoint_inputs = {
-        "schema_version": PLATFORM_CALIBRATION_SCHEMA_VERSION,
-        "mode": mode,
-        "preset": candidate_family.probe.preset,
-        "time_budget": eval_train_seconds,
-        "seq_len": best_local.seq_len,
-        "window_pattern": best_local.window_pattern,
-        "device_batch_size": best_local.device_batch_size,
-        "total_batch_size": best_local.total_batch_size,
-    }
-    checkpoint_phase = load_phase_if_matching(output_dir, "candidate_checkpoint", checkpoint_inputs, force=args.force)
-    checkpoint_meta = candidate_checkpoint / "checkpoint.json"
-    if checkpoint_phase is None or not checkpoint_meta.exists():
-        checkpoint_probe = run_train_probe(
-            preset=candidate_family.probe.preset,
-            time_budget=eval_train_seconds,
-            logs_dir=logs_dir,
-            stage="candidate-checkpoint",
-            benchmark_skip_eval=True,
-            checkpoint_path=candidate_checkpoint,
-            seq_len=best_local.seq_len,
-            window_pattern=best_local.window_pattern,
-            device_batch_size=best_local.device_batch_size,
-            total_batch_size=best_local.total_batch_size,
-            no_checkpoint=False,
-        )
-        if checkpoint_probe.status != "ok":
-            raise RuntimeError("Candidate checkpoint run failed; see logs in the output directory.")
-        checkpoint_phase = save_phase(
-            output_dir,
-            "candidate_checkpoint",
-            inputs=checkpoint_inputs,
-            payload=asdict(checkpoint_probe),
-        )
-    checkpoint_probe = probe_from_dict(checkpoint_phase["payload"])
+    checkpoint_probe = best_local
+    if engine.capabilities.supports_checkpoint_mint:
+        candidate_checkpoint.parent.mkdir(parents=True, exist_ok=True)
+        checkpoint_inputs = {
+            "schema_version": PLATFORM_CALIBRATION_SCHEMA_VERSION,
+            "mode": mode,
+            "preset": candidate_family.probe.preset,
+            "time_budget": eval_train_seconds,
+            "seq_len": best_local.seq_len,
+            "window_pattern": best_local.window_pattern,
+            "device_batch_size": best_local.device_batch_size,
+            "total_batch_size": best_local.total_batch_size,
+        }
+        checkpoint_phase = load_phase_if_matching(output_dir, "candidate_checkpoint", checkpoint_inputs, force=args.force)
+        checkpoint_meta = candidate_checkpoint / "checkpoint.json"
+        if checkpoint_phase is None or not checkpoint_meta.exists():
+            checkpoint_probe = run_train_probe(
+                engine=engine,
+                preset=candidate_family.probe.preset,
+                time_budget=eval_train_seconds,
+                logs_dir=logs_dir,
+                stage="candidate-checkpoint",
+                benchmark_skip_eval=True,
+                checkpoint_path=candidate_checkpoint,
+                seq_len=best_local.seq_len,
+                window_pattern=best_local.window_pattern,
+                device_batch_size=best_local.device_batch_size,
+                total_batch_size=best_local.total_batch_size,
+                no_checkpoint=False,
+            )
+            if checkpoint_probe.status != "ok":
+                raise RuntimeError("Candidate checkpoint run failed; see logs in the output directory.")
+            checkpoint_phase = save_phase(
+                output_dir,
+                "candidate_checkpoint",
+                inputs=checkpoint_inputs,
+                payload=asdict(checkpoint_probe),
+            )
+        checkpoint_probe = probe_from_dict(checkpoint_phase["payload"])
 
-    eval_markdown_path = output_dir / "eval_rungs.md"
-    eval_inputs = {
-        "schema_version": PLATFORM_CALIBRATION_SCHEMA_VERSION,
-        "mode": mode,
-        "preset": candidate_family.probe.preset,
-        "checkpoint": str(candidate_checkpoint),
-        "hardware_key": hardware.hardware_key,
-        "rungs": eval_rungs,
-        "budget_seconds": args.eval_budget_seconds,
-    }
-    eval_phase = load_phase_if_matching(output_dir, "eval_calibration", eval_inputs, force=args.force)
-    if eval_phase is None:
-        eval_payload = run_eval_calibration(
-            preset=candidate_family.probe.preset,
-            checkpoint_dir=candidate_checkpoint,
-            hardware_key=hardware.hardware_key,
-            rungs=eval_rungs,
-            budget_seconds=args.eval_budget_seconds,
-            markdown_path=eval_markdown_path,
-        )
-        eval_phase = save_phase(output_dir, "eval_calibration", inputs=eval_inputs, payload=eval_payload)
-    eval_payload = eval_phase["payload"]
+    if engine.capabilities.supports_eval_calibration and engine.capabilities.supports_checkpoint_mint:
+        eval_markdown_path = output_dir / "eval_rungs.md"
+        eval_inputs = {
+            "schema_version": PLATFORM_CALIBRATION_SCHEMA_VERSION,
+            "mode": mode,
+            "preset": candidate_family.probe.preset,
+            "checkpoint": str(candidate_checkpoint),
+            "hardware_key": hardware.hardware_key,
+            "rungs": eval_rungs,
+            "budget_seconds": args.eval_budget_seconds,
+        }
+        eval_phase = load_phase_if_matching(output_dir, "eval_calibration", eval_inputs, force=args.force)
+        if eval_phase is None:
+            eval_payload = engine.run_eval_calibration(
+                preset=candidate_family.probe.preset,
+                checkpoint_dir=candidate_checkpoint,
+                hardware_key=hardware.hardware_key,
+                rungs=eval_rungs,
+                budget_seconds=args.eval_budget_seconds,
+                markdown_path=eval_markdown_path,
+            )
+            eval_phase = save_phase(output_dir, "eval_calibration", inputs=eval_inputs, payload=eval_payload)
+        eval_payload = eval_phase["payload"]
+    else:
+        eval_payload = {
+            "mode": "eval-calibration-unsupported",
+            "preset": candidate_family.probe.preset,
+            "hardware_key": hardware.hardware_key,
+            "engine": engine.name,
+            "rows": [],
+        }
 
     zone_probe_by_preset = dict(coarse_by_preset)
     zone_probe_by_preset.update({item.probe.preset: item.probe for item in ranked_candidates})
@@ -1543,6 +1252,8 @@ def run_platform_calibration(args) -> dict:
 
     candidate_telemetry = telemetry_for_preset(candidate_family.probe.preset, hardware_key=hardware.hardware_key)
     candidate_default = {
+        "engine": engine.name,
+        "backend_family": engine.backend_family,
         "preset": candidate_family.probe.preset,
         "seq_len": best_local.seq_len,
         "depth": best_local.depth,
@@ -1550,9 +1261,13 @@ def run_platform_calibration(args) -> dict:
         "device_batch_size": best_local.device_batch_size,
         "total_batch_size": best_local.total_batch_size,
         "grad_accum_steps": best_local.grad_accum_steps,
-        "eval_semantics_signature": current_eval_semantics_signature(),
-        "runtime_shape_signature": current_runtime_shape_signature(),
-        "family_relation_to_m5": family_relation_to_m5(candidate_family.probe.preset),
+        "eval_semantics_signature": calibration_signatures["eval_semantics_signature"],
+        "runtime_shape_signature": calibration_signatures["runtime_shape_signature"],
+        "family_relation_to_m5": (
+            family_relation_to_m5(engine, candidate_family.probe.preset)
+            if engine.name == DEFAULT_ENGINE_NAME and M5_REFERENCE_DEFAULT_PRESET in engine.preset_order()
+            else "not-applicable"
+        ),
         "selection_method": "primary-frontier-with-memory-pressure",
         "selection_confidence": {
             "eval_calibration_effective_confidence": candidate_family.effective_confidence,
@@ -1582,25 +1297,31 @@ def run_platform_calibration(args) -> dict:
             "local_search_peak_vram_mb": best_local.peak_vram_mb,
         },
     }
-    promotion_bundle = write_promotion_bundle(
-        output_dir=output_dir,
-        hardware=hardware,
-        candidate_default=candidate_default,
-        eval_payload=eval_payload,
-        measured_train_seconds=eval_train_seconds,
-        confidence=candidate_family.effective_confidence,
-        mode=mode,
-    )
+    if engine.capabilities.supports_eval_calibration and engine.capabilities.supports_checkpoint_mint:
+        promotion_bundle = write_promotion_bundle(
+            output_dir=output_dir,
+            hardware=hardware,
+            candidate_default=candidate_default,
+            eval_payload=eval_payload,
+            measured_train_seconds=eval_train_seconds,
+            confidence=candidate_family.effective_confidence,
+            mode=mode,
+            calibration_signatures=calibration_signatures,
+        )
+    else:
+        promotion_bundle = {
+            "dir": None,
+            "platform_default_promotable": True,
+            "eval_calibration_promotable": False,
+            "unsupported_reason": f"{engine.name} engine does not support checkpoint-backed eval calibration yet.",
+        }
 
     payload = {
         "generated_at": datetime.now().astimezone().isoformat(timespec="seconds"),
         "schema_version": PLATFORM_CALIBRATION_SCHEMA_VERSION,
         "output_dir": str(output_dir),
         "mode": mode,
-        "calibration_signatures": {
-            "eval_semantics_signature": current_eval_semantics_signature(),
-            "runtime_shape_signature": current_runtime_shape_signature(),
-        },
+        "calibration_signatures": calibration_signatures,
         "hardware_fingerprint": asdict(hardware),
         "coarse_envelope": {
             "time_budget": coarse_time_budget,
@@ -1626,7 +1347,7 @@ def run_platform_calibration(args) -> dict:
                 preset=candidate_family.probe.preset,
                 eval_rows=eval_payload["rows"],
                 train_probe=best_local,
-            ),
+            ) if engine.name == DEFAULT_ENGINE_NAME else None,
             "upstream_style": compare_to_upstream_reference(
                 candidate=best_local,
                 coarse_by_preset=coarse_by_preset,
@@ -1647,6 +1368,12 @@ def build_parser() -> argparse.ArgumentParser:
         description="One-button platform bring-up calibration for new hardware."
     )
     parser.add_argument(
+        "--engine",
+        choices=available_engines(),
+        default=DEFAULT_ENGINE_NAME,
+        help="Training/calibration engine to use for bring-up. MLX is the full-featured default; CUDA is available as a narrower reference engine.",
+    )
+    parser.add_argument(
         "--mode",
         choices=(MODE_FAST, MODE_FULL),
         default=MODE_FULL,
@@ -1655,8 +1382,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--presets",
         type=parse_string_list,
-        default=list(DEFAULT_PLATFORM_PRESETS),
-        help="Comma-separated preset list to consider. Defaults to the practical shipped MLX preset families; add upstream explicitly when you want the slow upstream-style reference in the bring-up run.",
+        default=None,
+        help="Comma-separated preset list to consider. Defaults come from the selected engine.",
     )
     parser.add_argument(
         "--coarse-time-budget",
