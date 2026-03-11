@@ -29,7 +29,47 @@ On this hardware, the default canonical matched benchmark window for optimizatio
 
 ## Latest
 
-### New commit — lab: add MLX integration A/B path for directly wired targets — score `4` — complexity `8`
+### New commit — lab: default MLX integration tests to the calibrated platform point — score `4` — complexity `7`
+
+**Human-directed, AI-shaped (4)**
+
+- Made the MLX lab default its real trainer-side checks to the calibrated platform default for the current device, so promotion and integration tests exercise the machine’s actual recommended starting point instead of relying on hand-pinned presets.
+  - Meaning: beyond smoke checks, `promotion-check` and `integration-ab` now behave like the rest of the platform story. They can discover the calibrated default for the current hardware, use it automatically, and reject stale cached defaults whose signatures no longer match the current code.
+  - Motivation: once trainer-side integration A/B existed, the remaining gap was practical consistency. Real kernel promotion work should usually run against the device’s calibrated point, not against whichever preset happened to be typed into a command.
+  - Purpose: keep kernel-lab integration evidence aligned with the same machine-specific default-selection flow used by `calibrate.py`, while still allowing explicit preset overrides for smoke or deliberately targeted tests.
+  - Added a shared platform-default cache and write path so `calibrate.py` persists the latest candidate default for `engine x hardware_key`.
+  - Made MLX `promotion-check` and `integration-ab` resolve the current calibrated default automatically when `--preset` is omitted, with clear fallback errors when no cache exists or the cached signatures are stale.
+  - Updated the docs so the lab workflow now presents manual preset pinning as the exception rather than the normal path.
+
+**Grounding**
+
+- Files:
+  - `CHANGELOG.md`
+  - `README.md`
+  - `program.md`
+  - `docs/kernel-lab.md`
+  - `docs/mlx-port-architecture.md`
+  - `docs/platform-calibration.md`
+  - `docs/preset-calibration.md`
+  - `autoresearch_lab/labs.py`
+  - `autoresearch_mlx/lab.py`
+  - `autoresearch_mlx/lab_workspace.py`
+  - `autoresearch_platform/platform_defaults.py`
+  - `tools/calibrate_platform.py`
+- Validation:
+  - `python3 -m py_compile autoresearch_platform/platform_defaults.py autoresearch_lab/labs.py autoresearch_mlx/lab.py autoresearch_mlx/lab_workspace.py tools/calibrate_platform.py`
+  - `./.venv/bin/python calibrate.py --engine mlx --mode fast --coarse-time-budget 0.5 --ranking-time-budget 0.5 --local-search-time-budget 0.5 --eval-train-seconds 0.5 --eval-rungs cheap,reference --output-dir /tmp/autoresearch_mlx_postfix_fast`
+  - `./.venv/bin/python kernel-lab.py --engine mlx promotion-check --target logits_softcap --workspace /tmp/mlx-logits-integration`
+  - `./.venv/bin/python kernel-lab.py --engine mlx integration-ab --workspace /tmp/mlx-logits-integration --time-budget 2 --benchmark-skip-eval --no-checkpoint`
+  - `python3 tools/changelog_scores.py --group-by entry --format csv --include-latest --verify`
+- Measurements:
+  - A fresh MLX bring-up now writes `/Users/ent/.cache/autoresearch/platform_defaults/mlx/apple-m5-32gb-10gpu.json`.
+  - With no `--preset`, `promotion-check` resolved `preset=m5-fast` with `preset_source=calibrated-platform-default`.
+  - A no-preset `integration-ab` run against `logits_softcap` was recorded against the calibrated point and kept the target in `integration-mixed`, which is the intended conservative behavior.
+
+## Committed History
+
+### March 12, 2026 — `89df91f` — lab: Add MLX trainer integration A/B workflow — score `4` — complexity `8`
 
 **Human-directed, AI-shaped (4)**
 
@@ -75,8 +115,6 @@ On this hardware, the default canonical matched benchmark window for optimizatio
   - `promotion-check` now reports:
     - `logits_softcap -> integration-mixed`
     - `block_prelude -> needs-integration-adapter`
-
-## Committed History
 
 ### March 12, 2026 — `00eecef` — lab: Add trace reviews, evidence summaries, and promotion checks — score `4` — complexity `8`
 

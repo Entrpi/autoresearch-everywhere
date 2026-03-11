@@ -25,6 +25,7 @@ from autoresearch_platform.engines import (  # noqa: E402
     available_engines,
     get_engine,
 )
+from autoresearch_platform.platform_defaults import write_platform_default_cache  # noqa: E402
 
 M5_REFERENCE_DEFAULT_PRESET = "m5-balanced"
 PLATFORM_CALIBRATION_SCHEMA_VERSION = 2
@@ -769,6 +770,14 @@ def write_promotion_bundle(
     platform_default_pyfrag_path.write_text(
         build_platform_default_snippet(hardware.hardware_key, candidate_default)
     )
+    cached_platform_default_path = write_platform_default_cache(
+        engine_name=hardware.engine,
+        hardware_key=hardware.hardware_key,
+        candidate_default=candidate_default,
+        generated_at=datetime.now().astimezone().isoformat(timespec="seconds"),
+        source_output_dir=str(output_dir),
+        source_report=str(output_dir / "report.md"),
+    )
     write_json(eval_row_json_path, eval_row)
     if eval_calibration_promotable:
         eval_row_pyfrag_path.write_text(build_eval_calibration_snippet(eval_row))
@@ -790,6 +799,7 @@ def write_promotion_bundle(
             f"- Runtime shape signature: `{calibration_signatures['runtime_shape_signature']}`",
                 f"- Platform default JSON: `{platform_default_json_path.name}`",
                 f"- Platform default Python fragment: `{platform_default_pyfrag_path.name}`",
+                f"- Cached platform default: `{cached_platform_default_path}`",
                 f"- Eval calibration JSON: `{eval_row_json_path.name}`",
                 f"- Eval calibration Python fragment: `{eval_row_pyfrag_path.name}`",
                 f"- Eval calibration promotable now: `{str(eval_calibration_promotable).lower()}`",
@@ -802,6 +812,7 @@ def write_promotion_bundle(
         "dir": str(promotion_dir),
         "platform_default_json": str(platform_default_json_path),
         "platform_default_pyfrag": str(platform_default_pyfrag_path),
+        "platform_default_cache": str(cached_platform_default_path),
         "platform_default_promotable": True,
         "eval_calibration_json": str(eval_row_json_path),
         "eval_calibration_pyfrag": str(eval_row_pyfrag_path),

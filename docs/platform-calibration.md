@@ -70,6 +70,8 @@ That command may take a long time, but it now leaves behind:
 
 Those outputs are now also stamped with runtime and eval signatures, so the report can be interpreted as "valid for this code state on this hardware," not just "valid for this hardware forever." But those signatures are only the conservative floor. The real policy is still to rerun proactively when the findings indicate likely cross-shape or cross-hardware impact.
 
+The bring-up flow also writes the candidate default into a stable local cache keyed by `engine x hardware_key`. Other systems, especially `kernel-lab.py`, use that cached default as the normal non-smoke operating point for the current device.
+
 ## Relationship To The Current Tooling
 
 The current stack already provides most of the underlying pieces:

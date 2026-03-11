@@ -165,15 +165,15 @@ class KernelLab(Protocol):
     def summarize_evidence(self, *, target: str, preset: str | None = None) -> LabEvidenceResult:
         ...
 
-    def promotion_check(self, *, target: str, preset: str, workspace: Path | None = None) -> LabPromotionCheck:
+    def promotion_check(self, *, target: str, preset: str | None = None, workspace: Path | None = None) -> LabPromotionCheck:
         ...
 
     def run_integration_ab(
         self,
         *,
         workspace: Path,
-        preset: str,
         time_budget: float,
+        preset: str | None = None,
         benchmark_skip_eval: bool = True,
         no_checkpoint: bool = True,
     ) -> LabIntegrationABResult:

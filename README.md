@@ -46,6 +46,8 @@ The report includes:
 - lower / recommended / upper / reference zones
 - machine-readable artifacts for later promotion or re-checking
 
+It also writes the candidate default into the local platform-default cache for that engine and hardware key. After that, real kernel-lab integration tests can use the calibrated point for the current device automatically instead of requiring a manual preset every time.
+
 By default, the bring-up sweep only considers the practical MLX preset families (`m5-fast` through `m5-xlarge`). Add `--presets ...,upstream` only when you explicitly want the slower upstream-style reference included in the same run.
 On Apple Silicon, `prepare.py`, `train.py`, and `calibrate.py` default to the MLX engine automatically. `--engine cuda` is available too. CUDA already exceeds the original upstream path in structure and runtime-awareness here, but MLX is still the only engine with the full evaluation-calibration and default-promotion flow today.
 
@@ -125,13 +127,13 @@ Today the lab is intentionally narrow and MLX-first:
 - `uv run kernel-lab.py --engine mlx profile --preset m5-balanced --top-k 8 --output /tmp/mlx-profile.json`
 - `uv run kernel-lab.py --engine mlx orchestrate --profile /tmp/mlx-profile.json --workspace-root /tmp/mlx-lab`
 - `uv run kernel-lab.py --engine mlx evidence --target block_prelude --preset m5-balanced`
-- `uv run kernel-lab.py --engine mlx promotion-check --target block_prelude --preset m5-balanced`
+- `uv run kernel-lab.py --engine mlx promotion-check --target block_prelude`
 - `uv run kernel-lab.py --engine mlx init --target rmsnorm --workspace /tmp/mlx-rmsnorm-lab`
 - `uv run kernel-lab.py --engine mlx bench --workspace /tmp/mlx-rmsnorm-lab`
 - `uv run kernel-lab.py --engine mlx verify --workspace /tmp/mlx-rmsnorm-lab --quick`
 - `uv run kernel-lab.py --engine mlx capture --workspace /tmp/mlx-rmsnorm-lab --output /tmp/mlx-rmsnorm-lab.gputrace --quick`
 - `uv run kernel-lab.py --engine mlx review-trace --workspace /tmp/mlx-rmsnorm-lab --metadata /tmp/mlx-rmsnorm-lab.metadata.json --relevance high`
-- `uv run kernel-lab.py --engine mlx integration-ab --workspace /tmp/mlx-rmsnorm-lab --preset m5-fast --time-budget 20 --benchmark-skip-eval --no-checkpoint`
+- `uv run kernel-lab.py --engine mlx integration-ab --workspace /tmp/mlx-rmsnorm-lab --time-budget 20 --benchmark-skip-eval --no-checkpoint`
 
 The lab now has two layers on purpose:
 
@@ -151,6 +153,7 @@ The extra commands make that visible:
 
 - `evidence` summarizes the current ledger state for one target/preset
 - `promotion-check` says whether a target is still gathering evidence, ready for an end-to-end integration A/B, mixed after repeated A/B runs, or already validated strongly enough to move toward a real trainer patch
+- if you omit `--preset`, `promotion-check` and `integration-ab` use the calibrated platform default for the current device; only smoke or deliberately targeted tests should usually pin a different preset by hand
 - `review-trace` lets a human or agent record whether a trace showed strong, weak, or negligible end-to-end relevance, so ranking can move down as well as up
 - `integration-ab` runs a real trainer-side baseline-vs-candidate comparison for the subset of targets that already have direct MLX integration hooks
 
@@ -276,10 +279,10 @@ Current project snapshot from [CHANGELOG.md](CHANGELOG.md):
 
 | Metric | Value |
 | --- | --- |
-| Mean autonomy score | `3.38 / 6` |
-| Mean complexity | `7.34 / commit` |
-| Mean score per top-level bullet | `3.44 / 6` |
-| History covered | `47` commits across `12` subsystems |
+| Mean autonomy score | `3.39 / 6` |
+| Mean complexity | `7.33 / commit` |
+| Mean score per top-level bullet | `3.45 / 6` |
+| History covered | `48` commits across `12` subsystems |
 <!-- autonomy-golf-snapshot:end -->
 
 Refresh with:

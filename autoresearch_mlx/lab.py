@@ -54,7 +54,10 @@ def build_parser() -> argparse.ArgumentParser:
         help="Check whether a target is ready for an end-to-end integration A/B",
     )
     promotion_parser.add_argument("--target", required=True)
-    promotion_parser.add_argument("--preset", required=True)
+    promotion_parser.add_argument(
+        "--preset",
+        help="Override the preset to check. If omitted, use the calibrated platform default for this device.",
+    )
     promotion_parser.add_argument("--workspace")
 
     integration_parser = subparsers.add_parser(
@@ -62,7 +65,10 @@ def build_parser() -> argparse.ArgumentParser:
         help="Run a real MLX training A/B for a directly integrable lab target",
     )
     integration_parser.add_argument("--workspace", required=True)
-    integration_parser.add_argument("--preset", required=True)
+    integration_parser.add_argument(
+        "--preset",
+        help="Override the preset to test. If omitted, use the calibrated platform default for this device.",
+    )
     integration_parser.add_argument("--time-budget", type=float, default=20.0)
     integration_parser.add_argument("--benchmark-skip-eval", action="store_true")
     integration_parser.add_argument("--no-checkpoint", action="store_true")

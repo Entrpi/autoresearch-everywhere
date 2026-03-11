@@ -81,8 +81,10 @@ That writes:
 Run a real end-to-end trainer A/B for a directly integrated target:
 
 ```bash
-uv run kernel-lab.py --engine mlx integration-ab --workspace /tmp/mlx-lab/block-pipeline --preset m5-fast --time-budget 20 --benchmark-skip-eval --no-checkpoint
+uv run kernel-lab.py --engine mlx integration-ab --workspace /tmp/mlx-lab/block-pipeline --time-budget 20 --benchmark-skip-eval --no-checkpoint
 ```
+
+If `--preset` is omitted, the lab uses the calibrated platform default for the current device. That is the normal path once `calibrate.py` has been run on the machine. Pass `--preset` explicitly only when you are doing a smoke check or intentionally targeting a non-default operating point.
 
 For now the MLX lab is deliberately narrow, but it is no longer just `init + bench`:
 
@@ -133,7 +135,7 @@ For the current MLX lab, only a subset of targets has a direct trainer-side inte
 You can ask for that decision directly:
 
 ```bash
-uv run kernel-lab.py --engine mlx promotion-check --target block_prelude --preset m5-balanced
+uv run kernel-lab.py --engine mlx promotion-check --target block_prelude
 ```
 
 Once `integration-ab` has run, the ledger can now distinguish:

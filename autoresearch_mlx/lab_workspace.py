@@ -28,6 +28,11 @@ from autoresearch_lab.labs import (
     LabTraceResult,
     LabTarget,
 )
+from autoresearch_mlx.calibration_signature import (
+    current_eval_semantics_signature,
+    current_runtime_shape_signature,
+)
+from autoresearch_mlx.eval_policy import detect_current_hardware_key
 from autoresearch_mlx.lab_integration import integration_environment, supports_direct_integration
 from autoresearch_mlx.lab_profile import (
     extract_from_profile,
@@ -35,6 +40,7 @@ from autoresearch_mlx.lab_profile import (
     profile_mlx_targets,
 )
 from autoresearch_mlx.lab_trace import capture_workspace_trace
+from autoresearch_platform.platform_defaults import load_platform_default_cache
 from tools.calibrate_eval_policy import parse_summary
 
 
@@ -2101,6 +2107,39 @@ class MLXKernelLab:
     def capture_workspace(self, *, workspace: Path, output: Path, quick: bool = False) -> LabTraceResult:
         return capture_workspace_trace(workspace=workspace, output=output, quick=quick)
 
+    @staticmethod
+    def _resolve_runtime_preset(preset: str | None) -> tuple[str, str, dict | None]:
+        if preset is not None:
+            return preset, "manual", None
+        hardware_key = detect_current_hardware_key()
+        cached = load_platform_default_cache(engine_name="mlx", hardware_key=hardware_key)
+        if cached is None:
+            raise ValueError(
+                "No calibrated MLX platform default was found for this device. "
+                "Run `uv run calibrate.py --engine mlx --mode fast` first, or pass --preset explicitly."
+            )
+        candidate = cached.candidate_default
+        if candidate.get("eval_semantics_signature") != current_eval_semantics_signature() or candidate.get(
+            "runtime_shape_signature"
+        ) != current_runtime_shape_signature():
+            raise ValueError(
+                "The cached MLX platform default for this device no longer matches the current code signatures. "
+                "Rerun `uv run calibrate.py --engine mlx --mode fast`, or pass --preset explicitly."
+            )
+        resolved = candidate.get("preset")
+        if not isinstance(resolved, str) or not resolved:
+            raise ValueError(
+                "The cached MLX platform default for this device is malformed. "
+                "Rerun `uv run calibrate.py --engine mlx --mode fast`."
+            )
+        return resolved, "calibrated-platform-default", {
+            "hardware_key": hardware_key,
+            "generated_at": cached.generated_at,
+            "source_output_dir": cached.source_output_dir,
+            "source_report": cached.source_report,
+            "candidate_default": candidate,
+        }
+
     def summarize_evidence(self, *, target: str, preset: str | None = None) -> LabEvidenceResult:
         summary = summarize_lab_evidence(
             engine="mlx",
@@ -2117,12 +2156,13 @@ class MLXKernelLab:
             details=asdict(summary),
         )
 
-    def promotion_check(self, *, target: str, preset: str, workspace: Path | None = None) -> LabPromotionCheck:
+    def promotion_check(self, *, target: str, preset: str | None = None, workspace: Path | None = None) -> LabPromotionCheck:
+        resolved_preset, preset_source, preset_context = self._resolve_runtime_preset(preset)
         summary = summarize_lab_evidence(
             engine="mlx",
             backend_family="mlx",
             target=target,
-            preset=preset,
+            preset=resolved_preset,
         )
         chosen_workspace = workspace.expanduser() if workspace is not None else None
         if chosen_workspace is None and summary.last_workspace is not None:
@@ -2161,9 +2201,10 @@ class MLXKernelLab:
             )
         elif summary.promotion_status == "ready-for-integration-test" and chosen_workspace is not None:
             status = "ready-for-integration-ab"
-            commands = (
-                f"uv run kernel-lab.py --engine mlx integration-ab --workspace {chosen_workspace} --preset {preset} --time-budget 20 --benchmark-skip-eval --no-checkpoint",
-            )
+            cmd = f"uv run kernel-lab.py --engine mlx integration-ab --workspace {chosen_workspace} --time-budget 20 --benchmark-skip-eval --no-checkpoint"
+            if preset_source == "manual":
+                cmd += f" --preset {resolved_preset}"
+            commands = (cmd,)
         elif summary.promotion_status == "trace-deprioritized":
             status = "deprioritized-after-trace"
             commands = (
@@ -2179,11 +2220,14 @@ class MLXKernelLab:
             engine="mlx",
             backend_family="mlx",
             target=target,
-            preset=preset,
+            preset=resolved_preset,
             workspace=str(chosen_workspace) if chosen_workspace is not None else None,
             status=status,
             commands=commands,
             details={
+                "resolved_preset": resolved_preset,
+                "preset_source": preset_source,
+                "preset_context": preset_context,
                 "evidence_summary": asdict(summary),
                 "required_for_promotion": ["verify", "capture"],
             },
@@ -2193,11 +2237,12 @@ class MLXKernelLab:
         self,
         *,
         workspace: Path,
-        preset: str,
         time_budget: float,
+        preset: str | None = None,
         benchmark_skip_eval: bool = True,
         no_checkpoint: bool = True,
     ) -> LabIntegrationABResult:
+        resolved_preset, preset_source, preset_context = self._resolve_runtime_preset(preset)
         workspace = workspace.expanduser().resolve()
         metadata = json.loads((workspace / "metadata.json").read_text(encoding="utf-8"))
         target = str(metadata["target"])
@@ -2217,7 +2262,7 @@ class MLXKernelLab:
                 "--engine",
                 "mlx",
                 "--preset",
-                preset,
+                resolved_preset,
                 "--time-budget",
                 str(run_time_budget),
             ]
@@ -2315,11 +2360,13 @@ class MLXKernelLab:
             workspace=workspace,
             event_type="integration-ab",
             status=status,
-            preset=preset,
+            preset=resolved_preset,
             metric_name="steady_state_tok_per_sec_delta",
             metric_value=details["delta"].get("steady_state_tok_per_sec"),
             details={
-                "preset": preset,
+                "preset": resolved_preset,
+                "preset_source": preset_source,
+                "preset_context": preset_context,
                 "time_budget": time_budget,
                 "warmup_budget": warmup_budget,
                 "benchmark_skip_eval": benchmark_skip_eval,
@@ -2338,11 +2385,15 @@ class MLXKernelLab:
             engine="mlx",
             backend_family="mlx",
             target=target,
-            preset=preset,
+            preset=resolved_preset,
             workspace=str(workspace),
             status=status,
             wall_seconds=wall_seconds,
-            details=details,
+            details={
+                "preset_source": preset_source,
+                "preset_context": preset_context,
+                **details,
+            },
         )
 
     def _get_spec(self, target: str) -> TargetSpec:
