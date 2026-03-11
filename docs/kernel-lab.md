@@ -58,7 +58,9 @@ For now the MLX lab is deliberately narrow:
   - `proj_head_reshape`
   - `loss_logits_cast_softcap`
   - `cross_entropy_prelude`
+  - `cross_entropy_full`
   - `attention_prelude`
+  - `block_prelude`
   - `fused_mlp`
 - `flash_attention` is explicitly deferred as a first target because MLX already has optimized attention primitives and custom backward there is a worse place to start
 

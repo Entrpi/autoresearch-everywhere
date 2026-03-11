@@ -29,7 +29,40 @@ On this hardware, the default canonical matched benchmark window for optimizatio
 
 ## Latest
 
-### New commit — lab: Add reshape and broader attention/logits starter targets — score `3` — complexity `7`
+### New commit — lab: Add composed loss and block-prelude starter targets — score `3` — complexity `5`
+
+**AI-identified within brief, human-shaped (3)**
+
+- Extended the MLX lab from support-path fragments into the next two composed targets: a full loss-side cross-entropy path and a bounded block-level prelude that combines residual blending, RMSNorm, and attention staging.
+  - Meaning: the lab now has starter targets that represent complete composed subpaths, not just individual reshape/cast/gating pieces.
+  - Motivation: after the support-path fragments were in place, the next useful step was to test whether the lab could represent broader real training-path clusters without jumping all the way to full attention or entire blocks.
+  - Purpose: create the first composed targets that are large enough to motivate later profiling/orchestration work while still staying below the complexity threshold of full attention or full-block reimplementation.
+  - Added `cross_entropy_full` for the final logits cast + softcap + cross-entropy + byte-aware masked reduction path.
+  - Added `block_prelude` for residual blend + RMSNorm + attention staging up to, but not including, SDPA and output projection matmuls.
+
+**Grounding**
+
+- Files:
+  - `CHANGELOG.md`
+  - `README.md`
+  - `docs/kernel-lab.md`
+  - `docs/mlx-port-architecture.md`
+  - `autoresearch_mlx/lab_workspace.py`
+- Validation:
+  - `python3 -m py_compile kernel-lab.py autoresearch_lab/*.py autoresearch_mlx/lab.py autoresearch_mlx/lab_workspace.py`
+  - `./.venv/bin/python kernel-lab.py --engine mlx list-targets`
+  - `./.venv/bin/python kernel-lab.py --engine mlx init --target cross_entropy_full --workspace <tmp>`
+  - `./.venv/bin/python kernel-lab.py --engine mlx init --target block_prelude --workspace <tmp>`
+  - `./.venv/bin/python kernel-lab.py --engine mlx bench --workspace <tmp> --quick`
+  - `python3 tools/changelog_scores.py --group-by entry --format csv --include-latest --verify`
+- Measurements:
+  - Quick MLX lab benchmarks for the two new composed starter targets both completed with `max_abs_error=0.0`:
+    - `cross_entropy_full`: `median_latency_ms=5.743`, `median_throughput_gb_s=13.485`
+    - `block_prelude`: `median_latency_ms=2.509`, `median_throughput_gb_s=12.604`
+
+## Committed History
+
+### March 11, 2026 — `6aaac43` — lab: Add reshape and broader attention/logits starter targets — score `3` — complexity `7`
 
 **AI-identified within brief, human-shaped (3)**
 
@@ -65,8 +98,6 @@ On this hardware, the default canonical matched benchmark window for optimizatio
     - `proj_head_reshape`: `median_latency_ms=0.520`, `median_throughput_gb_s=9.149`
     - `loss_logits_cast_softcap`: `median_latency_ms=20.332`, `median_throughput_gb_s=29.686`
     - `attention_prelude`: `median_latency_ms=1.594`, `median_throughput_gb_s=12.563`
-
-## Committed History
 
 ### March 11, 2026 — `cedaa52` — lab: Add value-gate, mask, and loss-side starter targets — score `3` — complexity `6`
 

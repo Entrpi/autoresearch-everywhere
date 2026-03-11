@@ -392,7 +392,9 @@ The current implementation is MLX-first and starter-target-first:
   - `proj_head_reshape`
   - `loss_logits_cast_softcap`
   - `cross_entropy_prelude`
+  - `cross_entropy_full`
   - `attention_prelude`
+  - `block_prelude`
   - `fused_mlp`
 - `flash_attention` is explicitly deferred as a first MLX lab target
 

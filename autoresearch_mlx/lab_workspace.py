@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Callable
 
 import mlx.core as mx
+import mlx.nn as nn
 import numpy as np
 
 from autoresearch_lab.labs import LabBenchResult, LabCapabilities, LabTarget
@@ -492,6 +493,41 @@ def kernel_fn(loss_flat: mx.array, target_ids: mx.array, token_bytes: mx.array) 
 '''
 
 
+CROSS_ENTROPY_FULL_TEMPLATE = '''"""
+Autoresearch MLX kernel lab workspace.
+
+Target: Full cross-entropy loss path
+Mutable file: yes
+
+Replace `kernel_fn` with a faster implementation. The starter path matches the
+repo's final logits cast + softcap + cross-entropy + byte-aware masked
+reduction.
+"""
+
+from __future__ import annotations
+
+import mlx.core as mx
+import mlx.nn as nn
+
+
+KERNEL_TARGET = "cross_entropy_full"
+
+
+def kernel_fn(
+    logits_bf16: mx.array,
+    target_ids: mx.array,
+    token_bytes: mx.array,
+    softcap: float = 15.0,
+) -> tuple[mx.array, mx.array]:
+    logits = logits_bf16.astype(mx.float32)
+    logits = softcap * mx.tanh(logits / softcap)
+    losses = nn.losses.cross_entropy(logits, target_ids, reduction="none")
+    nbytes = token_bytes[target_ids]
+    mask = nbytes > 0
+    return mx.sum(losses * mask.astype(losses.dtype)), mx.sum(nbytes.astype(mx.int64))
+'''
+
+
 ATTENTION_PRELUDE_TEMPLATE = '''"""
 Autoresearch MLX kernel lab workspace.
 
@@ -541,6 +577,60 @@ def kernel_fn(
         k.transpose(0, 2, 1, 3),
         v.transpose(0, 2, 1, 3),
     )
+'''
+
+
+BLOCK_PRELUDE_TEMPLATE = '''"""
+Autoresearch MLX kernel lab workspace.
+
+Target: Block prelude
+Mutable file: yes
+
+Replace `kernel_fn` with a faster implementation. The starter path matches the
+bounded block setup work before attention proper: residual blend, RMSNorm, and
+the attention prelude up to, but not including, scaled dot-product attention.
+"""
+
+from __future__ import annotations
+
+import mlx.core as mx
+
+
+KERNEL_TARGET = "block_prelude"
+
+
+def _apply_rotary(x: mx.array, cos: mx.array, sin: mx.array) -> mx.array:
+    d = x.shape[-1] // 2
+    x1 = x[..., :d]
+    x2 = x[..., d:]
+    y1 = x1 * cos + x2 * sin
+    y2 = x1 * (-sin) + x2 * cos
+    return mx.concatenate([y1, y2], axis=-1)
+
+
+def _rms_norm(x: mx.array, eps: float = 1e-6) -> mx.array:
+    x32 = x.astype(mx.float32)
+    scale = mx.rsqrt(mx.mean(mx.square(x32), axis=-1, keepdims=True) + eps)
+    return (x32 * scale).astype(x.dtype)
+
+
+def kernel_fn(
+    x: mx.array,
+    x0: mx.array,
+    q_proj: mx.array,
+    k_proj: mx.array,
+    v_proj: mx.array,
+    cos: mx.array,
+    sin: mx.array,
+    resid_lambda: float,
+    x0_lambda: float,
+) -> tuple[mx.array, mx.array, mx.array, mx.array]:
+    x_blended = resid_lambda * x + x0_lambda * x0
+    x_norm = _rms_norm(x_blended)
+    q = _rms_norm(_apply_rotary(q_proj, cos, sin)).transpose(0, 2, 1, 3)
+    k = _rms_norm(_apply_rotary(k_proj, cos, sin)).transpose(0, 2, 1, 3)
+    v = v_proj.transpose(0, 2, 1, 3)
+    return x_norm, q, k, v
 '''
 
 
@@ -1041,6 +1131,43 @@ def _cross_entropy_prelude_metric(case: LabCase, latency_ms: float) -> float:
     return _throughput_gb_s(bytes_moved, latency_ms)
 
 
+def _cross_entropy_full_inputs(case: LabCase):
+    rows, vocab_size = case.shape
+    logits = _mx_array((rows, vocab_size), case.dtype, scale=2.0)
+    target_ids = _mx_int_array((rows,), low=0, high=vocab_size)
+    token_bytes_np = _rng().integers(0, 5, size=(vocab_size,), dtype=np.int32)
+    token_bytes_np[0] = 0
+    token_bytes = mx.array(token_bytes_np, dtype=mx.int32)
+    return logits, target_ids, token_bytes
+
+
+def _cross_entropy_full_ref(
+    logits_bf16: mx.array,
+    target_ids: mx.array,
+    token_bytes: mx.array,
+    softcap: float = 15.0,
+) -> tuple[mx.array, mx.array]:
+    logits = _loss_logits_cast_softcap_ref(logits_bf16, softcap=softcap)
+    losses = nn.losses.cross_entropy(logits, target_ids, reduction="none")
+    nbytes = token_bytes[target_ids]
+    mask = nbytes > 0
+    return mx.sum(losses * mask.astype(losses.dtype)), mx.sum(nbytes.astype(mx.int64))
+
+
+def _cross_entropy_full_metric(case: LabCase, latency_ms: float) -> float:
+    rows, vocab_size = case.shape
+    in_itemsize = _numpy_dtype(case.dtype).itemsize
+    out_itemsize = np.dtype(np.float32).itemsize
+    int_itemsize = np.dtype(np.int32).itemsize
+    bytes_moved = (
+        rows * vocab_size * (in_itemsize + out_itemsize)
+        + rows * int_itemsize
+        + vocab_size * int_itemsize
+        + rows * out_itemsize
+    )
+    return _throughput_gb_s(bytes_moved, latency_ms)
+
+
 def _attention_prelude_inputs(case: LabCase):
     batch, seq, heads, dim = case.shape
     q = _mx_array((batch, seq, heads, dim), case.dtype)
@@ -1072,6 +1199,49 @@ def _attention_prelude_metric(case: LabCase, latency_ms: float) -> float:
     half = dim // 2
     itemsize = _numpy_dtype(case.dtype).itemsize
     bytes_moved = (8 * batch * seq * heads * dim + 4 * seq * half) * itemsize
+    return _throughput_gb_s(bytes_moved, latency_ms)
+
+
+def _block_prelude_inputs(case: LabCase):
+    batch, seq, heads, dim = case.shape
+    model_dim = heads * dim
+    x = _mx_array((batch, seq, model_dim), case.dtype)
+    x0 = _mx_array((batch, seq, model_dim), case.dtype)
+    q = _mx_array((batch, seq, heads, dim), case.dtype)
+    k = _mx_array((batch, seq, heads, dim), case.dtype)
+    v = _mx_array((batch, seq, heads, dim), case.dtype)
+    half = dim // 2
+    cos = _mx_array((1, seq, 1, half), case.dtype)
+    sin = _mx_array((1, seq, 1, half), case.dtype)
+    return x, x0, q, k, v, cos, sin, 1.0, 0.1
+
+
+def _block_prelude_ref(
+    x: mx.array,
+    x0: mx.array,
+    q_proj: mx.array,
+    k_proj: mx.array,
+    v_proj: mx.array,
+    cos: mx.array,
+    sin: mx.array,
+    resid_lambda: float,
+    x0_lambda: float,
+) -> tuple[mx.array, mx.array, mx.array, mx.array]:
+    x_norm = _residual_rmsnorm_ref(x, x0, resid_lambda, x0_lambda)
+    q, k, v = _attention_prelude_ref(q_proj, k_proj, v_proj, cos, sin)
+    return x_norm, q, k, v
+
+
+def _block_prelude_metric(case: LabCase, latency_ms: float) -> float:
+    batch, seq, heads, dim = case.shape
+    half = dim // 2
+    model_dim = heads * dim
+    itemsize = _numpy_dtype(case.dtype).itemsize
+    bytes_moved = (
+        4 * batch * seq * model_dim
+        + 8 * batch * seq * heads * dim
+        + 4 * seq * half
+    ) * itemsize
     return _throughput_gb_s(bytes_moved, latency_ms)
 
 
@@ -1635,6 +1805,30 @@ class MLXKernelLab:
             reference=_cross_entropy_prelude_ref,
             metric_value=_cross_entropy_prelude_metric,
         ),
+        "cross_entropy_full": TargetSpec(
+            info=LabTarget(
+                key="cross_entropy_full",
+                description="Full cross-entropy loss path lab",
+                metric="throughput_gb_s",
+                status="starter-ready",
+                notes="Matches the final logits cast + softcap + cross-entropy + byte-aware masked reduction.",
+            ),
+            template=CROSS_ENTROPY_FULL_TEMPLATE,
+            tolerance=5e-4,
+            quick_cases=(
+                LabCase((1024, 8192), "float16"),
+                LabCase((2048, 8192), "float16"),
+            ),
+            full_cases=(
+                LabCase((512, 8192), "float16"),
+                LabCase((1024, 8192), "float16"),
+                LabCase((2048, 8192), "float16"),
+                LabCase((1024, 8192), "float32"),
+            ),
+            make_inputs=_cross_entropy_full_inputs,
+            reference=_cross_entropy_full_ref,
+            metric_value=_cross_entropy_full_metric,
+        ),
         "attention_prelude": TargetSpec(
             info=LabTarget(
                 key="attention_prelude",
@@ -1658,6 +1852,30 @@ class MLXKernelLab:
             make_inputs=_attention_prelude_inputs,
             reference=_attention_prelude_ref,
             metric_value=_attention_prelude_metric,
+        ),
+        "block_prelude": TargetSpec(
+            info=LabTarget(
+                key="block_prelude",
+                description="Residual + attention setup prelude lab",
+                metric="throughput_gb_s",
+                status="starter-ready",
+                notes="Covers residual blend, RMSNorm, and attention staging up to SDPA, but stops before attention proper.",
+            ),
+            template=BLOCK_PRELUDE_TEMPLATE,
+            tolerance=5e-3,
+            quick_cases=(
+                LabCase((2, 512, 8, 64), "float16"),
+                LabCase((4, 1024, 8, 64), "float16"),
+            ),
+            full_cases=(
+                LabCase((1, 256, 8, 64), "float16"),
+                LabCase((2, 512, 8, 64), "float16"),
+                LabCase((4, 1024, 8, 64), "float16"),
+                LabCase((2, 512, 8, 64), "float32"),
+            ),
+            make_inputs=_block_prelude_inputs,
+            reference=_block_prelude_ref,
+            metric_value=_block_prelude_metric,
         ),
         "fused_mlp": TargetSpec(
             info=LabTarget(
