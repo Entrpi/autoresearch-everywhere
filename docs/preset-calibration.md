@@ -2,6 +2,11 @@
 
 This note captures the current research direction for turning the recent manual eval-policy work into a reusable preset calibration system.
 
+If the goal is new-machine bring-up rather than refining one known preset / hardware pair, also see `docs/platform-calibration.md` and `tools/calibrate_platform.py`. That layer sits above the lower-level calibration subcommands described here and turns them into one orchestrated bring-up report with a candidate new default for the autoresearch stage on that hardware, resumable phase artifacts, confidence-bearing reference comparisons, and a promotion bundle for the resulting default/calibration artifacts.
+
+The same calibration machinery also now serves as the revalidation path after meaningful autoresearch changes. If the model, optimizer, attention path, or eval implementation changes enough to alter runtime or eval signatures, the old calibration should be treated as suspect even on the same hardware.
+The important nuance is that signature drift is not the preferred trigger. Agent judgment should normally fire first. If the findings suggest the change could generalize across preset shapes or hardware classes, rerun calibration proactively even before a signature mismatch forces the issue.
+
 ## Goal
 
 We want a repeatable way to determine, for a given preset and hardware target:
@@ -69,6 +74,7 @@ all on the current reference machine:
 - `apple-m5-32gb-10gpu`
 
 The runtime selector now consumes these values by default for shipped preset shapes when the user has not explicitly overridden canonical eval settings. Mutated preset shapes still fall back to the default canonical settings until they are calibrated, and exact-hardware matching is required before a checked-in row is trusted at runtime.
+The rows are now also interpreted against the current eval-semantics and runtime-shape signatures, so the selector can distinguish "new hardware" from "same hardware, but this code has changed enough to require revalidation."
 
 ### `tools/calibrate_eval_policy.py`
 
@@ -121,6 +127,8 @@ The trainer now also exposes selector provenance directly in its run config and 
 - stable rungs
 - any limit reason that capped a more aggressive rung
 - calibration measurement date
+- calibration eval/runtime signatures
+- current eval/runtime signatures
 - policy version
 
 That output is there to make semantic drift visible instead of implicit.

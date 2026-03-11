@@ -1,406 +1,376 @@
-# MLX Port Architecture
+# MLX Platform Architecture
 
 ## Scope
 
-This document describes the architecture, intent, and current gaps of the MLX path in this fork of [karpathy/autoresearch](https://github.com/karpathy/autoresearch).
+This document describes the current MLX architecture in this fork of [karpathy/autoresearch](https://github.com/karpathy/autoresearch).
 
-It is based on the current repo state, specifically:
+It is centered on the current user story:
 
-- `prepare_mlx.py`
-- `train_mlx.py`
-- `autoresearch_mlx/constants.py`
-- `autoresearch_mlx/data.py`
-- `autoresearch_mlx/model.py`
-- `autoresearch_mlx/optim.py`
-- `program_mlx.md`
-- `tools/overnight_mlx.py`
-- `tools/launch_overnight_mlx.sh`
-- `tools/detach_exec.py`
-- the upstream reference path in `prepare.py` and `train.py`
+- a new user clones the repo on unfamiliar Apple hardware;
+- they run one bring-up command;
+- the system finds a practical default operating point for that machine;
+- the normal autoresearch loop then runs on top of that calibrated default.
 
-No major architectural unknowns remain after comparing the MLX path against the upstream CUDA path. The main unresolved items are not hidden system relationships; they are explicit feature gaps and caveats listed in the matrix below.
+So this is no longer just a report about a training script port. It is a report about a small research platform with explicit calibration, runtime policy, and promotion paths.
 
 ## Executive Summary
 
-The MLX port exists to preserve the upstream autoresearch loop on Apple Silicon:
+The MLX path now has five meaningful subsystems:
 
-- keep short, fixed-budget language-model experiments;
-- keep the same dataset and tokenizer strategy;
-- keep the same model family and optimizer family;
-- make the system practical on smaller unified-memory GPUs;
-- trade upstream single-file purity for a maintainable, testable package layout.
+1. platform bring-up orchestration
+2. runtime eval policy and telemetry
+3. training engine
+4. data and evaluation substrate
+5. optional local sweep tooling
 
-The MLX port is therefore not a compatibility shim around the CUDA code. It is a parallel implementation of the same research game with three major changes:
+The architectural center of gravity has moved upward. Early in the port, the main problem was "make autoresearch run on Apple Silicon." The main problem now is "make a new machine discover its own best starting point in a measured, inspectable way."
 
-1. The backend is Apple-native MLX instead of PyTorch + CUDA + FlashAttention 3.
-2. The implementation is split across `autoresearch_mlx/` instead of forcing everything into one mutable file.
-3. The runtime is tuned for experiment throughput on M-class Macs, including presets and a small amount of optional workstation automation.
+That shift changed the role of several files:
 
-## Architectural Intent
+- `tools/calibrate_platform.py` is now the front door for unfamiliar hardware
+- `autoresearch_mlx/eval_policy.py` is now runtime policy, not just a static table
+- `autoresearch_mlx/eval_telemetry.py` turns ordinary runs into passive calibration evidence
+- `train_mlx.py` is both the trainer and the runtime policy consumer
 
-The port is trying to hold two ideas in balance.
+## New User Story
 
-### 1. Preserve the upstream research invariant
+There are now two first-class ways to enter the system.
 
-The upstream repo is built around a very small loop:
+### Known reference hardware
 
-- prepare a fixed dataset and tokenizer;
-- run a single short training job;
-- measure validation BPB;
-- decide whether a change was worth keeping.
+If the user is effectively on the calibrated M5 reference machine, they can:
 
-The MLX port preserves that loop as much as possible. The same data source, tokenizer shape, BOS-packed dataloader idea, GPT family, Muon+AdamW optimizer split, and summary outputs are all retained.
+1. run `uv sync`
+2. run `uv run prepare_mlx.py`
+3. run `uv run train_mlx.py --smoke`
+4. start normal experiments
 
-### 2. Make the system native to Apple Silicon
+### Unfamiliar hardware
 
-The upstream design assumes a CUDA environment and extremely high throughput. That assumption fails on Apple Silicon in two ways:
+If the user is on a new Apple Silicon configuration, the intended path is:
 
-- the kernel/runtime APIs are different;
-- the practical optimization target changes from maximum instantaneous throughput to maximum useful experiments per night.
+1. run `uv sync`
+2. run `uv run prepare_mlx.py`
+3. run `uv run tools/calibrate_platform.py --mode fast`
+4. optionally rerun with `--mode full`
+5. review the report and promotion bundle
+6. adopt the emitted candidate default for that hardware
 
-The MLX port responds by:
+That is the new idealized bring-up loop. The rest of the architecture exists to support it.
 
-- replacing CUDA-specific runtime code with MLX primitives;
-- using MLX arrays and compiled training steps instead of PyTorch CUDA tensors and `torch.compile(model)`;
-- introducing M5-oriented presets to keep runs tractable;
-- keeping any unattended sweep tooling outside the core training path.
-
-## System Boundaries
-
-The MLX path is easiest to understand as two core subsystems plus one optional local tooling layer:
-
-- data preparation and evaluation;
-- model training;
-- optional local sweep tooling.
-
-```mermaid
-flowchart LR
-    A["Human / Agent"] --> B["program_mlx.md"]
-
-    subgraph S1["Data Preparation and Evaluation"]
-        D["prepare_mlx.py"] --> E["autoresearch_mlx.data"]
-        E --> F["~/.cache/autoresearch/data"]
-        E --> G["~/.cache/autoresearch/tokenizer"]
-    end
-
-    subgraph S2["Model Training"]
-        C["train_mlx.py"]
-        H["autoresearch_mlx.model"]
-        I["autoresearch_mlx.optim"]
-        J["MLX Metal runtime"]
-    end
-
-    subgraph S3["Optional Local Tooling"]
-        K["tools/overnight_mlx.py"]
-        L["tools/launch_overnight_mlx.sh"]
-        M["tools/detach_exec.py"]
-        N["results.tsv"]
-        O["results/overnight/<run-tag>/"]
-    end
-
-    B --> C
-    C --> E
-    C --> H
-    C --> I
-    C --> J
-    K --> C
-    L --> M
-    M --> K
-    K --> N
-    K --> O
-```
-
-## Subsystem 1: Data Preparation and Evaluation
-
-### Purpose
-
-This subsystem gives the MLX training path a reproducible input corpus and a reproducible evaluation method.
-
-### Components
-
-- `prepare_mlx.py` is a thin CLI wrapper.
-- `autoresearch_mlx.constants` defines shared invariants such as `MAX_SEQ_LEN`, `TIME_BUDGET`, `EVAL_TOKENS`, shard locations, tokenizer paths, and vocabulary size.
-- `autoresearch_mlx.data` implements the actual data lifecycle.
-
-### Responsibilities
-
-`autoresearch_mlx.data` owns:
-
-- shard download with retries;
-- pinned validation shard handling;
-- tokenizer training from training shards only;
-- pretokenized shard cache generation for reusable training inputs;
-- special token layout and BOS token choice;
-- token byte lookup generation for BPB evaluation;
-- BOS-packed best-fit dataloader generation;
-- validation BPB computation.
-
-### Shared invariants with upstream
-
-The following concepts are preserved from `prepare.py`:
-
-- `~/.cache/autoresearch` as the artifact root;
-- pinned validation shard (`shard_06542.parquet`);
-- `VOCAB_SIZE = 8192`;
-- same BPE split pattern;
-- same reserved special-token scheme;
-- same BOS-packed row construction idea;
-- BPB based on token cross-entropy divided by UTF-8 byte count.
-
-### Intentional implementation changes
-
-- Token byte lookups are stored as `token_bytes.npy` instead of PyTorch `token_bytes.pt`.
-- Pretokenized shard caches are stored under `~/.cache/autoresearch/token_cache/` as concatenated token streams plus offsets and metadata.
-- Prepacked row caches are stored under `~/.cache/autoresearch/prepacked_cache/` and keyed by split plus sequence length. The default `prepare_mlx.py` flow now builds the shipped preset coverage (`256`, `512`, `1024`, `2048`) so prepacked loading is the normal prepared-state fast path rather than an extra opt-in step.
-- The MLX dataloader returns `mx.array` batches instead of pinned CPU tensors copied into CUDA buffers.
-- Error handling is stricter than upstream for partial data download and missing train shards.
-
-### Dataloader behavior
-
-The loader is not a naive contiguous-token stream. It does all of the following:
-
-- each row has capacity `seq_len + 1`;
-- each document is BOS-prefixed before packing;
-- documents are packed with a best-fit heuristic to minimize cropping;
-- if nothing fits the remaining space, the shortest buffered document is cropped to fill the row exactly;
-- inputs are `row[:, :-1]`, targets are `row[:, 1:]`.
-
-This design preserves full token utilization without padding and matches the upstream packing semantics closely.
-
-When a matching prepacked cache exists, the MLX path skips live best-fit packing at runtime and streams prebuilt rows directly. That is now the normal prepared-state path for the shipped presets. When a matching cache does not exist, the loader falls back to the live token-cache path above and prints that fallback explicitly.
-
-## Subsystem 2: Model Training
-
-### Purpose
-
-This subsystem is the actual MLX-native replacement for upstream `train.py`.
-
-### Components
-
-- `train_mlx.py` is the runtime coordinator.
-- `autoresearch_mlx.model` defines the GPT family.
-- `autoresearch_mlx.optim` defines the Muon+AdamW optimizer implementation.
-
-### Runtime responsibilities in `train_mlx.py`
-
-`train_mlx.py` is responsible for:
-
-- validating that the host is macOS with an MLX Metal GPU;
-- loading tokenizer metadata;
-- building a `GPTConfig` from the chosen run shape;
-- instantiating and initializing the model;
-- selecting a preset or applying explicit CLI overrides;
-- building the optimizer;
-- constructing the train dataloader;
-- compiling the training step;
-- running a fixed-budget training loop;
-- running final validation and printing a summary block.
-
-### Preset system
-
-The MLX path diverges sharply from upstream here. Upstream edits constants in-place. The MLX path exposes a runtime config layer:
-
-- `m5-fast`
-- `m5-balanced`
-- `m5-large`
-- `m5-xlarge`
-- `upstream`
-
-This makes the port operable on smaller GPUs without forcing constant source edits just to change batch shape or sequence length.
-
-`m5-xlarge` is the M5-practical version of the upstream-scale architecture: it keeps the `2048`-token, `8`-layer, `512`-wide dense model shape, but pairs it with an M5-sized batch. The `upstream` preset remains the literal reference port, including its original `SSSL` attention pattern and much larger batch shape.
-
-The important calibration detail is that these presets were developed on and tested against an Apple M5 MacBook Pro with 32 GB unified memory and a 10-core GPU. They should be read as machine-specific defaults for that workstation class, not as settled universal defaults for every M5-family machine.
-
-In particular, the preset table is expected to remain somewhat fluid until the port has been profiled on newly released M5 Pro and M5 Max systems.
-
-### Training loop flow
+## System Map
 
 ```mermaid
 flowchart TD
-    A["train_mlx.py"] --> B["Tokenizer.from_directory()"]
-    A --> C["build_model_config()"]
-    A --> D["GPT.init_weights()"]
-    A --> E["MuonAdamW(...)"]
-    A --> F["make_dataloader(split='train')"]
-    A --> G["make_grad_step_fn(...)"]
-    G --> H["mx.compile(grad_step)"]
-    A --> I["make_apply_grads_fn(...)"]
-    I --> J["mx.compile(apply_grads)"]
-    F --> K["stream microbatches one at a time"]
-    K --> H
-    H --> L["accumulate scaled grads in outer loop"]
-    L --> J
-    A --> N["evaluate_bpb(...)"]
-    N --> M["summary block"]
+    A["User / Agent"] --> B["tools/calibrate_platform.py"]
+    A --> C["train_mlx.py"]
+
+    subgraph S1["Platform Bring-Up Orchestration"]
+        B --> B1["hardware fingerprint"]
+        B --> B2["coarse preset envelope"]
+        B --> B3["candidate family ranking"]
+        B --> B4["local operating-point search"]
+        B --> B5["candidate checkpoint"]
+        B --> B6["eval rung calibration"]
+        B --> B7["report + promotion bundle"]
+    end
+
+    subgraph S2["Runtime Eval Policy and Telemetry"]
+        C --> P1["autoresearch_mlx.eval_policy"]
+        C --> P2["autoresearch_mlx.eval_telemetry"]
+        P1 --> P3["checked-in rung tables"]
+        P2 --> P4["local telemetry ledger"]
+    end
+
+    subgraph S3["Training Engine"]
+        C --> T1["autoresearch_mlx.model"]
+        C --> T2["autoresearch_mlx.optim"]
+        C --> T3["MLX Metal runtime"]
+    end
+
+    subgraph S4["Data and Evaluation Substrate"]
+        D["prepare_mlx.py"] --> D1["autoresearch_mlx.data"]
+        D1 --> D2["token cache"]
+        D1 --> D3["prepacked cache"]
+        D1 --> D4["BPB evaluation"]
+    end
+
+    subgraph S5["Optional Local Sweep Tooling"]
+        O1["tools/overnight_mlx.py"] --> C
+    end
+
+    B --> C
+    C --> D1
+    B --> D1
 ```
 
-### Model architecture preserved by the port
-
-`autoresearch_mlx.model` retains the same broad model structure as upstream:
-
-- GPT-style decoder stack;
-- RMS normalization;
-- rotary position embeddings;
-- alternating value embeddings (`has_ve`);
-- residual interpolation with `resid_lambdas` and `x0_lambdas`;
-- sliding-window pattern expressed through `window_pattern`;
-- softcapped logits before cross-entropy;
-- parameter counting and FLOP estimation helpers.
-
-The port deliberately keeps the math recognizable instead of rewriting the architecture around a more exotic Apple-specific design.
-
-### Attention path
-
-This is the biggest backend-level divergence:
-
-- upstream: direct FlashAttention 3 kernel call through the `kernels` package;
-- MLX port: `mx.fast.scaled_dot_product_attention`.
-
-For local-window layers, the MLX port synthesizes an additive mask and caches it per `(seq_len, window_size)` pair.
-
-### Optimizer path
-
-`autoresearch_mlx.optim` mirrors upstream intent, not upstream API shape.
-
-It keeps the same conceptual parameter partitioning:
-
-- `lm_head` via AdamW;
-- token embeddings via AdamW;
-- value embeddings via AdamW;
-- residual scalars via AdamW;
-- `x0` scalars via AdamW with a different beta schedule;
-- matrix-shaped transformer weights via Muon.
-
-Instead of subclassing `torch.optim.Optimizer`, the MLX version:
-
-- flattens the parameter tree;
-- groups paths by role and matrix shape;
-- stores optimizer state in explicit MLX arrays;
-- applies updates through tree reconstruction back into the model.
-
-This is an idiomatic MLX translation of the upstream optimizer split, not a line-by-line port.
-
-## Optional Local Tooling
+## Subsystem 1: Platform Bring-Up Orchestration
 
 ### Purpose
 
-This layer makes repeated MLX runs manageable on a local machine without adding a full orchestration service. It is intentionally non-core: the MLX port remains coherent without it.
+This subsystem exists so a user on new hardware does not need to understand the internal calibration primitives before they can get to a good starting point. It is also the intended revalidation path after meaningful autoresearch changes that may alter the best operating point on the same hardware.
 
-### Components
+### Main file
 
-- `tools/overnight_mlx.py` performs repeatable, round-robin experiment sweeps.
-- `tools/launch_overnight_mlx.sh` starts a detached long-lived run.
-- `tools/detach_exec.py` double-forks and redirects logs so the process survives session exit.
+- `tools/calibrate_platform.py`
 
 ### Responsibilities
 
-`tools/overnight_mlx.py` is intentionally simple:
+It currently does all of the following:
 
-- choose a sweep plan;
-- stamp metadata with branch, commit, and timing;
-- run `train_mlx.py` as a subprocess for each experiment shape;
-- parse the summary block from stdout;
-- append a normalized row to `results.tsv`;
-- keep per-run logs and state under `results/overnight/<run-tag>/`.
+- detect the hardware fingerprint
+- run a coarse envelope across shipped preset families
+- run short comparable ranking probes
+- choose a candidate family
+- run a local search inside that family
+- mint a candidate checkpoint
+- calibrate eval rungs on that checkpoint
+- emit:
+  - a Markdown report
+  - a JSON artifact
+  - a promotion bundle
 
-### Controller relationships
+### Current selection logic
 
-```mermaid
-sequenceDiagram
-    participant User
-    participant Launcher as "tools/launch_overnight_mlx.sh"
-    participant Detach as "tools/detach_exec.py"
-    participant Sweep as "tools/overnight_mlx.py"
-    participant Train as train_mlx.py
-    participant Results as results.tsv / results/overnight
+Candidate family selection is now:
 
-    User->>Launcher: start sweep
-    Launcher->>Detach: request detached execution
-    Detach->>Sweep: exec tools/overnight_mlx.py
-    loop per experiment
-        Sweep->>Train: run preset + seed
-        Train-->>Sweep: summary block
-        Sweep->>Results: append TSV row
-        Sweep->>Results: write log/state/metadata
-    end
-```
+1. primary frontier on:
+   - short-run validation quality
+   - steady-state throughput
+   - eval overhead
+2. pressure-aware memory shaping:
+   - below `50%` of unified memory, memory contributes only a small tie-break cost
+   - above `50%`, memory pressure progressively shapes the decision
+   - near capacity, memory becomes a real penalty
+3. telemetry maturity as a tie-break and confidence signal
 
-### Important meaning of the sweep tooling
+This is important. The selector no longer treats memory as a fully co-equal objective at all times, but it also does not ignore memory below `50%`. It keeps a small comfort cost there so obviously leaner shapes still win ties.
 
-This tooling is not yet a full autonomous code-editing research swarm. It does not mutate `train_mlx.py` or open pull requests. It is currently a repeatable benchmarking and search harness over runtime configurations. That makes it operationally useful, but it should be understood as optional workstation automation, not part of the core MLX port.
+### What it affords
 
-## Relationships to the Upstream CUDA Path
+For users:
 
-The upstream code is still present for reference, but the MLX port is not structured the same way.
+- a one-command hardware bring-up path
+- a candidate default instead of a bag of raw measurements
+- explicit `lower`, `recommended`, `upper`, and `reference` zones
 
-### Preserved concepts
+For automation:
 
-- same dataset source and shard pinning;
-- same tokenizer construction strategy;
-- same broad model family;
-- same optimizer family;
-- same summary output shape;
-- same 5-minute training-budget concept by default, with an explicit `train` vs `wall` budget mode split for benchmarking operational changes without changing the core experiment loop.
+- resumable phase artifacts
+- machine-readable promotion outputs
+- a stable structure for later fleet-style hardware bring-up
 
-### Intentional architectural departures
+## Subsystem 2: Runtime Eval Policy and Telemetry
 
-- upstream uses a single mutable `train.py`; the MLX path is split into `data`, `model`, `optim`, and entrypoints;
-- upstream bakes hyperparameters into source constants; the MLX path uses presets and CLI overrides;
-- upstream is designed around CUDA and direct FA3 kernels; the MLX path is designed around Metal and MLX primitives;
-- upstream leaves orchestration to the human/agent loop; this fork keeps that core loop and adds optional sweep tooling under `tools/` for unattended local runs.
+### Purpose
 
-These departures are not accidents. They are the core meaning of the fork: portability and maintainability are being prioritized over single-file minimalism.
+This subsystem prevents the runtime from silently over-trusting thin calibration.
 
-## Feature Gap Matrix
+### Main files
 
-| Area | Upstream CUDA path | MLX port | Status | Notes |
-| --- | --- | --- | --- | --- |
-| Data shard download | Parallel download with retries | Same behavior, plus fail-fast if not all shards complete | Improved parity | MLX path is stricter and safer on partial downloads. |
-| Tokenizer training | `rustbpe` -> `tiktoken`, token bytes in `torch` tensor | Same tokenizer flow, token bytes in `.npy` | Parity | Serialization differs but semantics match. |
-| BOS-packed best-fit dataloader | CUDA-oriented generator with pinned CPU/GPU buffers | Same packing logic with NumPy -> MLX arrays | Near parity | Backend mechanics differ, packing semantics are preserved. |
-| Validation BPB formula | Fixed BPB formula, fixed `MAX_SEQ_LEN`, fixed `EVAL_TOKENS` | Same BPB formula | Partial parity | Formula is preserved. |
-| Fixed evaluation invariance across configs | Yes | Yes, via canonical `val_bpb` | Near parity | The MLX path now reports a fixed canonical `val_bpb` plus a preset-shaped `proxy_val_bpb` for local inspection. |
-| GPT family | RoPE, VE, residual scalars, softcapped logits, sliding windows | Same conceptual architecture | Near parity | Implemented natively in MLX. |
-| Attention backend | FlashAttention 3 kernel | `mx.fast.scaled_dot_product_attention` | Intentional divergence | Necessary backend change. Kernel behavior and performance differ. |
-| Optimizer family | Custom Muon + AdamW in PyTorch optimizer | Custom Muon + AdamW in MLX tree/state form | Near parity | Parameter grouping intent is preserved. API shape is different. |
-| Compile strategy | `torch.compile(model)` plus fused optimizer kernels | `mx.compile(train_step)` over model state + optimizer state | Intentional divergence | Compile boundary is different, but still designed for repeated-step execution. |
-| Runtime configurability | Edit constants in source | Presets, CLI overrides, smoke mode | Intentional divergence | Better for local experimentation, less faithful to single-file mutation. |
-| Hardware scope | NVIDIA CUDA, FlashAttention-driven | Apple Silicon + Metal via MLX | Intentional divergence | This is the fork's main purpose. |
-| Utilization reporting | H100-relative MFU estimate | Measured step compute-share utilization plus estimated training TFLOPs and explicit loader/grad/optimizer/checkpoint/eval breakdowns | Intentional divergence | The MLX path now reports hardware-agnostic utilization telemetry instead of an H100-relative MFU estimate. |
-| Overnight experimentation | No in-repo runner | Added local sweep runner and detached launcher | Extension | Useful addition, but not part of upstream parity. |
-| Autonomous code mutation | Human/agent edits `train.py` directly | Human/agent edits `train_mlx.py` and/or package modules | Partial parity | The loop exists, but the MLX path is multi-file by design. |
-| Resume/checkpoint support | Not present | Exact full-state checkpointing, plus an in-tree failed `weights_only` experiment and an optional async exact write path in `train_mlx.py` | Improvement | The MLX path now supports exact step-boundary resume with model, optimizer, runtime counters, and train-loader state. The earlier `weights_only` mode remains in-tree for comparison but is no longer a recommended path because convergence testing showed worse resumed end states. Exact sync remains the default checkpoint path; async exact writes are available as an optional variant when wall-clock deadline behavior matters. |
+- `autoresearch_mlx/eval_policy.py`
+- `autoresearch_mlx/eval_telemetry.py`
+- policy consumption inside `train_mlx.py`
 
-## The Most Important Metric Caveat
+### Responsibilities
 
-The biggest remaining caveat is no longer mixed-shape ranking inside the MLX sweep. That part is fixed by separating canonical `val_bpb` from `proxy_val_bpb`.
+The policy layer now does more than store rung timings. It also tracks:
 
-The remaining caveat is that the canonical MLX metric is not a byte-for-byte replica of upstream evaluation:
+- hardware-key exactness
+- preset-shape coverage
+- policy-version compatibility
+- calibration freshness
+- effective confidence
+- stable-rung coverage
+- telemetry count, commit spread, and day spread
+- eval-semantics signature
+- runtime-shape signature
 
-1. The MLX path uses a fixed local canonical context length chosen to be valid across the M5-oriented presets.
-2. The upstream repo uses a larger fixed evaluation shape tied to its CUDA/H100 assumptions.
+Those signatures are meant to be conservative guardrails, not the full revalidation policy. The preferred control path is still agent judgment: when a change looks likely to alter the best operating point across shapes or hardware, the agent should proactively rerun platform calibration instead of waiting for a signature mismatch.
 
-That means the fork now has strong internal comparability across its own sweep shapes, but only approximate comparability to the original upstream leaderboard.
+The runtime then decides whether it may:
 
-## Why the Port Is Still Architecturally Coherent
+- use a checked-in `cheap` rung
+- use `reference`
+- use `full`
+- or must fall back visibly to the default canonical settings
 
-Despite that caveat, the port is internally coherent for three reasons:
+### Why this matters
 
-- The code boundaries are clean. Data, model, optimizer, runtime, and orchestration are separated by responsibility.
-- The backend adaptation is honest. The implementation does not pretend to be a tiny patch on top of CUDA assumptions.
-- The operational story is complete. There is a real path from setup, to one run, to repeated sweeps, to per-run artifact capture.
+Without this layer, the system would drift semantically as soon as:
 
-In other words, this is already a real system, not a sketch. The main remaining gaps are dataset/pipeline efficiency and operational polish, not missing architecture.
+- the hardware changed
+- the preset shape drifted
+- the evaluator changed
+- the model or runtime changed in a way that invalidates old scaling assumptions
+- calibration got old
+
+That is exactly the failure mode the new platform story needs to avoid. Static signatures help, but the broader protection comes from combining them with disciplined agent-triggered revalidation after meaningful findings.
+
+### Current canonical eval model
+
+The canonical MLX metric is now an upstream-oriented long-context ladder rather than a single cheap fixed local metric:
+
+- `cheap`
+- `reference`
+- `full`
+
+The default canonical context length is `2048`.
+
+For reduced-budget rungs, the eval path uses evenly spaced slices across the first upstream-sized horizon. For the full rung, it stays sequential, because full sliced and full sequential were measured to agree numerically while sequential was faster.
+
+This is the key reason the runtime can now auto-pick different canonical fidelity levels for `5m` versus `8h` runs.
+
+## Subsystem 3: Training Engine
+
+### Purpose
+
+This is the MLX-native replacement for upstream `train.py`.
+
+### Main files
+
+- `train_mlx.py`
+- `autoresearch_mlx/model.py`
+- `autoresearch_mlx/optim.py`
+
+### Responsibilities
+
+The training engine is responsible for:
+
+- turning presets and CLI overrides into a concrete run shape
+- instantiating the GPT family
+- compiling the grad and apply steps
+- running fixed-budget training
+- exposing runtime telemetry
+- consuming runtime eval policy
+- checkpointing and resuming
+
+### Important evolution
+
+The trainer is no longer just "the thing that trains." It is now also the place where calibrated runtime policy becomes live behavior.
+
+That means a summary from `train_mlx.py` now carries much more than loss and throughput. It can also say:
+
+- which canonical eval rung was chosen
+- why it was allowed
+- whether it was limited by confidence
+- whether the hardware matched calibration exactly
+
+That is a meaningful architectural change from the earlier MLX port.
+
+## Subsystem 4: Data and Evaluation Substrate
+
+### Purpose
+
+This subsystem keeps the training and calibration paths reproducible.
+
+### Main files
+
+- `prepare_mlx.py`
+- `autoresearch_mlx/data.py`
+- `autoresearch_mlx/constants.py`
+
+### Responsibilities
+
+It owns:
+
+- shard download
+- tokenizer training
+- token-byte lookup generation
+- shard token caches
+- prepacked row caches
+- BOS-packed live fallback loading
+- BPB evaluation mechanics
+
+### Current role in the platform story
+
+This layer used to look like a pure backend translation concern. It now matters directly to platform bring-up because:
+
+- the bring-up tool depends on repeatable quick probes
+- eval ladders depend on cheap and stable val access
+- prepacked caches are the normal prepared-state fast path for shipped presets
+
+So the data plane is now part of the calibration substrate, not just a prerequisite for training.
+
+## Subsystem 5: Optional Local Sweep Tooling
+
+### Purpose
+
+This layer is still optional. It is useful for unattended workstation sweeps, but it is not the main architectural story anymore.
+
+### Main files
+
+- `tools/overnight_mlx.py`
+- `tools/launch_overnight_mlx.sh`
+- `tools/detach_exec.py`
+
+### Current place in the system
+
+This tooling now sits below platform bring-up in importance:
+
+- bring-up finds the right initial default for a machine
+- the runtime policy keeps normal runs honest
+- overnight tooling helps exploit that calibrated default over time
+
+That is a healthier ordering than the earlier design, where the overnight tooling risked looking like the center of the MLX story.
+
+## Relationship to Upstream
+
+### Preserved
+
+- same broad dataset and tokenizer strategy
+- same GPT-family research toy
+- same 5-minute default training budget concept
+- same "edit, run, compare validation BPB" loop
+
+### Intentionally changed
+
+- upstream single-file mutation became a multi-module MLX runtime
+- fixed CUDA-shaped eval became a rung-based long-context policy
+- no-calibration setup became explicit platform bring-up
+- human/agent memory about the machine became checked-in policy plus passive telemetry
+
+That means this fork is no longer best described as "upstream, but on MLX." It is better described as:
+
+- an MLX-native autoresearch platform
+- with Apple-Silicon bring-up and runtime calibration as first-class concerns
+
+## Feature Matrix
+
+| Area | Upstream CUDA path | Current MLX path | Meaning |
+| --- | --- | --- | --- |
+| Training entry | Single mutable `train.py` | `train_mlx.py` plus MLX modules | Maintainability over single-file purity |
+| Hardware assumption | Fast NVIDIA GPU | Calibrated Apple Silicon workstation classes | Local hardware fit is explicit |
+| Eval policy | One heavy fixed final eval | `cheap/reference/full` rung ladder with confidence gates | Eval fidelity now scales with budget and trust |
+| Runtime trust model | Implicit | Hardware key, freshness, confidence, telemetry | Semantic drift is surfaced instead of hidden |
+| New-machine onboarding | Human decides what to try | `tools/calibrate_platform.py` finds a candidate default | Bring-up is part of the product |
+| Promotion path | Human copies ideas manually | Promotion bundle emitted automatically | Measurement now points at adoption |
+| Long unattended sweeps | External/manual | Optional `tools/` local sweep layer | Useful, but no longer central |
+
+## Main Caveats
+
+The architecture is much more coherent than before, but there are still important limits.
+
+### 1. The bring-up selector is only as good as the explored candidate set
+
+The new selector is more defensible, but it still only ranks the families and local-search points it actually measured.
+
+### 2. Promotion is still review-oriented
+
+The bring-up tool emits promotion artifacts by default, but it does not automatically rewrite checked-in preset tables or policy rows.
+
+### 3. Confidence aggregation is improving, not finished
+
+Passive telemetry now feeds runtime trust, but the strongest policy promotion still comes from explicit calibration runs, especially for `full`.
 
 ## Recommended Mental Model
 
-The simplest correct way to think about this fork is:
+The simplest correct way to think about the current repo is:
 
-- upstream `autoresearch` is a CUDA-native research toy optimized for one fast GPU and one mutable training file;
-- this fork is an MLX-native research workstation port optimized for maintainability and overnight experimentation on Apple Silicon;
-- the data plane is mostly preserved;
-- the model and optimizer semantics are mostly preserved;
-- the runtime and orchestration layers are intentionally redesigned.
+- `prepare_mlx.py` makes the data plane reproducible
+- `train_mlx.py` runs the research loop
+- `eval_policy.py` decides how much evaluation fidelity the runtime is allowed to trust
+- `eval_telemetry.py` lets ordinary runs strengthen or age that trust
+- `calibrate_platform.py` is the one-button path that turns an unfamiliar machine into a measured default for the rest of the system
 
-That framing matches the actual code organization and the real behavior of the system.
+That is the current architecture. The port is no longer just an MLX training path. It is an MLX research platform with explicit machine bring-up.

@@ -29,7 +29,79 @@ On this hardware, the default canonical matched benchmark window for optimizatio
 
 ## Latest
 
-### New commit — calibration: Harden runtime eval selection against semantic drift — score `4` — complexity `15`
+### New commit — calibration: Add one-button platform bring-up tool — score `4` — complexity `20`
+
+**Human-directed, AI-shaped (4)**
+
+- Requested that the next stage become a one-button bring-up flow for new hardware, not just a growing set of calibration subcommands.
+  - Meaning: added `tools/calibrate_platform.py` as a real orchestrator that fingerprints the machine, runs a coarse preset envelope, ranks feasible preset families with short comparable training runs, performs a local operating-point search inside the winner, mints a checkpoint there, calibrates eval rungs on that checkpoint, and emits a Markdown/JSON bring-up bundle with a candidate new default for the autoresearch stage on that hardware.
+  - Motivation: the existing calibration stack had the right primitives but still assumed a human who already knew which preset family to target and which subcommands to sequence. The missing product layer was the actual bring-up experience for a new user on unfamiliar hardware.
+  - Purpose: let a new user clone the repo, run one long calibration command, and get a grounded starting zone, a candidate new default, lower and upper bounds, and an explicit relationship to the M5 and upstream-style references.
+  - Reused the existing calibration machinery instead of duplicating it: the platform tool builds around `train_mlx.py` probes plus the existing `eval-rungs` logic from `tools/calibrate_eval_policy.py`.
+  - Added stage-aware `fast` and `full` bring-up modes so the same tool can serve as either a quick first-default finder or a longer recommendation pass.
+  - Made the output directory resumable: each major phase now records an input-keyed JSON artifact and later reruns reuse those artifacts unless `--force` is set.
+  - Replaced the earlier hand-tuned weighted family chooser with a frontier-based selector plus pressure-aware memory shaping: rank candidates on measured quality, throughput, and eval overhead, keep the primary Pareto front, then choose the point closest to the ideal measured frontier while treating memory as a small tie-break cost below `50%` of unified memory and a progressively real penalty as pressure rises.
+  - Expanded the local operating-point search defaults by mode so `seq_len` and `window_pattern` can participate automatically in fuller bring-up runs without turning the tool into an architecture search.
+  - Defined zone outputs concretely in the report using measured ranking probes rather than preset ordering: `lower`, `recommended`, `upper`, and `reference`, with `upstream` always treated as the reference zone when it runs successfully.
+  - Made the candidate-default logic explicit rather than implicit: the report now emits a machine-readable default block with preset family, tuned operating point, selection confidence, and the measured selection components that selected it.
+  - Added a promotion bundle to the output directory so the bring-up path no longer stops at a report: it now emits a platform-default artifact, a Python fragment for that default, and a calibration artifact that is explicitly marked promotable or incomplete.
+  - Added report-time comparison to the checked-in M5 reference on both axes we currently have: train-side throughput/memory and eval-side rung economics for the chosen preset family.
+  - Added a report-time comparison to the local upstream-style preset behavior so the user can see whether upstream is merely a reference, an upper bound, or already practical on the new machine.
+  - Updated the platform-calibration docs from future-plan language to current implementation language, including the staged modes, phase reuse, measured-zone framing, and remaining limitations.
+  - Reshaped the top-level README around the intended new-user path so unfamiliar hardware now goes through one-button bring-up first, while the known M5 reference path is presented as the shortcut.
+  - Rewrote the MLX architecture report around the newer subsystem boundaries: platform bring-up orchestration, runtime eval policy and telemetry, training engine, data/evaluation substrate, and optional local sweep tooling.
+  - Added explicit code-shape signatures to the calibration story so the same system now covers both new-hardware bring-up and post-change revalidation: eval rows and bring-up outputs are stamped with eval-semantics and runtime-shape signatures, and the runtime now falls back visibly when those no longer match.
+  - Reframed the recalibration trigger so agent judgment is primary and signatures are only the conservative backstop: the operator docs now tell the agent to rerun platform calibration proactively after findings that look likely to generalize across preset shapes or hardware classes, instead of waiting for static signature drift to be the whole policy.
+  - Removed `upstream` from the default one-button sweep set on MLX hardware. It remains available as an explicit reference via `--presets ...,upstream`, but the default bring-up path now focuses on the practical shipped MLX preset families so new-user calibration does not spend most of its wall time on a shape that is rarely the local default.
+
+**Grounding**
+
+- Files:
+  - `CHANGELOG.md`
+  - `README.md`
+  - `docs/mlx-port-architecture.md`
+  - `docs/preset-calibration.md`
+  - `docs/platform-calibration.md`
+  - `autoresearch_mlx/calibration_signature.py`
+  - `autoresearch_mlx/eval_policy.py`
+  - `tools/calibrate_platform.py`
+  - `tools/calibrate_eval_policy.py`
+  - `train_mlx.py`
+  - `program_mlx.md`
+- Validation:
+  - `python3 -m py_compile tools/calibrate_platform.py tools/calibrate_eval_policy.py autoresearch_mlx/eval_policy.py`
+  - `python3 tools/changelog_scores.py --group-by entry --format csv --include-latest --verify`
+  - `python3 tools/render_autonomy_badge.py`
+  - `./.venv/bin/python tools/calibrate_platform.py --mode fast --presets m5-fast,m5-balanced,upstream --coarse-time-budget 0.2 --ranking-time-budget 0.2 --local-search-time-budget 0.2 --eval-train-seconds 0.2 --eval-rungs cheap,reference --output-dir /tmp/autoresearch_calibrate_platform_smoke2 --force`
+  - `/usr/bin/time -p ./.venv/bin/python tools/calibrate_platform.py --mode fast --presets m5-fast,m5-balanced,upstream --coarse-time-budget 0.2 --ranking-time-budget 0.2 --local-search-time-budget 0.2 --eval-train-seconds 0.2 --eval-rungs cheap,reference --output-dir /tmp/autoresearch_calibrate_platform_smoke2`
+- Measurements:
+  - The reduced-budget end-to-end smoke run exercised the full phase chain successfully:
+    - hardware fingerprint
+    - coarse preset envelope
+    - candidate ranking
+    - local operating-point search
+    - candidate checkpoint minting
+    - final eval-rung calibration
+    - Markdown + JSON report generation
+  - The rerun without `--force` completed in `1.08s`, reusing the saved phase artifacts instead of replaying the whole bring-up sequence.
+  - On that smoke run, the tool produced a coherent candidate default block:
+    - candidate preset family: `m5-fast`
+    - tuned operating point: `seq_len=256`, `window_pattern=L`, `device_batch_size=4`, `total_batch_size=2048`
+    - family relation to M5 default: `smaller-than-m5-default`
+    - selection confidence: `telemetry-repeated-single-hardware`
+  - The same run emitted a promotion bundle under `/tmp/autoresearch_calibrate_platform_smoke3/promotion`:
+    - platform default artifacts were immediately promotion-ready
+    - eval calibration was explicitly marked `promotable=false` because the fast-mode run did not include the `full` rung
+  - The same smoke report also produced the intended zone structure:
+    - `m5-fast -> recommended`
+    - `m5-balanced -> upper`
+    - `upstream -> reference`
+  - The candidate ranking now exposes the selection story in the report, including `Pareto` membership, `frontier_distance`, `selection_distance`, and memory-fraction pressure bands.
+  - This was a bounded pipeline validation, not a final platform calibration. The smoke invocation used only `cheap,reference` eval rungs and `0.2s` training budgets, so the resulting default block is useful as a correctness check on the orchestration path, not as a production recommendation.
+
+## Committed History
+
+### March 11, 2026 — `871cc3f` — calibration: Harden runtime eval selection against semantic drift — score `4` — complexity `15`
 
 **Human-directed, AI-shaped (4)**
 
@@ -121,8 +193,6 @@ On this hardware, the default canonical matched benchmark window for optimizatio
     - `canonical_eval_tokens=262144`
     - `canonical_eval_batch_size=2`
     - `canonical_eval_slices=32`
-
-## Committed History
 
 ### March 10, 2026 — `760fa75` — calibration: Add preset calibration tooling foundation — score `4` — complexity `7`
 

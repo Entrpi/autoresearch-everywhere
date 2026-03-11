@@ -16,6 +16,10 @@ if str(REPO_ROOT) not in sys.path:
 import mlx.core as mx
 
 from autoresearch_mlx.checkpoints import load_checkpoint_metadata, restore_checkpoint
+from autoresearch_mlx.calibration_signature import (
+    current_eval_semantics_signature,
+    current_runtime_shape_signature,
+)
 from autoresearch_mlx.constants import CANONICAL_EVAL_SEQ_LEN, CANONICAL_EVAL_TOKENS
 from autoresearch_mlx.data import Tokenizer, evaluate_bpb, make_dataloader
 from autoresearch_mlx.eval_policy import (
@@ -168,6 +172,8 @@ def run_eval_batch_sweep(args) -> dict:
     return {
         "mode": "eval-batch",
         "checkpoint": str(checkpoint_dir),
+        "eval_semantics_signature": current_eval_semantics_signature(),
+        "runtime_shape_signature": current_runtime_shape_signature(),
         "rows": rows,
         "best_by_time": best,
     }
@@ -228,6 +234,8 @@ def run_eval_rungs(args) -> dict:
         "preset": args.preset,
         "hardware_key": args.hardware_key,
         "checkpoint": str(checkpoint_dir),
+        "eval_semantics_signature": current_eval_semantics_signature(),
+        "runtime_shape_signature": current_runtime_shape_signature(),
         "rows": rows,
     }
 
@@ -301,6 +309,12 @@ def run_train_grid_sweep(args) -> dict:
                     "training_seconds": summary.get("training_seconds"),
                     "num_steps": summary.get("num_steps"),
                     "mfu_percent": summary.get("mfu_percent"),
+                    "optimizer_percent": summary.get("optimizer_percent"),
+                    "accum_percent": summary.get("accum_percent"),
+                    "control_overhead_percent": (
+                        (float(summary.get("optimizer_percent", 0.0)) if summary.get("optimizer_percent") is not None else 0.0)
+                        + (float(summary.get("accum_percent", 0.0)) if summary.get("accum_percent") is not None else 0.0)
+                    ),
                 }
             )
         else:
@@ -312,6 +326,8 @@ def run_train_grid_sweep(args) -> dict:
         "mode": "train-grid",
         "preset": args.preset,
         "time_budget": args.time_budget,
+        "eval_semantics_signature": current_eval_semantics_signature(),
+        "runtime_shape_signature": current_runtime_shape_signature(),
         "device_batches": device_batches,
         "total_batches": total_batches,
         "seq_lens": seq_lens,
@@ -332,6 +348,8 @@ def run_telemetry_summary(args) -> dict:
         "preset": args.preset,
         "hardware_key": args.hardware_key,
         "policy_version": args.policy_version,
+        "eval_semantics_signature": current_eval_semantics_signature(),
+        "runtime_shape_signature": current_runtime_shape_signature(),
         "eligible_count": summary.eligible_count,
         "commit_count": summary.commit_count,
         "day_count": summary.day_count,
@@ -498,6 +516,9 @@ def main() -> None:
                 ("grad_accum_steps", "grad accum"),
                 ("status", "status"),
                 ("steady_state_tok_per_sec", "steady tok/s"),
+                ("optimizer_percent", "optim %"),
+                ("accum_percent", "accum %"),
+                ("control_overhead_percent", "control %"),
                 ("peak_vram_mb", "peak MB"),
             ],
         )

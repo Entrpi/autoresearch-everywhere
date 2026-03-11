@@ -43,6 +43,10 @@ from autoresearch_mlx.checkpoints import (
     restore_checkpoint,
     save_checkpoint,
 )
+from autoresearch_mlx.calibration_signature import (
+    current_eval_semantics_signature,
+    current_runtime_shape_signature,
+)
 from autoresearch_mlx.data import Tokenizer, evaluate_bpb, make_dataloader
 from autoresearch_mlx.eval_policy import (
     EVAL_POLICY_VERSION,
@@ -91,6 +95,10 @@ class RunConfig:
     eval_calibration_repeat_count: int | None
     eval_calibration_measured_train_seconds: float | None
     eval_calibration_measured_on: str | None
+    eval_calibration_eval_semantics_signature: str | None
+    eval_calibration_runtime_shape_signature: str | None
+    eval_current_eval_semantics_signature: str | None
+    eval_current_runtime_shape_signature: str | None
     eval_calibration_telemetry_count: int | None
     eval_calibration_commit_count: int | None
     eval_calibration_day_count: int | None
@@ -226,6 +234,10 @@ def resolve_eval_settings(
             eval_calibration_repeat_count=None,
             eval_calibration_measured_train_seconds=None,
             eval_calibration_measured_on=None,
+            eval_calibration_eval_semantics_signature=None,
+            eval_calibration_runtime_shape_signature=None,
+            eval_current_eval_semantics_signature=current_eval_semantics_signature(),
+            eval_current_runtime_shape_signature=current_runtime_shape_signature(),
             eval_calibration_telemetry_count=None,
             eval_calibration_commit_count=None,
             eval_calibration_day_count=None,
@@ -250,6 +262,10 @@ def resolve_eval_settings(
             eval_calibration_repeat_count=None,
             eval_calibration_measured_train_seconds=None,
             eval_calibration_measured_on=None,
+            eval_calibration_eval_semantics_signature=None,
+            eval_calibration_runtime_shape_signature=None,
+            eval_current_eval_semantics_signature=current_eval_semantics_signature(),
+            eval_current_runtime_shape_signature=current_runtime_shape_signature(),
             eval_calibration_telemetry_count=None,
             eval_calibration_commit_count=None,
             eval_calibration_day_count=None,
@@ -275,6 +291,10 @@ def resolve_eval_settings(
             eval_calibration_repeat_count=None,
             eval_calibration_measured_train_seconds=None,
             eval_calibration_measured_on=None,
+            eval_calibration_eval_semantics_signature=None,
+            eval_calibration_runtime_shape_signature=None,
+            eval_current_eval_semantics_signature=current_eval_semantics_signature(),
+            eval_current_runtime_shape_signature=current_runtime_shape_signature(),
             eval_calibration_telemetry_count=None,
             eval_calibration_commit_count=None,
             eval_calibration_day_count=None,
@@ -305,6 +325,10 @@ def resolve_eval_settings(
             eval_calibration_repeat_count=None,
             eval_calibration_measured_train_seconds=None,
             eval_calibration_measured_on=None,
+            eval_calibration_eval_semantics_signature=None,
+            eval_calibration_runtime_shape_signature=None,
+            eval_current_eval_semantics_signature=current_eval_semantics_signature(),
+            eval_current_runtime_shape_signature=current_runtime_shape_signature(),
             eval_calibration_telemetry_count=None,
             eval_calibration_commit_count=None,
             eval_calibration_day_count=None,
@@ -333,6 +357,10 @@ def resolve_eval_settings(
             eval_calibration_repeat_count=calibration.repeat_count,
             eval_calibration_measured_train_seconds=calibration.measured_train_seconds,
             eval_calibration_measured_on=calibration.measured_on,
+            eval_calibration_eval_semantics_signature=calibration.eval_semantics_signature,
+            eval_calibration_runtime_shape_signature=calibration.runtime_shape_signature,
+            eval_current_eval_semantics_signature=current_eval_semantics_signature(),
+            eval_current_runtime_shape_signature=current_runtime_shape_signature(),
             eval_calibration_telemetry_count=0,
             eval_calibration_commit_count=0,
             eval_calibration_day_count=0,
@@ -345,6 +373,49 @@ def resolve_eval_settings(
         ), (
             f"calibration row {calibration.key} is policy_version={calibration.policy_version}, "
             f"expected {EVAL_POLICY_VERSION}; keeping default canonical eval settings"
+        )
+    current_eval_signature = current_eval_semantics_signature()
+    current_runtime_signature = current_runtime_shape_signature()
+    if (
+        calibration.eval_semantics_signature != current_eval_signature
+        or calibration.runtime_shape_signature != current_runtime_signature
+    ):
+        limited_by = []
+        if calibration.eval_semantics_signature != current_eval_signature:
+            limited_by.append("eval-signature")
+        if calibration.runtime_shape_signature != current_runtime_signature:
+            limited_by.append("runtime-signature")
+        limited_by_text = ",".join(limited_by)
+        return replace(
+            config,
+            canonical_eval_rung="default",
+            canonical_eval_slices=EVAL_SLICE_CAP,
+            canonical_eval_reference_tokens=EVAL_TOKENS,
+            canonical_eval_batch_size=default_canonical_eval_batch_size(config.canonical_eval_seq_len),
+            eval_calibration_status="signature-mismatch",
+            eval_calibration_key=calibration.key,
+            eval_calibration_confidence=calibration.confidence,
+            eval_calibration_effective_confidence=calibration.confidence,
+            eval_calibration_freshness="unknown",
+            eval_calibration_repeat_count=calibration.repeat_count,
+            eval_calibration_measured_train_seconds=calibration.measured_train_seconds,
+            eval_calibration_measured_on=calibration.measured_on,
+            eval_calibration_eval_semantics_signature=calibration.eval_semantics_signature,
+            eval_calibration_runtime_shape_signature=calibration.runtime_shape_signature,
+            eval_current_eval_semantics_signature=current_eval_signature,
+            eval_current_runtime_shape_signature=current_runtime_signature,
+            eval_calibration_telemetry_count=0,
+            eval_calibration_commit_count=0,
+            eval_calibration_day_count=0,
+            eval_calibration_observed_rungs=None,
+            eval_calibration_stable_rungs=None,
+            eval_calibration_last_seen_on=None,
+            eval_calibration_last_seen_age_days=None,
+            eval_calibration_limited_by=limited_by_text,
+            eval_policy_version=EVAL_POLICY_VERSION,
+        ), (
+            f"calibration row {calibration.key} does not match the current code signatures "
+            f"({limited_by_text}); keeping default canonical eval settings"
         )
 
     decision = choose_auto_eval_decision(
@@ -367,6 +438,10 @@ def resolve_eval_settings(
             eval_calibration_repeat_count=decision.calibration.repeat_count,
             eval_calibration_measured_train_seconds=decision.calibration.measured_train_seconds,
             eval_calibration_measured_on=decision.calibration.measured_on,
+            eval_calibration_eval_semantics_signature=decision.calibration.eval_semantics_signature,
+            eval_calibration_runtime_shape_signature=decision.calibration.runtime_shape_signature,
+            eval_current_eval_semantics_signature=current_eval_semantics_signature(),
+            eval_current_runtime_shape_signature=current_runtime_shape_signature(),
             eval_calibration_telemetry_count=decision.telemetry_count,
             eval_calibration_commit_count=decision.telemetry_commit_count,
             eval_calibration_day_count=decision.telemetry_day_count,
@@ -397,6 +472,10 @@ def resolve_eval_settings(
         eval_calibration_repeat_count=decision.calibration.repeat_count,
         eval_calibration_measured_train_seconds=decision.calibration.measured_train_seconds,
         eval_calibration_measured_on=decision.calibration.measured_on,
+        eval_calibration_eval_semantics_signature=decision.calibration.eval_semantics_signature,
+        eval_calibration_runtime_shape_signature=decision.calibration.runtime_shape_signature,
+        eval_current_eval_semantics_signature=current_eval_semantics_signature(),
+        eval_current_runtime_shape_signature=current_runtime_shape_signature(),
         eval_calibration_telemetry_count=decision.telemetry_count,
         eval_calibration_commit_count=decision.telemetry_commit_count,
         eval_calibration_day_count=decision.telemetry_day_count,
@@ -456,8 +535,11 @@ def get_lr_multiplier(progress: float) -> float:
     return cooldown + (1.0 - cooldown) * FINAL_LR_FRAC
 
 
-def get_muon_momentum(step: int) -> float:
-    frac = min(step / 300, 1.0)
+MUON_RAMP_TOKENS = 300 * 12288  # 300 steps at tuned batch=12288
+
+def get_muon_momentum(step: int, total_batch_size: int = 12288) -> float:
+    ramp_steps = max(1, MUON_RAMP_TOKENS // total_batch_size)
+    frac = min(step / ramp_steps, 1.0)
     return (1.0 - frac) * 0.85 + frac * 0.95
 
 
@@ -727,6 +809,10 @@ def resolve_run_config(args: argparse.Namespace) -> RunConfig:
         eval_calibration_repeat_count=None,
         eval_calibration_measured_train_seconds=None,
         eval_calibration_measured_on=None,
+        eval_calibration_eval_semantics_signature=None,
+        eval_calibration_runtime_shape_signature=None,
+        eval_current_eval_semantics_signature=current_eval_semantics_signature(),
+        eval_current_runtime_shape_signature=current_runtime_shape_signature(),
         eval_calibration_telemetry_count=None,
         eval_calibration_commit_count=None,
         eval_calibration_day_count=None,
@@ -856,6 +942,10 @@ def resolve_resume_config(args: argparse.Namespace) -> RunConfig:
     run_config.setdefault("eval_calibration_repeat_count", None)
     run_config.setdefault("eval_calibration_measured_train_seconds", None)
     run_config.setdefault("eval_calibration_measured_on", None)
+    run_config.setdefault("eval_calibration_eval_semantics_signature", None)
+    run_config.setdefault("eval_calibration_runtime_shape_signature", None)
+    run_config.setdefault("eval_current_eval_semantics_signature", current_eval_semantics_signature())
+    run_config.setdefault("eval_current_runtime_shape_signature", current_runtime_shape_signature())
     run_config.setdefault("eval_calibration_telemetry_count", None)
     run_config.setdefault("eval_calibration_commit_count", None)
     run_config.setdefault("eval_calibration_day_count", None)
@@ -1072,6 +1162,11 @@ def describe_eval_policy(args: RunConfig) -> str:
                 f"default canonical eval settings (calibration row {args.eval_calibration_key} is stale for "
                 f"policy_version={args.eval_policy_version})"
             )
+        if args.eval_calibration_status == "signature-mismatch":
+            return (
+                f"default canonical eval settings (calibration row {args.eval_calibration_key} does not match "
+                f"current code signatures; limited_by={args.eval_calibration_limited_by})"
+            )
         return "default canonical eval settings"
     if args.canonical_eval_rung in {"cheap", "reference", "full"}:
         reference = (
@@ -1145,6 +1240,10 @@ def main() -> None:
         f"eval_calibration_repeat_count={args.eval_calibration_repeat_count}, "
         f"eval_calibration_measured_train_seconds={args.eval_calibration_measured_train_seconds}, "
         f"eval_calibration_measured_on={args.eval_calibration_measured_on}, "
+        f"eval_calibration_eval_semantics_signature={args.eval_calibration_eval_semantics_signature}, "
+        f"eval_calibration_runtime_shape_signature={args.eval_calibration_runtime_shape_signature}, "
+        f"eval_current_eval_semantics_signature={args.eval_current_eval_semantics_signature}, "
+        f"eval_current_runtime_shape_signature={args.eval_current_runtime_shape_signature}, "
         f"eval_calibration_telemetry_count={args.eval_calibration_telemetry_count}, "
         f"eval_calibration_commit_count={args.eval_calibration_commit_count}, "
         f"eval_calibration_day_count={args.eval_calibration_day_count}, "
@@ -1314,7 +1413,7 @@ def main() -> None:
     while budget_elapsed_seconds() < args.time_budget:
         progress = min(budget_elapsed_seconds() / args.time_budget, 1.0)
         lrm = get_lr_multiplier(progress)
-        muon_momentum = get_muon_momentum(step)
+        muon_momentum = get_muon_momentum(step, args.total_batch_size)
         muon_weight_decay = get_weight_decay(progress)
         optimizer.set_schedule(
             lr_multiplier=lrm,
@@ -1504,6 +1603,10 @@ def main() -> None:
     print(f"eval_calibration_repeat_count: {args.eval_calibration_repeat_count}")
     print(f"eval_calibration_measured_train_seconds: {args.eval_calibration_measured_train_seconds}")
     print(f"eval_calibration_measured_on: {args.eval_calibration_measured_on}")
+    print(f"eval_calibration_eval_semantics_signature: {args.eval_calibration_eval_semantics_signature}")
+    print(f"eval_calibration_runtime_shape_signature: {args.eval_calibration_runtime_shape_signature}")
+    print(f"eval_current_eval_semantics_signature: {args.eval_current_eval_semantics_signature}")
+    print(f"eval_current_runtime_shape_signature: {args.eval_current_runtime_shape_signature}")
     print(f"eval_calibration_telemetry_count: {args.eval_calibration_telemetry_count}")
     print(f"eval_calibration_commit_count: {args.eval_calibration_commit_count}")
     print(f"eval_calibration_day_count: {args.eval_calibration_day_count}")

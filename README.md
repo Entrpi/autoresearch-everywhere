@@ -13,67 +13,91 @@ This fork is an Apple Silicon-first continuation of [karpathy/autoresearch](http
 The core idea is unchanged: give an agent a small but real language-model training loop, let it run short experiments against a fixed metric and fixed time budget, and keep the ideas that improve validation BPB. In this fork, that loop is centered on MLX and Apple Silicon rather than a single NVIDIA GPU.
 By policy, this branch is reserved for AI-shaped or AI-authored code changes; fully human-authored code changes should happen in a fork rather than this mainline history.
 
-## MLX Path
+## Start Here
 
-The MLX workflow is built around four files:
-
-- **`prepare_mlx.py`**: one-time data and tokenizer setup for the MLX path.
-- **`train_mlx.py`**: the MLX training entrypoint, including M5-oriented presets.
-- **`autoresearch_mlx/`**: the MLX dataloader, model, optimizer, and evaluation implementation.
-- **`program_mlx.md`**: the baseline prompt/program for agents running the MLX path.
-
-For the full architecture, subsystem boundaries, feature-gap matrix, and flow diagrams, see [docs/mlx-port-architecture.md](docs/mlx-port-architecture.md).
-For a grounded history of changes, including measured effects and explicit provenance tiers, see [CHANGELOG.md](CHANGELOG.md).
-For the current preset / hardware calibration workflow and the calibration tooling, including `train-grid`, `eval-batch`, `eval-rungs`, and `telemetry-summary`, see [docs/preset-calibration.md](docs/preset-calibration.md). Shipped preset shapes now use the checked-in eval tradeoff tables by default when canonical eval settings are not manually overridden, but only on exact hardware-key matches. The runtime surfaces calibration status, effective confidence, freshness, telemetry coverage, stable rung coverage, and last-seen date so underfilled or stale calibration is visible instead of implicit; unmatched or stale rows fall back visibly to the default canonical settings.
-
-Training still uses a **fixed 5-minute training budget** by default. `train_mlx.py` now supports `--time-budget-mode train|wall`, but the default `train` mode keeps the original intent: budget is accounted in accumulated optimizer-step time rather than raw elapsed wall time. `val_bpb` is now a fixed canonical BPB used for cross-preset comparisons, while `proxy_val_bpb` reports the same-shape local evaluation used for quick inspection. The default canonical eval now uses `seq_len=2048` with `262144` eval tokens, and its batch is auto-derived to target about `4096` tokens per eval step, so `256 -> 16`, `512 -> 8`, `1024 -> 4`, and `2048 -> 2` unless you override it. When prepacked validation rows are available, canonical eval samples evenly spaced contiguous slices across the first upstream-sized eval horizon instead of scoring just one deterministic prefix.
-
-## Quick Start
+The idealized new-user path is now platform bring-up first, experimentation second.
 
 **Requirements:** Apple Silicon, macOS, Python 3.10+, and [uv](https://docs.astral.sh/uv/).
+
+### New Hardware Bring-Up
+
+If you are on unfamiliar hardware, the intended path is:
 
 ```bash
 # 1. Install dependencies
 uv sync
 
-# 2. Download data, train the tokenizer, and build token caches
+# 2. Download data, train the tokenizer, and build caches
 uv run prepare_mlx.py
 
-# 3. Optional smoke test
-uv run train_mlx.py --smoke
+# 3. Find the best starting point for this machine
+uv run tools/calibrate_platform.py --mode fast
 
-# 4. Run the default M5-oriented baseline
+# 4. Optional stronger calibration pass
+uv run tools/calibrate_platform.py --mode full --output-dir <same-dir-as-fast-run>
+```
+
+That flow is the new front door to the repo. The bring-up tool fingerprints the machine, explores the shipped preset families, runs a constrained local search, calibrates eval rungs on the chosen operating point, and emits:
+
+- a Markdown report
+- a JSON artifact
+- a candidate new default for the autoresearch stage on that hardware
+- lower / recommended / upper / reference zones
+- a promotion bundle that says which artifacts are immediately promotable and which still need a fuller audit
+
+By default, the bring-up sweep only considers the practical MLX preset families (`m5-fast` through `m5-xlarge`). Add `--presets ...,upstream` only when you explicitly want the slower upstream-style reference included in the same run.
+
+For the actual implementation details, see [docs/platform-calibration.md](docs/platform-calibration.md).
+
+The same tool is also the intended revalidation path after meaningful autoresearch changes to the model or runtime, such as a new MLP block or a more efficient attention implementation. Use judgment first: if the finding looks like it could generalize across preset shapes or hardware classes, rerun platform calibration proactively. Platform and eval calibrations are also stamped with runtime and eval signatures, but those are the conservative backstop rather than the main trigger.
+
+### Known M5 Reference Path
+
+If you are on a machine close to the current reference hardware, you can skip bring-up and start directly with the known M5 defaults:
+
+```bash
+uv sync
+uv run prepare_mlx.py
+uv run train_mlx.py --smoke
 uv run train_mlx.py
 ```
 
-If that works, the MLX environment is ready.
+The current MLX port and shipped defaults were developed on and tested against an Apple M5 MacBook Pro with 32 GB unified memory and a 10-core GPU. They are a calibrated starting point for that workstation class, not a promise of universal optimality across the whole M5 family.
 
-The current MLX port and preset defaults were developed on and tested against an Apple M5 MacBook Pro with 32 GB unified memory and a 10-core GPU. They are a calibrated starting point for that machine, not a promise of universal optimality across the whole M5 family.
+## System Overview
 
-`prepare_mlx.py` now builds both the reusable shard token cache under `~/.cache/autoresearch/token_cache/` and the shipped prepacked row caches under `~/.cache/autoresearch/prepacked_cache/` by default, so all shipped M5 presets can hit the fast path without extra setup. Use `uv run prepare_mlx.py --skip-token-cache` if you only want the raw data and tokenizer artifacts, or `uv run prepare_mlx.py --skip-prepacked-cache` if you explicitly want to leave training on the live packing fallback path.
+The MLX workflow is now built around five subsystems:
 
-The prepacked caches are keyed by split and sequence length. `train_mlx.py` and evaluation will prefer them automatically when they are present; use `uv run train_mlx.py --no-prepacked-cache` to force the live packing path for debugging or ablations.
+- **Platform bring-up**: `tools/calibrate_platform.py`
+- **Runtime eval policy**: `autoresearch_mlx/eval_policy.py` and `autoresearch_mlx/eval_telemetry.py`
+- **Training engine**: `train_mlx.py`, `autoresearch_mlx/model.py`, `autoresearch_mlx/optim.py`
+- **Data and evaluation substrate**: `prepare_mlx.py`, `autoresearch_mlx/data.py`
+- **Agent loop**: `program_mlx.md`
 
-`train_mlx.py` also supports resumable checkpoints. For runs longer than 5 minutes, the MLX path enables exact full-state checkpoints by default using a conservative interval selector grounded in the measured exact-resume save costs on this machine. Use `--checkpoint-path` to choose the directory explicitly while keeping the default cadence selector, `--checkpoint-interval` to pin the cadence, `--resume-from` to continue later, or `--no-checkpoint` to disable checkpointing entirely. Exact sync remains the default checkpoint path. `--checkpoint-save-mode async` is available as an optional exact-resume variant for wall-clock-constrained runs, but the current grounded result is still to keep synchronous exact checkpoints as the default.
+The important shift is that the repo is no longer just “an MLX port of `train.py`.” It is now a small Apple-Silicon research platform with explicit machine bring-up, runtime trust signals, and promotion-ready calibration artifacts.
 
-The trainer also supports two budget accounting modes:
+For the full architecture, subsystem boundaries, and feature matrix, see [docs/mlx-port-architecture.md](docs/mlx-port-architecture.md).
+For a grounded history of changes, including measured effects and provenance tiers, see [CHANGELOG.md](CHANGELOG.md).
+For the preset and hardware calibration workflow beneath the one-button bring-up path, see [docs/preset-calibration.md](docs/preset-calibration.md).
 
-- `--time-budget-mode train`: default; stops on accumulated optimizer-step time and is the right mode for core model, optimizer, and data-path changes.
-- `--time-budget-mode wall`: stops on elapsed training-loop wall time and is the right mode for checkpointing or orchestration changes where reduced blocking is itself the point.
+## Training Defaults
 
-```bash
-# save checkpoints every 5 minutes
-uv run train_mlx.py --checkpoint-path /tmp/autoresearch-m5-balanced --checkpoint-interval 300
+The trainer still uses a **fixed 5-minute training budget** by default. `train_mlx.py` supports `--time-budget-mode train|wall`, but the default `train` mode preserves the original autoresearch intent: budget is accounted in accumulated optimizer-step time rather than raw wall time.
 
-# resume later with a larger total training budget
-uv run train_mlx.py --resume-from /tmp/autoresearch-m5-balanced --time-budget 900
+Canonical evaluation is now long-context and upstream-oriented by default:
 
-# optional exact async writes on the same exact-resume semantics
-uv run train_mlx.py --checkpoint-save-mode async --checkpoint-path /tmp/autoresearch-m5-balanced
+- `seq_len=2048`
+- reduced-budget `cheap/reference/full` rungs
+- auto batch sizing that targets about `4096` tokens per eval step
+- sliced sampling across the upstream horizon for reduced-budget rungs
+- sequential full-eval for the full upstream-sized rung
 
-# wall-clock-capped checkpoint benchmark
-uv run train_mlx.py --time-budget 60 --time-budget-mode wall --checkpoint-save-mode async --benchmark-skip-eval
-```
+Shipped preset shapes use the checked-in eval tradeoff tables by default when canonical eval settings are not manually overridden, but only on exact hardware-key matches. The runtime surfaces calibration status, effective confidence, freshness, telemetry coverage, stable rung coverage, and last-seen date so underfilled or stale calibration is visible instead of implicit; unmatched or stale rows fall back visibly to the default canonical settings.
+The runtime also surfaces code-signature matches for eval semantics and runtime shape, so architecture or runtime changes can visibly invalidate a previously trusted calibration even on the same machine.
+
+`prepare_mlx.py` builds both the reusable shard token cache under `~/.cache/autoresearch/token_cache/` and the shipped prepacked row caches under `~/.cache/autoresearch/prepacked_cache/` by default, so all shipped M5 presets can hit the fast path without extra setup. Use `uv run prepare_mlx.py --skip-token-cache` if you only want the raw data and tokenizer artifacts, or `uv run prepare_mlx.py --skip-prepacked-cache` if you explicitly want to leave training on the live packing fallback path.
+
+The trainer also supports exact resumable checkpoints. For runs longer than 5 minutes, the MLX path enables exact full-state checkpoints by default using a conservative interval selector grounded in measured resume costs on this machine. Exact sync remains the default checkpoint path. `--checkpoint-save-mode async` is available as an optional exact-resume variant for wall-clock-constrained runs, but it is still not the default path.
 
 ## Presets
 
@@ -165,10 +189,10 @@ Current project snapshot from [CHANGELOG.md](CHANGELOG.md):
 
 | Metric | Value |
 | --- | --- |
-| Mean autonomy score | `3.36 / 6` |
-| Mean complexity | `7.07 / commit` |
-| Mean score per top-level bullet | `3.45 / 6` |
-| History covered | `30` commits across `9` subsystems |
+| Mean autonomy score | `3.38 / 6` |
+| Mean complexity | `7.48 / commit` |
+| Mean score per top-level bullet | `3.47 / 6` |
+| History covered | `31` commits across `9` subsystems |
 <!-- autonomy-golf-snapshot:end -->
 
 Refresh with:
@@ -184,6 +208,7 @@ prepare_mlx.py        — MLX data prep entrypoint
 train_mlx.py          — MLX training entrypoint
 autoresearch_mlx/     — MLX data/model/optimizer implementation
 program_mlx.md        — MLX agent instructions
+tools/calibrate_platform.py — one-button platform bring-up calibration
 tools/               — optional local sweep tooling
 pyproject.toml        — dependencies
 ```

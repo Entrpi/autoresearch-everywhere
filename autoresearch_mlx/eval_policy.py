@@ -7,6 +7,10 @@ import re
 import subprocess
 import sys
 
+from .calibration_signature import (
+    current_eval_semantics_signature,
+    current_runtime_shape_signature,
+)
 from .constants import (
     CANONICAL_EVAL_SEQ_LEN,
     CANONICAL_EVAL_STEP_TOKENS,
@@ -22,6 +26,8 @@ DEFAULT_EVAL_HARDWARE_KEY = "apple-m5-32gb-10gpu"
 REFERENCE_EVAL_TOKENS = 3 * 524288
 EVAL_CALIBRATION_AGING_DAYS = 30
 EVAL_CALIBRATION_STALE_DAYS = 90
+REFERENCE_EVAL_SEMANTICS_SIGNATURE = "ab1180c58fd250e4"
+REFERENCE_RUNTIME_SHAPE_SIGNATURE = "6c6af7263abfa554"
 
 
 @dataclass(frozen=True)
@@ -60,6 +66,8 @@ class EvalCalibration:
     measured_train_seconds: float
     repeat_count: int
     measured_on: str
+    eval_semantics_signature: str
+    runtime_shape_signature: str
     notes: str = ""
     cheap: EvalRungMeasurement | None = None
     reference: EvalRungMeasurement | None = None
@@ -100,6 +108,8 @@ class AutoEvalDecision:
     recommendation: EvalRecommendation
     effective_confidence: str
     freshness: str
+    eval_semantics_signature_match: bool
+    runtime_shape_signature_match: bool
     telemetry_count: int
     telemetry_commit_count: int
     telemetry_day_count: int
@@ -282,6 +292,8 @@ DEFAULT_EVAL_CALIBRATIONS = (
         measured_train_seconds=120.0,
         repeat_count=1,
         measured_on="2026-03-10",
+        eval_semantics_signature=REFERENCE_EVAL_SEMANTICS_SIGNATURE,
+        runtime_shape_signature=REFERENCE_RUNTIME_SHAPE_SIGNATURE,
         notes="Reference rung is a plausible 5-minute default; full is primarily an audit rung.",
         cheap=_measurement(
             CHEAP_EVAL_RUNG,
@@ -315,6 +327,8 @@ DEFAULT_EVAL_CALIBRATIONS = (
         measured_train_seconds=120.0,
         repeat_count=1,
         measured_on="2026-03-10",
+        eval_semantics_signature=REFERENCE_EVAL_SEMANTICS_SIGNATURE,
+        runtime_shape_signature=REFERENCE_RUNTIME_SHAPE_SIGNATURE,
         notes="Reference is the cleanest middle rung; full becomes practical only on much longer runs.",
         cheap=_measurement(
             CHEAP_EVAL_RUNG,
@@ -348,6 +362,8 @@ DEFAULT_EVAL_CALIBRATIONS = (
         measured_train_seconds=120.0,
         repeat_count=1,
         measured_on="2026-03-10",
+        eval_semantics_signature=REFERENCE_EVAL_SEMANTICS_SIGNATURE,
+        runtime_shape_signature=REFERENCE_RUNTIME_SHAPE_SIGNATURE,
         notes="Reference reads more like a long-run rung than a 5-minute default.",
         cheap=_measurement(
             CHEAP_EVAL_RUNG,
@@ -381,6 +397,8 @@ DEFAULT_EVAL_CALIBRATIONS = (
         measured_train_seconds=120.0,
         repeat_count=1,
         measured_on="2026-03-10",
+        eval_semantics_signature=REFERENCE_EVAL_SEMANTICS_SIGNATURE,
+        runtime_shape_signature=REFERENCE_RUNTIME_SHAPE_SIGNATURE,
         notes="Reference improves on cheap but remains too expensive for a short-run default.",
         cheap=_measurement(
             CHEAP_EVAL_RUNG,
@@ -498,6 +516,12 @@ def choose_auto_eval_decision(
     )
     effective_confidence = _effective_confidence(calibration, telemetry)
     freshness, last_seen_on, last_seen_age_days = _freshness_status(calibration, telemetry)
+    eval_semantics_signature_match = (
+        calibration.eval_semantics_signature == current_eval_semantics_signature()
+    )
+    runtime_shape_signature_match = (
+        calibration.runtime_shape_signature == current_runtime_shape_signature()
+    )
 
     base_recommendation = recommend_eval_rung(
         calibration,
@@ -526,6 +550,8 @@ def choose_auto_eval_decision(
         recommendation=recommendation,
         effective_confidence=effective_confidence,
         freshness=freshness,
+        eval_semantics_signature_match=eval_semantics_signature_match,
+        runtime_shape_signature_match=runtime_shape_signature_match,
         telemetry_count=telemetry.eligible_count,
         telemetry_commit_count=telemetry.commit_count,
         telemetry_day_count=telemetry.day_count,
