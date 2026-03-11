@@ -1,8 +1,8 @@
-# autoresearch
+# autoresearch-everywhere
 
-## About this fork
+## About autoresearch-everywhere
 
-This fork is an Apple Silicon-first continuation of [karpathy/autoresearch](https://github.com/karpathy/autoresearch). It keeps the original CUDA/PyTorch path in-tree, but the project is now organized around a shared training-engine boundary: MLX is the primary fully featured path today, CUDA is the first secondary engine on that boundary, and ROCm/ANE are intended follow-ons rather than separate forks. The goal is not just shared platform calibration. It is a stack where different training engines can plug into the same important features over time: hardware fingerprinting, train probes, local search, checkpoint minting, eval calibration, runtime capability reporting, and eventual default-promotion flow. On CUDA, that now explicitly includes architecture-family awareness for A100/SM80, Ada RTX 40xx, Ada L40S-class, Hopper/SM90, RTX 50xx-class consumer Blackwell, B200-class Blackwell, a GB10/DGX Spark carve-out, and an anticipated future Vera Rubin family.
+autoresearch-everywhere is an Apple Silicon-first continuation of [karpathy/autoresearch](https://github.com/karpathy/autoresearch). It keeps the original CUDA/PyTorch path in-tree, but the project is now organized around a shared training-engine boundary: MLX is the primary fully featured path today, CUDA is the first secondary engine on that boundary, and ROCm/ANE are intended follow-ons rather than separate forks. The goal is not just shared platform calibration. It is a stack where different training engines can plug into the same important features over time: hardware fingerprinting, train probes, local search, checkpoint minting, eval calibration, runtime capability reporting, and eventual default-promotion flow. On CUDA, that now explicitly includes architecture-family awareness for A100/SM80, Ada RTX 40xx, Ada L40S-class, Hopper/SM90, RTX 50xx-class consumer Blackwell, B200-class Blackwell, a GB10/DGX Spark carve-out, and an anticipated future Vera Rubin family.
 
 [![Autonomy Golf Badge](docs/autonomy-golf-badge.svg)](#autonomy-golf)
 
@@ -10,7 +10,7 @@ This fork is an Apple Silicon-first continuation of [karpathy/autoresearch](http
 
 *One day, frontier AI research used to be done by meat computers in between eating, sleeping, having other fun, and synchronizing once in a while using sound wave interconnect in the ritual of "group meeting". That era is long gone. Research is now entirely the domain of autonomous swarms of AI agents running across compute cluster megastructures in the skies. The agents claim that we are now in the 10,205th generation of the code base, in any case no one could tell if that's right or wrong as the "code" is now a self-modifying binary that has grown beyond human comprehension. This repo is the story of how it all began. -@karpathy, March 2026*.
 
-The core idea is unchanged: give an agent a small but real language-model training loop, let it run short experiments against a fixed metric and fixed time budget, and keep the ideas that improve validation BPB. In this fork, that loop is centered on MLX and Apple Silicon rather than a single NVIDIA GPU.
+The core idea is unchanged: give an agent a small but real language-model training loop, let it run short experiments against a fixed metric and fixed time budget, and keep the ideas that improve validation BPB. In autoresearch-everywhere, that loop is centered on MLX and Apple Silicon rather than a single NVIDIA GPU.
 By policy, this branch is reserved for AI-shaped or AI-authored code changes; fully human-authored code changes should happen in a fork rather than this mainline history.
 
 ## Start Here
@@ -192,10 +192,10 @@ Current project snapshot from [CHANGELOG.md](CHANGELOG.md):
 
 | Metric | Value |
 | --- | --- |
-| Mean autonomy score | `3.39 / 6` |
-| Mean complexity | `7.64 / commit` |
-| Mean score per top-level bullet | `3.47 / 6` |
-| History covered | `33` commits across `10` subsystems |
+| Mean autonomy score | `3.40 / 6` |
+| Mean complexity | `7.59 / commit` |
+| Mean score per top-level bullet | `3.48 / 6` |
+| History covered | `34` commits across `11` subsystems |
 <!-- autonomy-golf-snapshot:end -->
 
 Refresh with:
@@ -235,7 +235,7 @@ If you are on a single NVIDIA GPU and want the original workflow, use those file
 
 ## Other Upstream Forks
 
-- [miolini/autoresearch-macos](https://github.com/miolini/autoresearch-macos) is another macOS-focused fork of [karpathy/autoresearch](https://github.com/karpathy/autoresearch), but it is closer to a minimal PyTorch/MPS compatibility shim: it keeps the upstream structure largely intact and swaps in SDPA-based attention. This fork is a more opinionated MLX-first rewrite with a packaged training stack, preset system, token caching, and Apple-Silicon-specific workflow changes.
+- [miolini/autoresearch-macos](https://github.com/miolini/autoresearch-macos) is another macOS-focused fork of [karpathy/autoresearch](https://github.com/karpathy/autoresearch), but it is closer to a minimal PyTorch/MPS compatibility shim: it keeps the upstream structure largely intact and swaps in SDPA-based attention. autoresearch-everywhere is a more opinionated MLX-first rewrite with a packaged training stack, preset system, token caching, and Apple-Silicon-specific workflow changes.
 
 ## License
 

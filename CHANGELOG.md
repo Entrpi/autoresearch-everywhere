@@ -29,7 +29,32 @@ On this hardware, the default canonical matched benchmark window for optimizatio
 
 ## Latest
 
-### New commit — calibration: Restore trusted MLX eval calibration after engine-boundary refactor — score `3` — complexity `5`
+### New commit — docs: Rename project to autoresearch-everywhere — score `4` — complexity `6`
+
+**Human-directed, AI-shaped (4)**
+
+- Requested renaming the GitHub repo and local project directory to `autoresearch-everywhere`, and updating the docs so the project actually presents itself under that new name.
+  - Meaning: renamed the remote repository to `Entrpi/autoresearch-everywhere`, moved the local workspace directory to `/Users/ent/Codex/autoresearch-everywhere`, rewrote stale absolute-path references in the changelog, and updated the primary project docs to describe the repo as `autoresearch-everywhere` rather than a generic unnamed fork.
+  - Motivation: once the repo name changed, leaving the local workspace, artifact links, and top-level docs under the old identity would make the rename feel partial and sloppy.
+  - Purpose: make the project name, repo location, and user-facing documentation line up cleanly so future references, file links, and onboarding copy all point at the same identity.
+  - Updated the main user-facing identity in `README.md`, `program.md`, and `docs/mlx-port-architecture.md`.
+  - Rewrote the old absolute-path artifact and command references in `CHANGELOG.md` to the new local repo path.
+
+**Grounding**
+
+- Files:
+  - `CHANGELOG.md`
+  - `README.md`
+  - `program.md`
+  - `docs/mlx-port-architecture.md`
+  - Validation:
+  - `python3 tools/changelog_scores.py --group-by entry --format csv --include-latest --verify`
+- Measurements:
+  - No runtime measurements; this was a repository-identity and documentation consistency change.
+
+## Committed History
+
+### March 11, 2026 — `7a4da10` — calibration: Restore trusted MLX eval calibration after engine-boundary refactor — score `3` — complexity `5`
 
 **AI-identified within brief, human-shaped (3)**
 
@@ -56,8 +81,6 @@ On this hardware, the default canonical matched benchmark window for optimizatio
   - `train.py --engine mlx --preset m5-fast --time-budget 0.2 --no-checkpoint` now reports `eval_calibration_status=calibrated` and `canonical_rung=cheap` for `m5-fast_apple-m5-32gb-10gpu`, where the same path had previously reported `signature-mismatch`.
   - `train.py --engine mlx --preset m5-balanced --time-budget 20 --no-checkpoint` now reports `eval_calibration_status=calibrated`, `eval_calibration_effective_confidence=telemetry-cross-session-stable`, and `canonical_rung=cheap`, while sustaining `steady_state_tok_per_sec=45055.8`.
   - The bounded full-workflow bring-up at `/tmp/autoresearch_mlx_postfix_fast/report.json` completed end to end after the fix and emitted a promotion bundle under `/tmp/autoresearch_mlx_postfix_fast/promotion`.
-
-## Committed History
 
 ### March 11, 2026 — `0fe4594` — platform: Add shared MLX/CUDA training-engine boundary — score `4` — complexity `15`
 
@@ -581,7 +604,7 @@ On this hardware, the default canonical matched benchmark window for optimizatio
     | `m5-large` | exact midpoint resume | `5.846764` | `6.019718` | `2.188925` | `2.616e-01` |
     | `m5-large` | `weights_only` midpoint resume | `6.425774` | `5.762017` | `2.318585` | `6.785e-01` |
 
-  - Uninterrupted same-seed repeatability baseline ([artifact](/Users/ent/Codex/autoresearch/results/analysis/uninterrupted_repeatability.json)):
+  - Uninterrupted same-seed repeatability baseline ([artifact](/Users/ent/Codex/autoresearch-everywhere/results/analysis/uninterrupted_repeatability.json)):
 
     | Preset | steps | run 1 canonical `val_bpb` | run 2 canonical `val_bpb` | delta | relative RMS param drift |
     | --- | ---: | ---: | ---: | ---: | ---: |
@@ -623,7 +646,7 @@ On this hardware, the default canonical matched benchmark window for optimizatio
   - `./.venv/bin/python - <<'PY' ... > results/analysis/exact_async_process_abab_summary.json`
   - `./.venv/bin/python - <<'PY' ... > results/analysis/exact_async_wallclock_60s.json`
 - Measurements:
-  - Exact sync vs async checkpoint benchmark ([artifact](/Users/ent/Codex/autoresearch/results/analysis/exact_async_checkpoint_benchmark.json)):
+  - Exact sync vs async checkpoint benchmark ([artifact](/Users/ent/Codex/autoresearch-everywhere/results/analysis/exact_async_checkpoint_benchmark.json)):
 
     | Preset | Save mode | total seconds | blocking checkpoint % | total checkpoint write % | session tokens (M) | session steps | steady-state tok/s |
     | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |
@@ -632,7 +655,7 @@ On this hardware, the default canonical matched benchmark window for optimizatio
     | `m5-xlarge` | sync | `62.2` | `3.37` | `3.37` | `0.393` | `96` | `6556.8` |
     | `m5-xlarge` | async | `61.8` | `1.66` | `6.09` | `0.520` | `127` | `8581.8` |
 
-  - Exact sync vs async ABAB benchmark ([artifact](/Users/ent/Codex/autoresearch/results/analysis/exact_async_abab_summary.json)):
+  - Exact sync vs async ABAB benchmark ([artifact](/Users/ent/Codex/autoresearch-everywhere/results/analysis/exact_async_abab_summary.json)):
 
     | Preset | Save mode | mean total seconds | mean blocking checkpoint % | mean total checkpoint write % | mean session tokens (M) | mean steady-state tok/s |
     | --- | --- | ---: | ---: | ---: | ---: | ---: |
@@ -641,7 +664,7 @@ On this hardware, the default canonical matched benchmark window for optimizatio
     | `m5-xlarge` | sync | `62.7` | `3.47` | `3.47` | `0.393` | `6309.7` |
     | `m5-xlarge` | async | `61.1` | `1.33` | `6.53` | `0.381` | `6329.5` |
 
-  - Helper-process async exact ABAB benchmark ([artifact](/Users/ent/Codex/autoresearch/results/analysis/exact_async_process_abab_summary.json)):
+  - Helper-process async exact ABAB benchmark ([artifact](/Users/ent/Codex/autoresearch-everywhere/results/analysis/exact_async_process_abab_summary.json)):
 
     | Preset | Save mode | mean total seconds | mean blocking checkpoint % | mean total checkpoint write % | mean session tokens (M) | mean steady-state tok/s |
     | --- | --- | ---: | ---: | ---: | ---: | ---: |
@@ -650,7 +673,7 @@ On this hardware, the default canonical matched benchmark window for optimizatio
     | `m5-xlarge` | sync | `62.3` | `3.41` | `3.41` | `0.389` | `6433.5` |
     | `m5-xlarge` | async helper process | `62.2` | `2.45` | `15.27` | `0.387` | `6402.9` |
 
-  - Exact sync vs async under a `60s` wall-clock budget ([artifact](/Users/ent/Codex/autoresearch/results/analysis/exact_async_wallclock_60s.json)):
+  - Exact sync vs async under a `60s` wall-clock budget ([artifact](/Users/ent/Codex/autoresearch-everywhere/results/analysis/exact_async_wallclock_60s.json)):
 
     | Preset | Save mode | steps by cutoff | tokens by cutoff (M) | wall tok/s | blocking checkpoint % of wall | total checkpoint write % of wall |
     | --- | --- | ---: | ---: | ---: | ---: | ---: |
@@ -693,7 +716,7 @@ On this hardware, the default canonical matched benchmark window for optimizatio
   - `./.venv/bin/python -m autoresearch_mlx.train --preset m5-xlarge --time-budget 60 --benchmark-skip-eval --checkpoint-mode weights_only --checkpoint-path /tmp/autoresearch_m5_xlarge_weights_only --checkpoint-interval 2`
   - Verified via `.venv` Python snippet that `choose_auto_checkpoint_decision(...)` now resolves exact to `2m` and `weights_only` to `1m` on both calibrated parameter bands.
   - Verified via `.venv` Python snippet that `resolve_checkpoint_settings(...)` prints the same mode-aware `2m` vs `1m` result for `m5-large`, including distinct auto checkpoint paths per mode.
-  - `env PYTHONPATH=/Users/ent/Codex/autoresearch ./.venv/bin/python tools/checkpoint_tradeoff.py`
+  - `env PYTHONPATH=/Users/ent/Codex/autoresearch-everywhere ./.venv/bin/python tools/checkpoint_tradeoff.py`
 - Measurements:
   - Repeated-save `weights_only` overhead from matched long-window runs:
 
@@ -788,7 +811,7 @@ On this hardware, the default canonical matched benchmark window for optimizatio
   - `CHANGELOG.md`
 - Validation:
   - `python3 -m py_compile autoresearch_mlx/checkpoint_policy.py tools/checkpoint_tradeoff.py autoresearch_mlx/train.py`
-  - `env PYTHONPATH=/Users/ent/Codex/autoresearch ./.venv/bin/python tools/checkpoint_tradeoff.py`
+  - `env PYTHONPATH=/Users/ent/Codex/autoresearch-everywhere ./.venv/bin/python tools/checkpoint_tradeoff.py`
 - Measurements:
   - Updated scenario table with measured resume-ready penalties and a clean split between fixed save overhead and projected total waste:
 
@@ -1164,7 +1187,7 @@ On this hardware, the default canonical matched benchmark window for optimizatio
   - `tools/checkpoint_tradeoff.py`
 - Validation:
   - `python3 -m py_compile tools/checkpoint_tradeoff.py`
-  - `env MPLCONFIGDIR=/Users/ent/Codex/autoresearch/.mplconfig .venv/bin/python tools/checkpoint_tradeoff.py`
+  - `env MPLCONFIGDIR=/Users/ent/Codex/autoresearch-everywhere/.mplconfig .venv/bin/python tools/checkpoint_tradeoff.py`
 - Measurements:
   - Generated:
     - `results/analysis/checkpoint_tradeoff.png`

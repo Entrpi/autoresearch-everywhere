@@ -1,4 +1,4 @@
-# autoresearch
+# autoresearch-everywhere
 
 This is the generic agent entrypoint for the repo.
 

@@ -2,7 +2,7 @@
 
 ## Scope
 
-This document describes the current platform architecture in this fork of [karpathy/autoresearch](https://github.com/karpathy/autoresearch), with MLX as the fully featured primary engine today.
+This document describes the current platform architecture in autoresearch-everywhere, a fork of [karpathy/autoresearch](https://github.com/karpathy/autoresearch), with MLX as the fully featured primary engine today.
 
 It is centered on the current user story:
 
@@ -377,7 +377,7 @@ That is a healthier ordering than the earlier design, where the overnight toolin
 - no-calibration setup became explicit platform bring-up
 - human/agent memory about the machine became checked-in policy plus passive telemetry
 
-That means this fork is no longer best described as "upstream, but on MLX." It is better described as:
+That means autoresearch-everywhere is no longer best described as "upstream, but on MLX." It is better described as:
 
 - an MLX-native autoresearch platform
 - with Apple-Silicon bring-up and runtime calibration as first-class concerns
