@@ -29,7 +29,37 @@ On this hardware, the default canonical matched benchmark window for optimizatio
 
 ## Latest
 
-### New commit — platform: Add shared MLX/CUDA training-engine boundary — score `4` — complexity `15`
+### New commit — calibration: Restore trusted MLX eval calibration after engine-boundary refactor — score `3` — complexity `5`
+
+**AI-identified within brief, human-shaped (3)**
+
+- Inside the broader “close MLX regressions before finishing the refactor” workstream, surfaced the seeded-signature mismatch as the concrete parity bug and restored the trusted MLX eval rows to the current signatures.
+  - Meaning: re-stamped the checked-in MLX eval calibration rows to the current eval/runtime signatures so known-hardware MLX runs once again resolve to calibrated `cheap/reference/full` policy instead of falling straight into `signature-mismatch` fallback after the file/layout refactor.
+  - Motivation: the refactor had preserved the mechanics of the MLX workflow but broken trust in the seeded calibration table, which meant the new top-level path no longer behaved like the previous MLX-first system on its reference machine.
+  - Purpose: restore a true parity baseline so the consolidated top-level entrypoints and one-button bring-up path retain the trusted calibrated behavior that made the earlier MLX-first system practical.
+  - Verified that top-level MLX training now auto-selects calibrated eval rungs again on the reference M5 instead of falling back to default canonical eval.
+  - Re-exercised the bounded one-button MLX bring-up path to confirm the restored calibration rows propagate cleanly through `prepare.py`, `train.py`, and `calibrate.py`.
+
+**Grounding**
+
+- Files:
+  - `autoresearch_mlx/eval_policy.py`
+  - `CHANGELOG.md`
+  - Validation:
+  - `./.venv/bin/python train.py --engine mlx --preset m5-fast --time-budget 0.2 --no-checkpoint`
+  - `./.venv/bin/python train.py --engine mlx --preset m5-balanced --time-budget 20 --no-checkpoint`
+  - `./.venv/bin/python prepare.py --num-shards 1`
+  - `./.venv/bin/python train.py --smoke`
+  - `./.venv/bin/python calibrate.py --engine mlx --mode fast --coarse-time-budget 0.5 --ranking-time-budget 0.5 --local-search-time-budget 0.5 --eval-train-seconds 0.5 --eval-rungs cheap,reference --output-dir /tmp/autoresearch_mlx_postfix_fast --force`
+  - `python3 tools/changelog_scores.py --group-by entry --format csv --include-latest --verify`
+- Measurements:
+  - `train.py --engine mlx --preset m5-fast --time-budget 0.2 --no-checkpoint` now reports `eval_calibration_status=calibrated` and `canonical_rung=cheap` for `m5-fast_apple-m5-32gb-10gpu`, where the same path had previously reported `signature-mismatch`.
+  - `train.py --engine mlx --preset m5-balanced --time-budget 20 --no-checkpoint` now reports `eval_calibration_status=calibrated`, `eval_calibration_effective_confidence=telemetry-cross-session-stable`, and `canonical_rung=cheap`, while sustaining `steady_state_tok_per_sec=45055.8`.
+  - The bounded full-workflow bring-up at `/tmp/autoresearch_mlx_postfix_fast/report.json` completed end to end after the fix and emitted a promotion bundle under `/tmp/autoresearch_mlx_postfix_fast/promotion`.
+
+## Committed History
+
+### March 11, 2026 — `0fe4594` — platform: Add shared MLX/CUDA training-engine boundary — score `4` — complexity `15`
 
 **Human-directed, AI-shaped (4)**
 
@@ -101,8 +131,6 @@ On this hardware, the default canonical matched benchmark window for optimizatio
   - The current boundary is intentionally asymmetric:
     - `mlx` supports local search, checkpoint minting, eval-rung calibration, and promotion output
     - `cuda` currently supports hardware fingerprinting and comparable train probes, but not checkpoint-backed eval calibration yet
-
-## Committed History
 
 ### March 11, 2026 — `d641b72` — calibration: Add one-button platform bring-up tool — score `4` — complexity `20`
 
