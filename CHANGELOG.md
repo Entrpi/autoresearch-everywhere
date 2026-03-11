@@ -29,7 +29,46 @@ On this hardware, the default canonical matched benchmark window for optimizatio
 
 ## Latest
 
-### New commit — docs: Rename project to autoresearch-everywhere — score `4` — complexity `6`
+### New commit — lab: Add shared kernel-lab boundary and first MLX workspace — score `4` — complexity `7`
+
+**Human-directed, AI-shaped (4)**
+
+- Requested borrowing the `autokernel` pattern for MLX work, but with an eye toward a top-level lab that could later host Triton/CUDA and other backend-specific kernel workflows under one shared outer structure.
+  - Meaning: added a top-level `lab.py` entrypoint, a shared `autoresearch_lab/` boundary, and the first MLX implementation under `autoresearch_mlx/` with a mutable-workspace pattern plus a fixed benchmark harness.
+  - Motivation: backend-specific kernel work was going to become important, but it did not fit cleanly into either the training-engine boundary or the platform-calibration path. Without a shared lab boundary, future MLX, Triton/CUDA, ROCm, or ANE kernel work would drift into separate ad hoc workflows.
+  - Purpose: create a first-class experimental subsystem for kernel optimization that matches the repo's broader pattern: one generic top-level front door, backend-specific implementations underneath, and room to expand to more engines without creating new top-level orchestration trees each time.
+  - Added `autoresearch_lab/` as the shared lab boundary and dispatch layer, parallel to the way `autoresearch_platform/` handles training engines.
+  - Added the first MLX lab implementation with a starter-ready `rmsnorm` target, a generated mutable workspace, and a fixed correctness/performance benchmark harness.
+  - Integrated the lab into the top-level docs and architecture story so `lab.py` now sits alongside `prepare.py`, `train.py`, and `calibrate.py` as a real public entrypoint rather than an orphaned experiment.
+
+**Grounding**
+
+- Files:
+  - `CHANGELOG.md`
+  - `README.md`
+  - `program.md`
+  - `docs/kernel-lab.md`
+  - `docs/mlx-port-architecture.md`
+  - `docs/platform-calibration.md`
+  - `lab.py`
+  - `autoresearch_lab/__init__.py`
+  - `autoresearch_lab/entrypoints.py`
+  - `autoresearch_lab/labs.py`
+  - `autoresearch_mlx/lab.py`
+  - `autoresearch_mlx/lab_workspace.py`
+- Validation:
+  - `python3 -m py_compile lab.py autoresearch_lab/*.py autoresearch_mlx/lab.py autoresearch_mlx/lab_workspace.py`
+  - `./.venv/bin/python lab.py --list-engines`
+  - `./.venv/bin/python lab.py --engine mlx list-targets`
+  - `./.venv/bin/python lab.py --engine mlx init --target rmsnorm --workspace /tmp/mlx-rmsnorm-lab-48983`
+  - `./.venv/bin/python lab.py --engine mlx bench --workspace /tmp/mlx-rmsnorm-lab-48983 --quick`
+  - `python3 tools/changelog_scores.py --group-by entry --format csv --include-latest --verify`
+- Measurements:
+  - The first MLX lab workspace completed a quick RMSNorm benchmark with `max_abs_error=0.0`, `median_latency_ms=0.500`, and `median_throughput_gb_s=9.516` across the two quick benchmark cases.
+
+## Committed History
+
+### March 11, 2026 — `5c9ee53` — docs: Rename project to autoresearch-everywhere — score `4` — complexity `6`
 
 **Human-directed, AI-shaped (4)**
 
@@ -47,12 +86,10 @@ On this hardware, the default canonical matched benchmark window for optimizatio
   - `README.md`
   - `program.md`
   - `docs/mlx-port-architecture.md`
-  - Validation:
+- Validation:
   - `python3 tools/changelog_scores.py --group-by entry --format csv --include-latest --verify`
 - Measurements:
   - No runtime measurements; this was a repository-identity and documentation consistency change.
-
-## Committed History
 
 ### March 11, 2026 — `7a4da10` — calibration: Restore trusted MLX eval calibration after engine-boundary refactor — score `3` — complexity `5`
 

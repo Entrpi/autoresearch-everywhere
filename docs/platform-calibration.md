@@ -91,7 +91,9 @@ The current stack already provides most of the underlying pieces:
 - `autoresearch_mlx/train.py`
   - conservative runtime selector that exposes calibration status, confidence, freshness, and coverage
 
-The missing layer used to be orchestration and reporting. It is now the engine-specific depth of implementation. MLX currently exercises the whole stack; CUDA is the first narrower engine on the same boundary; ROCm and ANE should follow the same pattern rather than introducing new top-level orchestration.
+The missing layer used to be orchestration and reporting. It is now the engine-specific depth of implementation. MLX currently exercises the whole stack; CUDA is already beyond the original upstream path and lives on the same boundary with shared entrypoints, reporting, and architecture-aware runtime policy, even though it still trails MLX in calibration depth; ROCm and ANE should follow the same pattern rather than introducing new top-level orchestration.
+
+The same principle now also applies to kernel work. `lab.py` and `autoresearch_lab/` are the parallel boundary for backend-specific kernel experimentation, so future Triton/CUDA, ROCm, or ANE kernel labs can reuse one outer workflow without being confused with the platform-calibration path itself.
 
 The important point is that this boundary is not just for the calibration command itself. It is meant to be the shared contract for the important training-stack features that future engines need to plug into:
 

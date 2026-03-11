@@ -2,7 +2,7 @@
 
 ## About autoresearch-everywhere
 
-autoresearch-everywhere is an Apple Silicon-first continuation of [karpathy/autoresearch](https://github.com/karpathy/autoresearch). It keeps the original CUDA/PyTorch path in-tree, but the project is now organized around a shared training-engine boundary: MLX is the primary fully featured path today, CUDA is the first secondary engine on that boundary, and ROCm/ANE are intended follow-ons rather than separate forks. The goal is not just shared platform calibration. It is a stack where different training engines can plug into the same important features over time: hardware fingerprinting, train probes, local search, checkpoint minting, eval calibration, runtime capability reporting, and eventual default-promotion flow. On CUDA, that now explicitly includes architecture-family awareness for A100/SM80, Ada RTX 40xx, Ada L40S-class, Hopper/SM90, RTX 50xx-class consumer Blackwell, B200-class Blackwell, a GB10/DGX Spark carve-out, and an anticipated future Vera Rubin family.
+autoresearch-everywhere is the glue, generalization, and experiment-logging regime half of the autoresearch core from [karpathy/autoresearch](https://github.com/karpathy/autoresearch). The main idea is simple: clone the repo on a machine, let it figure out a good starting configuration for that hardware, and then run the usual autonomous agent research loop from there. MLX is the best-supported path today, and CUDA is already beyond feature parity with upstream here: it runs behind the same generic entrypoints, engine boundary, and architecture-aware runtime layer rather than living as a separate legacy path. The long-term goal is to let more backends plug into the same workflow instead of growing separate forks.
 
 [![Autonomy Golf Badge](docs/autonomy-golf-badge.svg)](#autonomy-golf)
 
@@ -10,51 +10,52 @@ autoresearch-everywhere is an Apple Silicon-first continuation of [karpathy/auto
 
 *One day, frontier AI research used to be done by meat computers in between eating, sleeping, having other fun, and synchronizing once in a while using sound wave interconnect in the ritual of "group meeting". That era is long gone. Research is now entirely the domain of autonomous swarms of AI agents running across compute cluster megastructures in the skies. The agents claim that we are now in the 10,205th generation of the code base, in any case no one could tell if that's right or wrong as the "code" is now a self-modifying binary that has grown beyond human comprehension. This repo is the story of how it all began. -@karpathy, March 2026*.
 
-The core idea is unchanged: give an agent a small but real language-model training loop, let it run short experiments against a fixed metric and fixed time budget, and keep the ideas that improve validation BPB. In autoresearch-everywhere, that loop is centered on MLX and Apple Silicon rather than a single NVIDIA GPU.
+The core idea is unchanged: give an agent a small but real language-model training loop, let it run an autonomous research loop against a fixed metric and fixed time budget, and keep the ideas that improve validation BPB. In autoresearch-everywhere, the extra work goes into making that loop practical on more than one hardware target instead of assuming a single NVIDIA setup.
 By policy, this branch is reserved for AI-shaped or AI-authored code changes; fully human-authored code changes should happen in a fork rather than this mainline history.
 
 ## Start Here
 
-The idealized new-user path is now platform bring-up first, experimentation second.
+Because this project targets broad platform support, the first step is to calibrate the training shape to the machine. The best setup for a $40K datacenter GPU is not the best setup for a laptop, so the repo is designed to find a good starting point for your hardware before it starts the usual autonomous agent research loop.
 
-**Requirements:** Apple Silicon, macOS, Python 3.10+, and [uv](https://docs.astral.sh/uv/).
+Initial development was validated against an M5 MacBook Pro, so there are ready-to-use M5 presets you can jump into immediately. More presets should follow with broader adoption and further testing. If this is a new machine, do bring-up first. If this is an M5 machine close to the current reference setup, you can skip straight to training.
+
+**Default path requirements:** Apple Silicon, macOS, Python 3.10+, and [uv](https://docs.astral.sh/uv/). That is the full MLX bring-up path described below. CUDA is also supported behind `--engine cuda`, but with a different hardware/runtime envelope.
 
 ### New Hardware Bring-Up
 
-If you are on unfamiliar hardware, the intended path is:
+If you are on unfamiliar hardware, start here:
 
 ```bash
-# 1. Install dependencies
 uv sync
-
-# 2. Download data, train the tokenizer, and build caches
 uv run prepare.py
-
-# 3. Find the best starting point for this machine
 uv run calibrate.py --mode fast
-
-# 4. Optional stronger calibration pass
 uv run calibrate.py --mode full --output-dir <same-dir-as-fast-run>
 ```
 
-That flow is the new front door to the repo. The bring-up tool fingerprints the machine, explores the shipped preset families, runs a constrained local search, calibrates eval rungs on the chosen operating point, and emits:
+`calibrate.py` is the new front door to the repo. It:
 
-- a Markdown report
-- a JSON artifact
-- a candidate new default for the autoresearch stage on that hardware
+- identifies the machine
+- tries a practical range of preset families
+- searches for a good starting training shape
+- checks how expensive higher-fidelity evaluation is on that machine
+- writes out a report with a recommended default
+
+The report includes:
+
+- a candidate default for that hardware
 - lower / recommended / upper / reference zones
-- a promotion bundle that says which artifacts are immediately promotable and which still need a fuller audit
+- machine-readable artifacts for later promotion or re-checking
 
 By default, the bring-up sweep only considers the practical MLX preset families (`m5-fast` through `m5-xlarge`). Add `--presets ...,upstream` only when you explicitly want the slower upstream-style reference included in the same run.
-On Apple Silicon, `prepare.py`, `train.py`, and `calibrate.py` default to the MLX engine automatically. A narrower CUDA path now exists behind `--engine cuda`; it already plugs into the shared training-engine contract for hardware fingerprinting, train probes, reporting, and architecture-specific runtime metadata, but MLX remains the only engine with the full checkpoint-backed eval-calibration and promotion path today.
+On Apple Silicon, `prepare.py`, `train.py`, and `calibrate.py` default to the MLX engine automatically. `--engine cuda` is available too. CUDA already exceeds the original upstream path in structure and runtime-awareness here, but MLX is still the only engine with the full evaluation-calibration and default-promotion flow today.
 
 For the actual implementation details, see [docs/platform-calibration.md](docs/platform-calibration.md).
 
-The same tool is also the intended revalidation path after meaningful autoresearch changes to the model or runtime, such as a new MLP block or a more efficient attention implementation. Use judgment first: if the finding looks like it could generalize across preset shapes or hardware classes, rerun platform calibration proactively. Platform and eval calibrations are also stamped with runtime and eval signatures, but those are the conservative backstop rather than the main trigger.
+The same tool is also the intended re-check path after meaningful model or runtime changes. If you land something that could change the best settings across machines or preset sizes, rerun platform calibration.
 
-### Known M5 Reference Path
+### M4 / M5 Shortcut
 
-If you are on a machine close to the current reference hardware, you can skip bring-up and start directly with the known M5 defaults:
+If you have a base M4 or M5 Mac, the shipped presets are a good starting point and you can usually skip bring-up to start directly with training. If you are on an M4 Pro, M4 Max, M5 Pro, or M5 Max system, `calibrate.py` should give you a better starting point than the base-machine presets:
 
 ```bash
 uv sync
@@ -65,42 +66,68 @@ uv run train.py
 
 The current MLX port and shipped defaults were developed on and tested against an Apple M5 MacBook Pro with 32 GB unified memory and a 10-core GPU. They are a calibrated starting point for that workstation class, not a promise of universal optimality across the whole M5 family.
 
-## System Overview
+## How It Is Organized
 
-The current workflow is built around six subsystems:
+The repo now has a simple top-level surface:
 
-- **Training-engine boundary**: `autoresearch_platform/`
-- **Platform bring-up**: `calibrate.py` -> `tools/calibrate_platform.py`
-- **Generic entrypoints**: `prepare.py`, `train.py`, `program.md`
-- **Runtime eval policy**: `autoresearch_mlx/eval_policy.py` and `autoresearch_mlx/eval_telemetry.py`
-- **MLX engine**: `autoresearch_mlx/train.py`, `autoresearch_mlx/model.py`, `autoresearch_mlx/optim.py`
-- **Data and evaluation substrate**: `autoresearch_mlx/prepare.py`, `autoresearch_mlx/data.py`
+- `prepare.py` prepares data and caches
+- `train.py` runs experiments
+- `calibrate.py` finds the best starting point for a machine
+- `lab.py` is the backend-specific kernel-lab front door
+- `program.md` is the generic agent prompt
 
-The important shift is that the repo is no longer just “an MLX port of `train.py`.” It is now a small calibrated research platform with an explicit training-engine boundary, machine bring-up, runtime trust signals, and promotion-ready calibration artifacts. Platform bring-up is only the first consumer of that boundary; the longer-term intent is that MLX, CUDA, ROCm, and ANE all hook into the same core training-stack features rather than growing separate orchestration trees.
-The repo root is intentionally kept generic now: the top level is for user-facing entrypoints and project metadata, while engine-specific implementation files live under `autoresearch_*`, `docs/`, `tools/`, `results/`, and `notebooks/`.
+Under that, the code is split by role:
+
+- `autoresearch_mlx/` contains the main MLX training stack
+- `autoresearch_cuda/` contains the CUDA path
+- `autoresearch_platform/` contains the shared engine boundary
+- `autoresearch_lab/` contains the shared kernel-lab boundary
+- `tools/` contains calibration and optional workstation tooling
+- `docs/` contains architecture and workflow notes
+
+The important shift is that the repo is no longer just “an MLX port of `train.py`.” It is now trying to be a small research platform that can bring up a new machine, pick sane defaults, and keep those choices inspectable as the codebase evolves.
 
 For the full architecture, subsystem boundaries, and feature matrix, see [docs/mlx-port-architecture.md](docs/mlx-port-architecture.md).
 For a grounded history of changes, including measured effects and provenance tiers, see [CHANGELOG.md](CHANGELOG.md).
 For the preset and hardware calibration workflow beneath the one-button bring-up path, see [docs/preset-calibration.md](docs/preset-calibration.md).
 
-## Training Defaults
+## What The Trainer Does For You
 
-The trainer still uses a **fixed 5-minute training budget** by default. `autoresearch_mlx/train.py` supports `--time-budget-mode train|wall`, but the default `train` mode preserves the original autoresearch intent: budget is accounted in accumulated optimizer-step time rather than raw wall time.
+By default, the trainer still runs the classic autoresearch pattern: a fixed 5-minute training budget and a final validation BPB score.
 
-Canonical evaluation is now long-context and upstream-oriented by default:
+The main automatic behaviors are:
 
-- `seq_len=2048`
-- reduced-budget `cheap/reference/full` rungs
-- auto batch sizing that targets about `4096` tokens per eval step
-- sliced sampling across the upstream horizon for reduced-budget rungs
-- sequential full-eval for the full upstream-sized rung
+- long-context validation by default (`seq_len=2048`)
+- automatic evaluation batch sizing based on sequence length
+- different validation “rungs” (`cheap`, `reference`, `full`) so short runs do not pay the full cost of the longest possible eval
+- conservative fallback when a machine or preset shape is not well calibrated yet
+- exact resumable checkpoints for longer MLX runs
 
-Shipped preset shapes use the checked-in eval tradeoff tables by default when canonical eval settings are not manually overridden, but only on exact hardware-key matches. The runtime surfaces calibration status, effective confidence, freshness, telemetry coverage, stable rung coverage, and last-seen date so underfilled or stale calibration is visible instead of implicit; unmatched or stale rows fall back visibly to the default canonical settings.
-The runtime also surfaces code-signature matches for eval semantics and runtime shape, so architecture or runtime changes can visibly invalidate a previously trusted calibration even on the same machine.
+On known hardware, the trainer can reuse measured evaluation tradeoffs. On unknown or stale setups, it falls back visibly instead of pretending the old numbers still apply.
 
-The MLX prepare path builds both the reusable shard token cache under `~/.cache/autoresearch/token_cache/` and the shipped prepacked row caches under `~/.cache/autoresearch/prepacked_cache/` by default, so all shipped M5 presets can hit the fast path without extra setup. Use `uv run prepare.py --skip-token-cache` if you only want the raw data and tokenizer artifacts, or `uv run prepare.py --skip-prepacked-cache` if you explicitly want to leave training on the live packing fallback path.
+The MLX prepare path also builds token caches and prepacked caches by default, so the shipped presets can use the fast data path without extra manual setup.
 
-The trainer also supports exact resumable checkpoints. For runs longer than 5 minutes, the MLX path enables exact full-state checkpoints by default using a conservative interval selector grounded in measured resume costs on this machine. Exact sync remains the default checkpoint path. `--checkpoint-save-mode async` is available as an optional exact-resume variant for wall-clock-constrained runs, but it is still not the default path.
+If you want more detail about the calibration logic beneath those defaults, see [docs/preset-calibration.md](docs/preset-calibration.md).
+
+## Kernel Lab
+
+The repo now also has a top-level `lab.py` entrypoint for backend-specific kernel work.
+
+The idea is the same one that makes the rest of the repo manageable:
+
+- keep a generic front door at the top level
+- keep backend-specific implementation details under `autoresearch_*`
+- make room for more than one backend without growing separate one-off workflows
+
+Today the lab is intentionally narrow and MLX-first:
+
+- `uv run lab.py --engine mlx list-targets`
+- `uv run lab.py --engine mlx init --target rmsnorm --workspace /tmp/mlx-rmsnorm-lab`
+- `uv run lab.py --engine mlx bench --workspace /tmp/mlx-rmsnorm-lab`
+
+That current lab exists to build the pattern, not to claim broad coverage yet. The first target is RMSNorm, and the next likely MLX targets are `layernorm`, `rotary_embedding`, `reduce`, and fused MLP work. The long-term reason to keep it at the top level now is that the same outer workflow should later host Triton/CUDA, ROCm, and ANE labs without inventing a new orchestration tree each time.
+
+For the current design and scope, see [docs/kernel-lab.md](docs/kernel-lab.md).
 
 ## Presets
 
@@ -192,10 +219,10 @@ Current project snapshot from [CHANGELOG.md](CHANGELOG.md):
 
 | Metric | Value |
 | --- | --- |
-| Mean autonomy score | `3.40 / 6` |
-| Mean complexity | `7.59 / commit` |
-| Mean score per top-level bullet | `3.48 / 6` |
-| History covered | `34` commits across `11` subsystems |
+| Mean autonomy score | `3.42 / 6` |
+| Mean complexity | `7.57 / commit` |
+| Mean score per top-level bullet | `3.49 / 6` |
+| History covered | `35` commits across `12` subsystems |
 <!-- autonomy-golf-snapshot:end -->
 
 Refresh with:
@@ -210,11 +237,16 @@ python3 tools/render_autonomy_badge.py
 prepare.py            — generic data prep entrypoint with engine dispatch
 train.py              — generic training entrypoint with engine dispatch
 calibrate.py          — one-button platform bring-up calibration
+lab.py                — top-level backend-specific kernel lab entrypoint
 program.md            — generic agent instructions
 autoresearch_mlx/prepare.py        — direct MLX data prep implementation
 autoresearch_mlx/train.py          — direct MLX training implementation
 autoresearch_mlx/     — MLX data/model/optimizer implementation
+autoresearch_mlx/lab.py            — MLX kernel lab CLI implementation
+autoresearch_mlx/lab_workspace.py  — MLX mutable workspace + fixed bench harness
+autoresearch_lab/     — shared kernel-lab boundary
 docs/program-mlx.md        — MLX agent instructions
+docs/kernel-lab.md         — kernel-lab design and workflow note
 docs/assets/         — generated docs assets such as the progress figure
 notebooks/           — exploratory notebooks and analysis
 results/results.tsv  — experiment result ledger
@@ -223,9 +255,9 @@ tools/               — optional local sweep tooling
 pyproject.toml        — dependencies
 ```
 
-## Appendix: Upstream CUDA Path
+## Appendix: CUDA Path
 
-The original NVIDIA-oriented path is still present for reference and comparison, and the platform-calibration boundary now treats it as the first secondary engine rather than dead appendix code.
+The NVIDIA-oriented path is no longer just the original upstream code kept around for comparison. It now lives behind the same generic entrypoints and shared engine boundary as MLX, with architecture-family-aware runtime policy layered on top.
 
 - `autoresearch_cuda/prepare.py`: CUDA data prep and runtime utilities.
 - `autoresearch_cuda/train.py`: CUDA training implementation.

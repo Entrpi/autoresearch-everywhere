@@ -28,6 +28,9 @@ To start a new run:
    - `autoresearch_cuda/runtime.py`
    - `autoresearch_cuda/prepare.py`
    - `autoresearch_cuda/train.py`
+5. If the task is backend-specific kernel work, also read:
+   - `docs/kernel-lab.md`
+   - the backend lab implementation under `autoresearch_*/lab*.py`
 
 ## Default Workflow
 
@@ -88,6 +91,12 @@ What to mutate depends on the backend and the task:
   - `calibrate.py`
   - `tools/calibrate_platform.py`
   - `autoresearch_platform/`
+- Shared kernel-lab work:
+  - `lab.py`
+  - `autoresearch_lab/`
+- MLX kernel-lab work:
+  - `autoresearch_mlx/lab.py`
+  - `autoresearch_mlx/lab_workspace.py`
 - CUDA runtime/bring-up work:
   - `autoresearch_cuda/`
 

@@ -15,14 +15,15 @@ So this is no longer just a report about a training script port. It is a report 
 
 ## Executive Summary
 
-The current platform has six meaningful subsystems:
+The current platform has seven meaningful subsystems:
 
 1. training-engine boundary and backend adapters
 2. platform bring-up orchestration
 3. runtime eval policy and telemetry
 4. training engine
 5. data and evaluation substrate
-6. optional local sweep tooling
+6. kernel lab boundary and backend workspaces
+7. optional local sweep tooling
 
 The architectural center of gravity has moved upward. Early in the port, the main problem was "make autoresearch run on Apple Silicon." The main problem now is "make a new machine discover its own best starting point in a measured, inspectable way."
 
@@ -114,6 +115,14 @@ flowchart TD
         O1["tools/overnight_mlx.py"] --> E1
     end
 
+    subgraph S6["Kernel Lab Boundary"]
+        L0["lab.py"]
+        L0 --> L1["autoresearch_lab/*"]
+        L1 --> L2["MLX lab"]
+        L1 --> L3["future Triton/CUDA lab"]
+        L1 --> L4["future ROCm / ANE lab"]
+    end
+
     B --> D1
     C --> D1
 ```
@@ -148,7 +157,7 @@ That means new engines should be added by implementing this contract first, then
 ### Current state
 
 - MLX is the first fully featured engine on this boundary.
-- CUDA is the first narrower secondary engine.
+- CUDA is the first secondary engine on the same boundary and already goes beyond upstream's original path in structure, dispatch, and runtime policy, even though MLX remains the deeper end-to-end implementation.
 - ROCm and ANE should be added as new training engines on the same boundary.
 
 ## Subsystem 2: Platform Bring-Up Orchestration
@@ -339,7 +348,37 @@ This layer used to look like a pure backend translation concern. It now matters 
 
 So the data plane is now part of the calibration substrate, not just a prerequisite for training.
 
-## Subsystem 6: Optional Local Sweep Tooling
+## Subsystem 6: Kernel Lab Boundary and Backend Workspaces
+
+### Purpose
+
+This layer is the experimental sibling of the training-engine boundary. It exists so backend-specific kernel work can share one outer workflow without forcing all backends into one kernel API.
+
+### Main files
+
+- `lab.py`
+- `autoresearch_lab/`
+- `autoresearch_mlx/lab.py`
+- `autoresearch_mlx/lab_workspace.py`
+- `docs/kernel-lab.md`
+
+### Current role in the platform story
+
+The lab is intentionally narrower than the training path:
+
+- the top level owns the generic `lab.py` front door
+- `autoresearch_lab/` owns the shared boundary and backend registry
+- each backend owns its own mutable workspace and fixed benchmark harness
+
+The current implementation is MLX-first and starter-target-first:
+
+- `rmsnorm` is the first starter-ready workspace
+- `layernorm`, `rotary_embedding`, `reduce`, and fused MLP work are queued behind it
+- `flash_attention` is explicitly deferred as a first MLX lab target
+
+The long-term reason this matters now is not that MLX kernel work is already broad. It is that the repo now has a place where future Triton/CUDA, ROCm, and ANE labs can plug into the same outer workflow instead of growing separate kernel-optimization trees.
+
+## Subsystem 7: Optional Local Sweep Tooling
 
 ### Purpose
 
@@ -419,5 +458,6 @@ The simplest correct way to think about the current repo is:
 - `eval_policy.py` decides how much evaluation fidelity the runtime is allowed to trust
 - `eval_telemetry.py` lets ordinary runs strengthen or age that trust
 - `calibrate.py` is the one-button path that turns an unfamiliar machine into a measured default for the rest of the system
+- `lab.py` is the top-level experimental front door for backend-specific kernel work under a shared outer workflow
 
 That is the current architecture. The port is no longer just an MLX training path. It is an MLX research platform with explicit machine bring-up.
