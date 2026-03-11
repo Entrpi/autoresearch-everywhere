@@ -375,6 +375,8 @@ The current implementation is MLX-first and starter-target-first:
 - starter-ready workspaces:
   - `rmsnorm`
   - `layernorm`
+  - `rmsnorm_backward`
+  - `layernorm_backward`
   - `residual_blend`
   - `residual_rmsnorm`
   - `qk_rmsnorm`

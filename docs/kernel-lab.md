@@ -41,6 +41,8 @@ For now the MLX lab is deliberately narrow:
 - starter-ready targets:
   - `rmsnorm`
   - `layernorm`
+  - `rmsnorm_backward`
+  - `layernorm_backward`
   - `residual_blend`
   - `residual_rmsnorm`
   - `qk_rmsnorm`

@@ -343,6 +343,87 @@ def kernel_fn(x: mx.array) -> mx.array:
 '''
 
 
+RMSNORM_BACKWARD_TEMPLATE = '''"""
+Autoresearch MLX kernel lab workspace.
+
+Target: RMSNorm backward
+Mutable file: yes
+
+Replace `kernel_fn` with a faster implementation. The starter path is an
+analytical backward reference implementation.
+"""
+
+from __future__ import annotations
+
+import mlx.core as mx
+
+
+KERNEL_TARGET = "rmsnorm_backward"
+
+
+def kernel_fn(
+    x: mx.array,
+    weight: mx.array,
+    grad_out: mx.array,
+    eps: float = 1e-6,
+) -> tuple[mx.array, mx.array]:
+    x32 = x.astype(mx.float32)
+    w32 = weight.astype(mx.float32)
+    g32 = grad_out.astype(mx.float32)
+    rms = mx.rsqrt(mx.mean(mx.square(x32), axis=-1, keepdims=True) + eps)
+    weighted_grad = g32 * w32
+    dot = mx.mean(weighted_grad * x32, axis=-1, keepdims=True)
+    dx = rms * weighted_grad - x32 * mx.power(rms, 3) * dot
+    dweight = mx.sum(g32 * (x32 * rms), axis=0)
+    return dx.astype(x.dtype), dweight.astype(weight.dtype)
+'''
+
+
+LAYERNORM_BACKWARD_TEMPLATE = '''"""
+Autoresearch MLX kernel lab workspace.
+
+Target: LayerNorm backward
+Mutable file: yes
+
+Replace `kernel_fn` with a faster implementation. The starter path is an
+analytical backward reference implementation.
+"""
+
+from __future__ import annotations
+
+import mlx.core as mx
+
+
+KERNEL_TARGET = "layernorm_backward"
+
+
+def kernel_fn(
+    x: mx.array,
+    weight: mx.array,
+    bias: mx.array,
+    grad_out: mx.array,
+    eps: float = 1e-5,
+) -> tuple[mx.array, mx.array, mx.array]:
+    del bias
+    x32 = x.astype(mx.float32)
+    w32 = weight.astype(mx.float32)
+    g32 = grad_out.astype(mx.float32)
+    mean = mx.mean(x32, axis=-1, keepdims=True)
+    centered = x32 - mean
+    variance = mx.mean(mx.square(centered), axis=-1, keepdims=True)
+    inv = mx.rsqrt(variance + eps)
+    normalized = centered * inv
+    weighted_grad = g32 * w32
+    dim = x32.shape[-1]
+    sum_u = mx.sum(weighted_grad, axis=-1, keepdims=True)
+    sum_un = mx.sum(weighted_grad * normalized, axis=-1, keepdims=True)
+    dx = (inv / dim) * (dim * weighted_grad - sum_u - normalized * sum_un)
+    dweight = mx.sum(g32 * normalized, axis=0)
+    dbias = mx.sum(g32, axis=0)
+    return dx.astype(x.dtype), dweight.astype(weight.dtype), dbias.astype(weight.dtype)
+'''
+
+
 FUSED_MLP_TEMPLATE = '''"""
 Autoresearch MLX kernel lab workspace.
 
@@ -390,6 +471,14 @@ def _tflops(flops: float, latency_ms: float) -> float:
 
 def _rng():
     return np.random.default_rng(42)
+
+
+def _iter_leaves(value):
+    if isinstance(value, (tuple, list)):
+        for item in value:
+            yield from _iter_leaves(item)
+        return
+    yield value
 
 
 def _mx_array(shape: tuple[int, ...], dtype_name: str, scale: float = 1.0) -> mx.array:
@@ -606,6 +695,76 @@ def _activation_metric(case: LabCase, latency_ms: float) -> float:
     return _throughput_gb_s((2 * rows * dim) * itemsize, latency_ms)
 
 
+def _rmsnorm_backward_inputs(case: LabCase):
+    rows, dim = case.shape
+    return _mx_array((rows, dim), case.dtype), _mx_array((dim,), case.dtype), _mx_array((rows, dim), case.dtype)
+
+
+def _rmsnorm_backward_ref(
+    x: mx.array,
+    weight: mx.array,
+    grad_out: mx.array,
+    eps: float = 1e-6,
+) -> tuple[mx.array, mx.array]:
+    x32 = x.astype(mx.float32)
+    w32 = weight.astype(mx.float32)
+    g32 = grad_out.astype(mx.float32)
+    rms = mx.rsqrt(mx.mean(mx.square(x32), axis=-1, keepdims=True) + eps)
+    weighted_grad = g32 * w32
+    dot = mx.mean(weighted_grad * x32, axis=-1, keepdims=True)
+    dx = rms * weighted_grad - x32 * mx.power(rms, 3) * dot
+    dweight = mx.sum(g32 * (x32 * rms), axis=0)
+    return dx.astype(x.dtype), dweight.astype(weight.dtype)
+
+
+def _rmsnorm_backward_metric(case: LabCase, latency_ms: float) -> float:
+    rows, dim = case.shape
+    itemsize = _numpy_dtype(case.dtype).itemsize
+    return _throughput_gb_s((4 * rows * dim + 2 * dim) * itemsize, latency_ms)
+
+
+def _layernorm_backward_inputs(case: LabCase):
+    rows, dim = case.shape
+    return (
+        _mx_array((rows, dim), case.dtype),
+        _mx_array((dim,), case.dtype),
+        _mx_array((dim,), case.dtype),
+        _mx_array((rows, dim), case.dtype),
+    )
+
+
+def _layernorm_backward_ref(
+    x: mx.array,
+    weight: mx.array,
+    bias: mx.array,
+    grad_out: mx.array,
+    eps: float = 1e-5,
+) -> tuple[mx.array, mx.array, mx.array]:
+    del bias
+    x32 = x.astype(mx.float32)
+    w32 = weight.astype(mx.float32)
+    g32 = grad_out.astype(mx.float32)
+    mean = mx.mean(x32, axis=-1, keepdims=True)
+    centered = x32 - mean
+    variance = mx.mean(mx.square(centered), axis=-1, keepdims=True)
+    inv = mx.rsqrt(variance + eps)
+    normalized = centered * inv
+    weighted_grad = g32 * w32
+    dim = x32.shape[-1]
+    sum_u = mx.sum(weighted_grad, axis=-1, keepdims=True)
+    sum_un = mx.sum(weighted_grad * normalized, axis=-1, keepdims=True)
+    dx = (inv / dim) * (dim * weighted_grad - sum_u - normalized * sum_un)
+    dweight = mx.sum(g32 * normalized, axis=0)
+    dbias = mx.sum(g32, axis=0)
+    return dx.astype(x.dtype), dweight.astype(weight.dtype), dbias.astype(weight.dtype)
+
+
+def _layernorm_backward_metric(case: LabCase, latency_ms: float) -> float:
+    rows, dim = case.shape
+    itemsize = _numpy_dtype(case.dtype).itemsize
+    return _throughput_gb_s((5 * rows * dim + 3 * dim) * itemsize, latency_ms)
+
+
 def _fused_mlp_inputs(case: LabCase):
     rows, n_embd = case.shape
     hidden = 4 * n_embd
@@ -689,6 +848,54 @@ class MLXKernelLab:
             make_inputs=_layernorm_inputs,
             reference=_layernorm_ref,
             metric_value=_layernorm_metric,
+        ),
+        "rmsnorm_backward": TargetSpec(
+            info=LabTarget(
+                key="rmsnorm_backward",
+                description="RMSNorm backward kernel lab",
+                metric="throughput_gb_s",
+                status="starter-ready",
+                notes="First backward starter target for training-path kernel work.",
+            ),
+            template=RMSNORM_BACKWARD_TEMPLATE,
+            tolerance=5e-3,
+            quick_cases=(
+                LabCase((512, 1024), "float16"),
+                LabCase((1024, 2048), "float16"),
+            ),
+            full_cases=(
+                LabCase((128, 512), "float16"),
+                LabCase((512, 1024), "float16"),
+                LabCase((1024, 2048), "float16"),
+                LabCase((512, 1024), "float32"),
+            ),
+            make_inputs=_rmsnorm_backward_inputs,
+            reference=_rmsnorm_backward_ref,
+            metric_value=_rmsnorm_backward_metric,
+        ),
+        "layernorm_backward": TargetSpec(
+            info=LabTarget(
+                key="layernorm_backward",
+                description="LayerNorm backward kernel lab",
+                metric="throughput_gb_s",
+                status="starter-ready",
+                notes="Companion backward starter target after RMSNorm backward.",
+            ),
+            template=LAYERNORM_BACKWARD_TEMPLATE,
+            tolerance=5e-3,
+            quick_cases=(
+                LabCase((512, 1024), "float16"),
+                LabCase((1024, 2048), "float16"),
+            ),
+            full_cases=(
+                LabCase((128, 512), "float16"),
+                LabCase((512, 1024), "float16"),
+                LabCase((1024, 2048), "float16"),
+                LabCase((512, 1024), "float32"),
+            ),
+            make_inputs=_layernorm_backward_inputs,
+            reference=_layernorm_backward_ref,
+            metric_value=_layernorm_backward_metric,
         ),
         "rotary_embedding": TargetSpec(
             info=LabTarget(
@@ -1005,13 +1212,21 @@ class MLXKernelLab:
             inputs = spec.make_inputs(case)
             ref = spec.reference(*inputs)
             out = kernel_mod.kernel_fn(*inputs)
-            mx.eval(ref, out)
-            ref_np = np.array(ref)
-            out_np = np.array(out)
-            if not np.isfinite(ref_np).all() or not np.isfinite(out_np).all():
+            ref_leaves = tuple(_iter_leaves(ref))
+            out_leaves = tuple(_iter_leaves(out))
+            mx.eval(*ref_leaves, *out_leaves)
+            if len(ref_leaves) != len(out_leaves):
                 abs_error = float("inf")
             else:
-                abs_error = float(np.max(np.abs(out_np - ref_np)))
+                abs_errors: list[float] = []
+                for ref_leaf, out_leaf in zip(ref_leaves, out_leaves):
+                    ref_np = np.array(ref_leaf)
+                    out_np = np.array(out_leaf)
+                    if ref_np.shape != out_np.shape or not np.isfinite(ref_np).all() or not np.isfinite(out_np).all():
+                        abs_errors = [float("inf")]
+                        break
+                    abs_errors.append(float(np.max(np.abs(out_np - ref_np))))
+                abs_error = max(abs_errors) if abs_errors else 0.0
             max_abs_error = max(max_abs_error, abs_error)
             if worst_case is None or abs_error >= worst_case["max_abs_error"]:
                 worst_case = {
@@ -1059,11 +1274,11 @@ class MLXKernelLab:
     def _bench_case(self, kernel_fn, inputs: tuple) -> float:
         for _ in range(3):
             out = kernel_fn(*inputs)
-            mx.eval(out)
+            mx.eval(*tuple(_iter_leaves(out)))
         times = []
         for _ in range(10):
             start = time.perf_counter()
             out = kernel_fn(*inputs)
-            mx.eval(out)
+            mx.eval(*tuple(_iter_leaves(out)))
             times.append((time.perf_counter() - start) * 1e3)
         return statistics.median(times)

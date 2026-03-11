@@ -29,7 +29,41 @@ On this hardware, the default canonical matched benchmark window for optimizatio
 
 ## Latest
 
-### New commit — lab: Add next MLX training-path starter targets — score `3` — complexity `8`
+### New commit — lab: Add backward norm starter targets and tuple-aware benching — score `3` — complexity `6`
+
+**AI-identified within brief, human-shaped (3)**
+
+- Extended the MLX kernel lab into the first backward-capable starter targets, and generalized the bench harness so kernels can return multiple outputs with different shapes.
+  - Meaning: the lab can now benchmark tuple-valued kernels cleanly and includes `rmsnorm_backward` and `layernorm_backward` as starter-ready targets rather than stopping at forward-only kernels.
+  - Motivation: the next meaningful step after forward-path kernels is training-relevant backward work, and the existing harness was too single-output oriented to support realistic backward kernels cleanly.
+  - Purpose: move the MLX lab closer to real training-path optimization while keeping the starter workflow simple and reusable for later CUDA/Triton, ROCm, and ANE lab backends.
+  - Added `rmsnorm_backward` and `layernorm_backward` starter templates with analytical backward references rather than finite-difference approximations.
+  - Generalized the fixed bench harness to flatten tuple/list outputs for correctness checks and `mx.eval`, so future multi-output kernels do not need one-off benchmark code.
+  - Updated the public MLX target lists so the new backward path is visible from the top-level docs.
+
+**Grounding**
+
+- Files:
+  - `CHANGELOG.md`
+  - `README.md`
+  - `docs/kernel-lab.md`
+  - `docs/mlx-port-architecture.md`
+  - `autoresearch_mlx/lab_workspace.py`
+- Validation:
+  - `python3 -m py_compile kernel-lab.py autoresearch_lab/*.py autoresearch_mlx/lab.py autoresearch_mlx/lab_workspace.py`
+  - `./.venv/bin/python kernel-lab.py --engine mlx list-targets`
+  - `./.venv/bin/python kernel-lab.py --engine mlx init --target rmsnorm_backward --workspace <tmp>`
+  - `./.venv/bin/python kernel-lab.py --engine mlx init --target layernorm_backward --workspace <tmp>`
+  - `./.venv/bin/python kernel-lab.py --engine mlx bench --workspace <tmp> --quick`
+  - `python3 tools/changelog_scores.py --group-by entry --format csv --include-latest --verify`
+- Measurements:
+  - Quick MLX lab benchmarks for the two new backward starter targets both completed with `max_abs_error=0.0`:
+    - `rmsnorm_backward`: `median_latency_ms=1.674`, `median_throughput_gb_s=6.167`
+    - `layernorm_backward`: `median_latency_ms=2.815`, `median_throughput_gb_s=4.806`
+
+## Committed History
+
+### March 11, 2026 — `a4524aa` — lab: Add next MLX training-path starter targets — score `3` — complexity `8`
 
 **AI-identified within brief, human-shaped (3)**
 
@@ -70,8 +104,6 @@ On this hardware, the default canonical matched benchmark window for optimizatio
     - `rope_qk_fused`: `median_latency_ms=2.595`, `median_throughput_gb_s=6.013`
     - `logits_softcap`: `median_latency_ms=21.573`, `median_throughput_gb_s=9.245`
     - `activation_pointwise`: `median_latency_ms=1.840`, `median_throughput_gb_s=12.644`
-
-## Committed History
 
 ### March 11, 2026 — `b8f91ba` — lab: Expand MLX starter targets and rename top-level lab entrypoint — score `4` — complexity `10`
 
