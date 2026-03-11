@@ -53,6 +53,12 @@ Rank likely next targets for a preset:
 uv run kernel-lab.py --engine mlx profile --preset m5-balanced --top-k 8 --output /tmp/mlx-profile.json
 ```
 
+Inspect the persistent evidence for one target:
+
+```bash
+uv run kernel-lab.py --engine mlx evidence --target block_prelude --preset m5-balanced
+```
+
 Turn a profile into the next ready workflow:
 
 ```bash
@@ -116,6 +122,12 @@ That upgrades the plan from "interesting candidate" to "trace-backed target" and
 
 If a target has already been both verified and captured, orchestration will reuse the last known workspace and upgrade the plan again to `promotion-ready`, which means the next recommended step is an end-to-end integration A/B rather than another blank workspace.
 
+You can ask for that decision directly:
+
+```bash
+uv run kernel-lab.py --engine mlx promotion-check --target block_prelude --preset m5-balanced
+```
+
 ## Heuristic Layer vs Trace Layer
 
 The current MLX lab deliberately uses two different kinds of evidence.
@@ -135,10 +147,13 @@ Use it constantly. It is fast, cheap, and good at deciding what to try next.
 The trace layer is:
 
 - `capture`
+- `review-trace`
 - Xcode Metal Debugger
 - Metal System Trace / GPU counters once a capture is open
 
 Use it when a target stops being "interesting" and starts being "worth believing."
+
+`review-trace` is the bridge between the Xcode-facing world and the orchestration loop. It records whether the captured target looked `high`, `medium`, `low`, or `none` in end-to-end relevance, so later profiles can both boost and demote targets instead of only rewarding the existence of a capture.
 
 The rule of thumb is:
 

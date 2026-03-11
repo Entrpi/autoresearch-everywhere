@@ -4,7 +4,7 @@ import importlib.util
 import json
 import statistics
 import time
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Callable
 
@@ -12,12 +12,14 @@ import mlx.core as mx
 import mlx.nn as nn
 import numpy as np
 
-from autoresearch_lab.ledger import append_lab_event
+from autoresearch_lab.ledger import append_lab_event, summarize_lab_evidence
 from autoresearch_lab.labs import (
     LabBenchResult,
     LabCapabilities,
+    LabEvidenceResult,
     LabExtractResult,
     LabOrchestrationPlan,
+    LabPromotionCheck,
     LabProfileResult,
     LabTraceResult,
     LabTarget,
@@ -2089,6 +2091,67 @@ class MLXKernelLab:
 
     def capture_workspace(self, *, workspace: Path, output: Path, quick: bool = False) -> LabTraceResult:
         return capture_workspace_trace(workspace=workspace, output=output, quick=quick)
+
+    def summarize_evidence(self, *, target: str, preset: str | None = None) -> LabEvidenceResult:
+        summary = summarize_lab_evidence(
+            engine="mlx",
+            backend_family="mlx",
+            target=target,
+            preset=preset,
+        )
+        return LabEvidenceResult(
+            engine="mlx",
+            backend_family="mlx",
+            target=target,
+            preset=preset,
+            status=summary.promotion_status,
+            details=asdict(summary),
+        )
+
+    def promotion_check(self, *, target: str, preset: str, workspace: Path | None = None) -> LabPromotionCheck:
+        summary = summarize_lab_evidence(
+            engine="mlx",
+            backend_family="mlx",
+            target=target,
+            preset=preset,
+        )
+        chosen_workspace = workspace.expanduser() if workspace is not None else None
+        if chosen_workspace is None and summary.last_workspace is not None:
+            candidate_workspace = Path(summary.last_workspace).expanduser()
+            if candidate_workspace.exists():
+                chosen_workspace = candidate_workspace
+
+        if summary.promotion_status == "ready-for-integration-test" and chosen_workspace is not None:
+            status = "ready-for-integration-ab"
+            commands = (
+                f"# integrate {target} from {chosen_workspace} into the MLX training path",
+                f"uv run train.py --engine mlx --preset {preset} --time-budget 20 --benchmark-skip-eval --no-checkpoint",
+                f"# rerun the same command after integration and compare steady_state_tok_per_sec, peak_vram_mb, and val_bpb/proxy_val_bpb when eval is enabled",
+            )
+        elif summary.promotion_status == "trace-deprioritized":
+            status = "deprioritized-after-trace"
+            commands = (
+                "# keep the workspace for reference, but prioritize a different target before integration work",
+            )
+        else:
+            status = "not-ready"
+            commands = (
+                "# gather both verify and capture evidence before attempting an end-to-end integration A/B",
+            )
+
+        return LabPromotionCheck(
+            engine="mlx",
+            backend_family="mlx",
+            target=target,
+            preset=preset,
+            workspace=str(chosen_workspace) if chosen_workspace is not None else None,
+            status=status,
+            commands=commands,
+            details={
+                "evidence_summary": asdict(summary),
+                "required_for_promotion": ["verify", "capture"],
+            },
+        )
 
     def _get_spec(self, target: str) -> TargetSpec:
         try:

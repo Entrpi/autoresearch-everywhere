@@ -52,6 +52,52 @@ def summarize_trace_metadata(metadata_path: Path) -> dict[str, object]:
     }
 
 
+def record_trace_review(
+    *,
+    workspace: Path,
+    metadata_path: Path,
+    relevance: str,
+    notes: str | None = None,
+) -> dict[str, object]:
+    if relevance not in {"none", "low", "medium", "high"}:
+        raise ValueError("relevance must be one of: none, low, medium, high")
+    trace_summary = summarize_trace_metadata(metadata_path)
+    target = str(trace_summary["trace_target"])
+    relevance_score = {
+        "none": 0.0,
+        "low": 0.25,
+        "medium": 0.6,
+        "high": 1.0,
+    }[relevance]
+    append_lab_event(
+        engine="mlx",
+        backend_family="mlx",
+        target=target,
+        workspace=workspace,
+        event_type="trace-review",
+        status="ok",
+        metric_name="trace_relevance_score",
+        metric_value=relevance_score,
+        details={
+            "trace_metadata_path": str(metadata_path.expanduser()),
+            "relevance": relevance,
+            "notes": notes,
+        },
+    )
+    return {
+        "engine": "mlx",
+        "backend_family": "mlx",
+        "target": target,
+        "workspace": str(workspace.expanduser()),
+        "status": "ok",
+        "relevance": relevance,
+        "relevance_score": relevance_score,
+        "trace_metadata_path": str(metadata_path.expanduser()),
+        "notes": notes,
+        "trace_summary": trace_summary,
+    }
+
+
 def capture_workspace_trace(*, workspace: Path, output: Path, quick: bool = False) -> LabTraceResult:
     trace_path = output.expanduser()
     if trace_path.suffix != ".gputrace":

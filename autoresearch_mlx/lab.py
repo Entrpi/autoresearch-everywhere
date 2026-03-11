@@ -7,7 +7,7 @@ from dataclasses import asdict
 from pathlib import Path
 
 from autoresearch_mlx.lab_profile import write_profile_result
-from autoresearch_mlx.lab_trace import run_capture_bench
+from autoresearch_mlx.lab_trace import record_trace_review, run_capture_bench
 from autoresearch_mlx.lab_workspace import MLXKernelLab
 
 
@@ -45,10 +45,31 @@ def build_parser() -> argparse.ArgumentParser:
     orchestrate_parser.add_argument("--rank", type=int, default=1)
     orchestrate_parser.add_argument("--trace-metadata")
 
+    evidence_parser = subparsers.add_parser("evidence", help="Summarize persisted MLX lab evidence for a target")
+    evidence_parser.add_argument("--target", required=True)
+    evidence_parser.add_argument("--preset")
+
+    promotion_parser = subparsers.add_parser(
+        "promotion-check",
+        help="Check whether a target is ready for an end-to-end integration A/B",
+    )
+    promotion_parser.add_argument("--target", required=True)
+    promotion_parser.add_argument("--preset", required=True)
+    promotion_parser.add_argument("--workspace")
+
     capture_parser = subparsers.add_parser("capture", help="Capture a workspace run as a Metal trace artifact")
     capture_parser.add_argument("--workspace", required=True)
     capture_parser.add_argument("--output", required=True)
     capture_parser.add_argument("--quick", action="store_true")
+
+    review_parser = subparsers.add_parser(
+        "review-trace",
+        help="Record a human/agent assessment of how much a captured trace matters end-to-end",
+    )
+    review_parser.add_argument("--workspace", required=True)
+    review_parser.add_argument("--metadata", required=True)
+    review_parser.add_argument("--relevance", choices=("none", "low", "medium", "high"), required=True)
+    review_parser.add_argument("--notes")
 
     internal_capture = subparsers.add_parser(
         "_capture-bench",
@@ -116,6 +137,20 @@ def main(argv: list[str] | None = None) -> None:
         print(json.dumps(asdict(result), indent=2, sort_keys=True))
         return
 
+    if args.command == "evidence":
+        result = lab.summarize_evidence(target=args.target, preset=args.preset)
+        print(json.dumps(asdict(result), indent=2, sort_keys=True))
+        return
+
+    if args.command == "promotion-check":
+        result = lab.promotion_check(
+            target=args.target,
+            preset=args.preset,
+            workspace=Path(args.workspace).expanduser() if args.workspace else None,
+        )
+        print(json.dumps(asdict(result), indent=2, sort_keys=True))
+        return
+
     if args.command == "capture":
         result = lab.capture_workspace(
             workspace=Path(args.workspace).expanduser(),
@@ -123,6 +158,16 @@ def main(argv: list[str] | None = None) -> None:
             quick=args.quick,
         )
         print(json.dumps(asdict(result), indent=2, sort_keys=True))
+        return
+
+    if args.command == "review-trace":
+        result = record_trace_review(
+            workspace=Path(args.workspace).expanduser(),
+            metadata_path=Path(args.metadata).expanduser(),
+            relevance=args.relevance,
+            notes=args.notes,
+        )
+        print(json.dumps(result, indent=2, sort_keys=True))
         return
 
     if args.command == "_capture-bench":

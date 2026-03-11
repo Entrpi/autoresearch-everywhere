@@ -29,7 +29,54 @@ On this hardware, the default canonical matched benchmark window for optimizatio
 
 ## Latest
 
-### New commit — lab: Persist MLX kernel evidence and use it in ranking/promotion — score `4` — complexity `7`
+### New commit — lab: add trace reviews, evidence summaries, and promotion checks — score `4` — complexity `8`
+
+**Human-directed, AI-shaped (4)**
+
+- Extended the MLX kernel-lab loop above raw verify/capture by adding explicit evidence summaries, trace-review signals, and promotion checks, so the system can decide not just "what next target should I try?" but also "is this target ready for an end-to-end A/B?" and "did the trace actually make it less important?"
+  - Meaning: the lab now has a real middle policy layer above the ledger. It can summarize current evidence for a target, expose promotion readiness directly, and record whether a human or agent judged a trace as high- or low-value after opening it in Xcode.
+  - Motivation: after persistent evidence and promotion-ready orchestration landed, the next gaps were practical ones: there was no direct way to inspect that evidence, no explicit promotion gate for end-to-end A/B, and no way for trace review to lower a target's priority when the backend reality looked weaker than the heuristic expected.
+  - Purpose: turn the kernel lab into a more complete optimization loop where evidence can both promote and demote targets, and where the next action is explicit instead of buried inside a generic orchestration plan.
+  - Added `evidence` and `promotion-check` commands to expose the current MLX ledger state and integration readiness directly.
+  - Added `review-trace` so human/agent trace interpretation can be recorded as `none|low|medium|high` instead of disappearing in an external Xcode session.
+  - Made evidence summaries trace-review-aware, including negative signals that can temporarily deprioritize a target.
+  - Updated MLX profile ranking and promotion checks to use that richer evidence model instead of just "has verify" / "has capture".
+
+**Grounding**
+
+- Files:
+  - `CHANGELOG.md`
+  - `README.md`
+  - `program.md`
+  - `docs/kernel-lab.md`
+  - `docs/mlx-port-architecture.md`
+  - `autoresearch_lab/labs.py`
+  - `autoresearch_lab/ledger.py`
+  - `autoresearch_mlx/lab.py`
+  - `autoresearch_mlx/lab_profile.py`
+  - `autoresearch_mlx/lab_trace.py`
+  - `autoresearch_mlx/lab_workspace.py`
+- Validation:
+  - `python3 -m py_compile autoresearch_lab/labs.py autoresearch_lab/ledger.py autoresearch_mlx/lab.py autoresearch_mlx/lab_profile.py autoresearch_mlx/lab_trace.py autoresearch_mlx/lab_workspace.py kernel-lab.py`
+  - `./.venv/bin/python kernel-lab.py --engine mlx evidence --target block_prelude --preset m5-balanced`
+  - `./.venv/bin/python kernel-lab.py --engine mlx promotion-check --target block_prelude --preset m5-balanced`
+  - `./.venv/bin/python kernel-lab.py --engine mlx review-trace --workspace /tmp/mlx-kernel-workspace-2 --metadata /tmp/mlx-kernel-workspace-2/block-prelude-trace.metadata.json --relevance low --notes 'validation: weak end-to-end impact check'`
+  - `./.venv/bin/python kernel-lab.py --engine mlx profile --preset m5-balanced --top-k 3`
+  - `./.venv/bin/python kernel-lab.py --engine mlx review-trace --workspace /tmp/mlx-kernel-workspace-2 --metadata /tmp/mlx-kernel-workspace-2/block-prelude-trace.metadata.json --relevance high --notes 'validation: restore promotion-ready state after negative-signal check'`
+  - `./.venv/bin/python kernel-lab.py --engine mlx profile --preset m5-balanced --top-k 2`
+  - `python3 tools/changelog_scores.py --group-by entry --format csv --include-latest --verify`
+- Measurements:
+  - `promotion-check` now reports `block_prelude` as `ready-for-integration-ab` when verify and capture evidence are present.
+  - A recorded `low` trace review demoted `block_prelude` from rank `1` to rank `2` for `m5-balanced`, with:
+    - `effective_priority_score=7.775`
+    - `promotion_status=trace-deprioritized`
+  - A later recorded `high` trace review restored it to rank `1`, with:
+    - `effective_priority_score=9.325`
+    - `promotion_status=ready-for-integration-test`
+
+## Committed History
+
+### March 12, 2026 — `587d4a8` — lab: Add evidence-aware MLX ranking and promotion — score `4` — complexity `7`
 
 **Human-directed, AI-shaped (4)**
 
@@ -71,8 +118,6 @@ On this hardware, the default canonical matched benchmark window for optimizatio
   - The resulting orchestration plan upgraded from "open a new workspace" to:
     - `status=promotion-ready`
     - `workspace=/tmp/mlx-kernel-workspace-2`
-
-## Committed History
 
 ### March 12, 2026 — `03f729b` — lab: Feed MLX trace artifacts back into orchestration — score `2`
 

@@ -68,10 +68,32 @@ class LabExtractResult:
 
 
 @dataclass(frozen=True)
+class LabEvidenceResult:
+    engine: str
+    backend_family: str
+    target: str
+    preset: str | None
+    status: str
+    details: dict[str, Any]
+
+
+@dataclass(frozen=True)
 class LabOrchestrationPlan:
     engine: str
     target: str
     workspace: str
+    status: str
+    commands: tuple[str, ...]
+    details: dict[str, Any]
+
+
+@dataclass(frozen=True)
+class LabPromotionCheck:
+    engine: str
+    backend_family: str
+    target: str
+    preset: str | None
+    workspace: str | None
     status: str
     commands: tuple[str, ...]
     details: dict[str, Any]
@@ -126,6 +148,12 @@ class KernelLab(Protocol):
         ...
 
     def capture_workspace(self, *, workspace: Path, output: Path, quick: bool = False) -> LabTraceResult:
+        ...
+
+    def summarize_evidence(self, *, target: str, preset: str | None = None) -> LabEvidenceResult:
+        ...
+
+    def promotion_check(self, *, target: str, preset: str, workspace: Path | None = None) -> LabPromotionCheck:
         ...
 
 

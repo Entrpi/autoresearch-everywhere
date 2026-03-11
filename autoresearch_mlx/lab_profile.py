@@ -21,16 +21,6 @@ from autoresearch_mlx.train import PRESETS, build_model_config
 PROFILE_SCHEMA_VERSION = 1
 
 
-def _priority_bonus_from_evidence(promotion_status: str) -> float:
-    if promotion_status == "ready-for-integration-test":
-        return 0.75
-    if promotion_status == "trace-backed":
-        return 0.45
-    if promotion_status == "verified-only":
-        return 0.20
-    return 0.0
-
-
 def _current_git_commit() -> str | None:
     try:
         return subprocess.run(
@@ -297,7 +287,7 @@ def profile_mlx_targets(*, target_catalog: dict[str, object], preset: str, top_k
             target=target,
             preset=preset,
         )
-        effective_priority = priority_score + _priority_bonus_from_evidence(evidence.promotion_status)
+        effective_priority = priority_score + evidence.evidence_bonus
         scored_with_evidence.append(
             (
                 target,
@@ -472,7 +462,16 @@ def orchestrate_from_profile(
             ]
         )
         status = "trace-backed"
-    if evidence_summary.promotion_status == "ready-for-integration-test" and use_existing_workspace:
+    if evidence_summary.promotion_status == "trace-deprioritized" and use_existing_workspace:
+        status = "deprioritized-after-trace"
+        commands = tuple(
+            [
+                f"# keep {workspace} as a reference workspace, but deprioritize this target for now",
+                *trace_commands,
+                "# the recorded trace review says this target has weak end-to-end relevance on the current preset",
+            ]
+        )
+    elif evidence_summary.promotion_status == "ready-for-integration-test" and use_existing_workspace:
         status = "promotion-ready"
         commands = tuple(
             [

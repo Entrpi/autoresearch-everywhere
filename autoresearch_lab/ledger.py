@@ -22,9 +22,11 @@ class LabEvidenceSummary:
     total_events: int
     verify_ok_count: int
     capture_ok_count: int
+    trace_review_ok_count: int
     last_event_at: str | None
     last_verify_at: str | None
     last_capture_at: str | None
+    last_trace_review_at: str | None
     last_workspace: str | None
     last_trace_metadata_path: str | None
     unique_workspaces: int
@@ -153,13 +155,24 @@ def summarize_lab_evidence(
 
     verify_ok = [event for event in events if event.get("event_type") == "verify" and event.get("status") == "ok"]
     capture_ok = [event for event in events if event.get("event_type") == "capture" and event.get("status") == "ok"]
+    trace_review_ok = [
+        event for event in events if event.get("event_type") == "trace-review" and event.get("status") == "ok"
+    ]
+    last_trace_review = trace_review_ok[-1] if trace_review_ok else None
+    trace_relevance = last_trace_review.get("details", {}).get("relevance") if last_trace_review else None
 
-    if verify_ok and capture_ok:
+    if trace_relevance == "none":
+        promotion_status = "trace-deprioritized"
+        evidence_bonus = -0.75
+    elif trace_relevance == "low":
+        promotion_status = "trace-deprioritized"
+        evidence_bonus = -0.35
+    elif verify_ok and capture_ok:
         promotion_status = "ready-for-integration-test"
-        evidence_bonus = 1.0
+        evidence_bonus = 1.2 if trace_relevance == "high" else 1.0
     elif capture_ok:
         promotion_status = "trace-backed"
-        evidence_bonus = 0.5
+        evidence_bonus = 0.65 if trace_relevance == "high" else 0.5
     elif verify_ok:
         promotion_status = "verified-only"
         evidence_bonus = 0.25
@@ -176,9 +189,11 @@ def summarize_lab_evidence(
         total_events=len(events),
         verify_ok_count=len(verify_ok),
         capture_ok_count=len(capture_ok),
+        trace_review_ok_count=len(trace_review_ok),
         last_event_at=events[-1]["created_at"] if events else None,
         last_verify_at=verify_ok[-1]["created_at"] if verify_ok else None,
         last_capture_at=last_capture["created_at"] if last_capture else None,
+        last_trace_review_at=last_trace_review["created_at"] if last_trace_review else None,
         last_workspace=events[-1]["workspace"] if events else None,
         last_trace_metadata_path=(
             last_capture.get("details", {}).get("trace_metadata_path") if last_capture else None
@@ -189,8 +204,11 @@ def summarize_lab_evidence(
         details={
             "last_metric_name": events[-1].get("metric_name") if events else None,
             "last_metric_value": events[-1].get("metric_value") if events else None,
+            "last_trace_relevance": trace_relevance,
             "recommended_next_step": (
-                "integration-test"
+                "reprioritize"
+                if promotion_status == "trace-deprioritized"
+                else "integration-test"
                 if promotion_status == "ready-for-integration-test"
                 else "verify"
                 if promotion_status == "trace-backed"
