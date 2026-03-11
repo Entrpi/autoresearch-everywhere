@@ -367,6 +367,31 @@ def kernel_fn(x_gate: mx.array, gate_weight: mx.array, v: mx.array, ve: mx.array
 '''
 
 
+VE_LOOKUP_RESHAPE_TEMPLATE = '''"""
+Autoresearch MLX kernel lab workspace.
+
+Target: Value embed lookup + reshape
+Mutable file: yes
+
+Replace `kernel_fn` with a faster implementation. The starter path matches the
+repo's value-embed lookup followed by reshape into KV heads.
+"""
+
+from __future__ import annotations
+
+import mlx.core as mx
+
+
+KERNEL_TARGET = "ve_lookup_reshape"
+
+
+def kernel_fn(value_embed_table: mx.array, idx: mx.array, n_kv_head: int, head_dim: int) -> mx.array:
+    batch_size, seq_len = idx.shape
+    ve = value_embed_table[idx]
+    return ve.reshape(batch_size, seq_len, n_kv_head, head_dim)
+'''
+
+
 ATTENTION_MASK_LOCAL_TEMPLATE = '''"""
 Autoresearch MLX kernel lab workspace.
 
@@ -394,6 +419,54 @@ def kernel_fn(rows: mx.array, cols: mx.array, window_size: int) -> mx.array:
 '''
 
 
+PROJ_HEAD_RESHAPE_TEMPLATE = '''"""
+Autoresearch MLX kernel lab workspace.
+
+Target: Projection-head reshape
+Mutable file: yes
+
+Replace `kernel_fn` with a faster implementation. The starter path matches the
+repo's attention output transpose and reshape before the output projection.
+"""
+
+from __future__ import annotations
+
+import mlx.core as mx
+
+
+KERNEL_TARGET = "proj_head_reshape"
+
+
+def kernel_fn(y: mx.array) -> mx.array:
+    batch_size, heads, seq_len, head_dim = y.shape
+    return y.transpose(0, 2, 1, 3).reshape(batch_size, seq_len, heads * head_dim)
+'''
+
+
+CROSS_ENTROPY_SOFTCAP_TEMPLATE = '''"""
+Autoresearch MLX kernel lab workspace.
+
+Target: Loss logits cast + softcap
+Mutable file: yes
+
+Replace `kernel_fn` with a faster implementation. The starter path matches the
+repo's final logits cast to float32 followed by tanh softcap.
+"""
+
+from __future__ import annotations
+
+import mlx.core as mx
+
+
+KERNEL_TARGET = "loss_logits_cast_softcap"
+
+
+def kernel_fn(logits_bf16: mx.array, softcap: float = 15.0) -> mx.array:
+    logits = logits_bf16.astype(mx.float32)
+    return softcap * mx.tanh(logits / softcap)
+'''
+
+
 CROSS_ENTROPY_PRELUDE_TEMPLATE = '''"""
 Autoresearch MLX kernel lab workspace.
 
@@ -416,6 +489,58 @@ def kernel_fn(loss_flat: mx.array, target_ids: mx.array, token_bytes: mx.array) 
     nbytes = token_bytes[target_ids]
     mask = nbytes > 0
     return mx.sum(loss_flat * mask.astype(loss_flat.dtype)), mx.sum(nbytes.astype(mx.int64))
+'''
+
+
+ATTENTION_PRELUDE_TEMPLATE = '''"""
+Autoresearch MLX kernel lab workspace.
+
+Target: Attention prelude
+Mutable file: yes
+
+Replace `kernel_fn` with a faster implementation. The starter path matches the
+repo's attention preparation up to, but not including, scaled dot-product
+attention itself.
+"""
+
+from __future__ import annotations
+
+import mlx.core as mx
+
+
+KERNEL_TARGET = "attention_prelude"
+
+
+def _apply_rotary(x: mx.array, cos: mx.array, sin: mx.array) -> mx.array:
+    d = x.shape[-1] // 2
+    x1 = x[..., :d]
+    x2 = x[..., d:]
+    y1 = x1 * cos + x2 * sin
+    y2 = x1 * (-sin) + x2 * cos
+    return mx.concatenate([y1, y2], axis=-1)
+
+
+def _rms_norm(x: mx.array, eps: float = 1e-6) -> mx.array:
+    x32 = x.astype(mx.float32)
+    scale = mx.rsqrt(mx.mean(mx.square(x32), axis=-1, keepdims=True) + eps)
+    return (x32 * scale).astype(x.dtype)
+
+
+def kernel_fn(
+    q_proj: mx.array,
+    k_proj: mx.array,
+    v_proj: mx.array,
+    cos: mx.array,
+    sin: mx.array,
+) -> tuple[mx.array, mx.array, mx.array]:
+    q = _rms_norm(_apply_rotary(q_proj, cos, sin))
+    k = _rms_norm(_apply_rotary(k_proj, cos, sin))
+    v = v_proj
+    return (
+        q.transpose(0, 2, 1, 3),
+        k.transpose(0, 2, 1, 3),
+        v.transpose(0, 2, 1, 3),
+    )
 '''
 
 
@@ -804,6 +929,33 @@ def _value_embed_gate_metric(case: LabCase, latency_ms: float) -> float:
     return _throughput_gb_s(bytes_moved, latency_ms)
 
 
+def _ve_lookup_reshape_inputs(case: LabCase):
+    batch, seq, kv_heads, head_dim = case.shape
+    vocab_size = case.aux["vocab_size"] if case.aux else 32768
+    table = _mx_array((vocab_size, kv_heads * head_dim), case.dtype)
+    idx = _mx_int_array((batch, seq), low=0, high=vocab_size)
+    return table, idx, kv_heads, head_dim
+
+
+def _ve_lookup_reshape_ref(value_embed_table: mx.array, idx: mx.array, n_kv_head: int, head_dim: int) -> mx.array:
+    batch_size, seq_len = idx.shape
+    ve = value_embed_table[idx]
+    return ve.reshape(batch_size, seq_len, n_kv_head, head_dim)
+
+
+def _ve_lookup_reshape_metric(case: LabCase, latency_ms: float) -> float:
+    batch, seq, kv_heads, head_dim = case.shape
+    vocab_size = case.aux["vocab_size"] if case.aux else 32768
+    itemsize = _numpy_dtype(case.dtype).itemsize
+    index_itemsize = np.dtype(np.int32).itemsize
+    bytes_moved = (
+        vocab_size * kv_heads * head_dim * itemsize
+        + batch * seq * index_itemsize
+        + batch * seq * kv_heads * head_dim * itemsize
+    )
+    return _throughput_gb_s(bytes_moved, latency_ms)
+
+
 def _attention_mask_local_inputs(case: LabCase):
     seq_len, _ = case.shape
     window_size = case.aux["window_size"] if case.aux else seq_len // 2
@@ -825,6 +977,38 @@ def _attention_mask_local_metric(case: LabCase, latency_ms: float) -> float:
     itemsize = np.dtype(np.float32).itemsize
     bytes_moved = (3 * seq_len * seq_len + 2 * seq_len) * itemsize
     return _throughput_gb_s(bytes_moved, latency_ms)
+
+
+def _proj_head_reshape_inputs(case: LabCase):
+    return (_mx_array(case.shape, case.dtype),)
+
+
+def _proj_head_reshape_ref(y: mx.array) -> mx.array:
+    batch_size, heads, seq_len, head_dim = y.shape
+    return y.transpose(0, 2, 1, 3).reshape(batch_size, seq_len, heads * head_dim)
+
+
+def _proj_head_reshape_metric(case: LabCase, latency_ms: float) -> float:
+    batch, heads, seq, head_dim = case.shape
+    itemsize = _numpy_dtype(case.dtype).itemsize
+    bytes_moved = 2 * batch * heads * seq * head_dim * itemsize
+    return _throughput_gb_s(bytes_moved, latency_ms)
+
+
+def _loss_logits_cast_softcap_inputs(case: LabCase):
+    return (_mx_array(case.shape, case.dtype, scale=2.0),)
+
+
+def _loss_logits_cast_softcap_ref(logits_bf16: mx.array, softcap: float = 15.0) -> mx.array:
+    logits = logits_bf16.astype(mx.float32)
+    return softcap * mx.tanh(logits / softcap)
+
+
+def _loss_logits_cast_softcap_metric(case: LabCase, latency_ms: float) -> float:
+    rows, dim = case.shape
+    in_itemsize = _numpy_dtype(case.dtype).itemsize
+    out_itemsize = np.dtype(np.float32).itemsize
+    return _throughput_gb_s((rows * dim * (in_itemsize + out_itemsize)) * 2, latency_ms)
 
 
 def _cross_entropy_prelude_inputs(case: LabCase):
@@ -854,6 +1038,40 @@ def _cross_entropy_prelude_metric(case: LabCase, latency_ms: float) -> float:
     float_itemsize = _numpy_dtype(case.dtype).itemsize
     int_itemsize = np.dtype(np.int32).itemsize
     bytes_moved = n * float_itemsize + n * int_itemsize + vocab_size * int_itemsize + n * int_itemsize
+    return _throughput_gb_s(bytes_moved, latency_ms)
+
+
+def _attention_prelude_inputs(case: LabCase):
+    batch, seq, heads, dim = case.shape
+    q = _mx_array((batch, seq, heads, dim), case.dtype)
+    k = _mx_array((batch, seq, heads, dim), case.dtype)
+    v = _mx_array((batch, seq, heads, dim), case.dtype)
+    half = dim // 2
+    cos = _mx_array((1, seq, 1, half), case.dtype)
+    sin = _mx_array((1, seq, 1, half), case.dtype)
+    return q, k, v, cos, sin
+
+
+def _attention_prelude_ref(
+    q_proj: mx.array,
+    k_proj: mx.array,
+    v_proj: mx.array,
+    cos: mx.array,
+    sin: mx.array,
+) -> tuple[mx.array, mx.array, mx.array]:
+    q, k = _rope_qk_ref(q_proj, k_proj, cos, sin)
+    return (
+        q.transpose(0, 2, 1, 3),
+        k.transpose(0, 2, 1, 3),
+        v_proj.transpose(0, 2, 1, 3),
+    )
+
+
+def _attention_prelude_metric(case: LabCase, latency_ms: float) -> float:
+    batch, seq, heads, dim = case.shape
+    half = dim // 2
+    itemsize = _numpy_dtype(case.dtype).itemsize
+    bytes_moved = (8 * batch * seq * heads * dim + 4 * seq * half) * itemsize
     return _throughput_gb_s(bytes_moved, latency_ms)
 
 
@@ -1299,6 +1517,30 @@ class MLXKernelLab:
             reference=_value_embed_gate_ref,
             metric_value=_value_embed_gate_metric,
         ),
+        "ve_lookup_reshape": TargetSpec(
+            info=LabTarget(
+                key="ve_lookup_reshape",
+                description="Value-embed lookup + reshape lab",
+                metric="throughput_gb_s",
+                status="starter-ready",
+                notes="Matches the embedding lookup and reshape path before value-embed gating.",
+            ),
+            template=VE_LOOKUP_RESHAPE_TEMPLATE,
+            tolerance=0.0,
+            quick_cases=(
+                LabCase((2, 512, 4, 128), "float16", {"vocab_size": 8192}),
+                LabCase((4, 1024, 4, 128), "float16", {"vocab_size": 8192}),
+            ),
+            full_cases=(
+                LabCase((1, 256, 4, 128), "float16", {"vocab_size": 8192}),
+                LabCase((2, 512, 4, 128), "float16", {"vocab_size": 8192}),
+                LabCase((4, 1024, 4, 128), "float16", {"vocab_size": 8192}),
+                LabCase((2, 512, 4, 128), "float32", {"vocab_size": 8192}),
+            ),
+            make_inputs=_ve_lookup_reshape_inputs,
+            reference=_ve_lookup_reshape_ref,
+            metric_value=_ve_lookup_reshape_metric,
+        ),
         "attention_mask_local": TargetSpec(
             info=LabTarget(
                 key="attention_mask_local",
@@ -1322,6 +1564,54 @@ class MLXKernelLab:
             reference=_attention_mask_local_ref,
             metric_value=_attention_mask_local_metric,
         ),
+        "proj_head_reshape": TargetSpec(
+            info=LabTarget(
+                key="proj_head_reshape",
+                description="Attention output transpose + reshape lab",
+                metric="throughput_gb_s",
+                status="starter-ready",
+                notes="Matches the attention output staging just before the output projection.",
+            ),
+            template=PROJ_HEAD_RESHAPE_TEMPLATE,
+            tolerance=0.0,
+            quick_cases=(
+                LabCase((2, 8, 512, 64), "float16"),
+                LabCase((4, 8, 1024, 64), "float16"),
+            ),
+            full_cases=(
+                LabCase((1, 8, 256, 64), "float16"),
+                LabCase((2, 8, 512, 64), "float16"),
+                LabCase((4, 8, 1024, 64), "float16"),
+                LabCase((2, 8, 512, 64), "float32"),
+            ),
+            make_inputs=_proj_head_reshape_inputs,
+            reference=_proj_head_reshape_ref,
+            metric_value=_proj_head_reshape_metric,
+        ),
+        "loss_logits_cast_softcap": TargetSpec(
+            info=LabTarget(
+                key="loss_logits_cast_softcap",
+                description="Final logits cast + softcap lab",
+                metric="throughput_gb_s",
+                status="starter-ready",
+                notes="Matches the float32 cast plus tanh softcap before cross-entropy.",
+            ),
+            template=CROSS_ENTROPY_SOFTCAP_TEMPLATE,
+            tolerance=0.0,
+            quick_cases=(
+                LabCase((1024, 32768), "float16"),
+                LabCase((2048, 32768), "float16"),
+            ),
+            full_cases=(
+                LabCase((256, 8192), "float16"),
+                LabCase((1024, 32768), "float16"),
+                LabCase((2048, 32768), "float16"),
+                LabCase((1024, 32768), "float32"),
+            ),
+            make_inputs=_loss_logits_cast_softcap_inputs,
+            reference=_loss_logits_cast_softcap_ref,
+            metric_value=_loss_logits_cast_softcap_metric,
+        ),
         "cross_entropy_prelude": TargetSpec(
             info=LabTarget(
                 key="cross_entropy_prelude",
@@ -1344,6 +1634,30 @@ class MLXKernelLab:
             make_inputs=_cross_entropy_prelude_inputs,
             reference=_cross_entropy_prelude_ref,
             metric_value=_cross_entropy_prelude_metric,
+        ),
+        "attention_prelude": TargetSpec(
+            info=LabTarget(
+                key="attention_prelude",
+                description="Attention prelude lab",
+                metric="throughput_gb_s",
+                status="starter-ready",
+                notes="Covers rotary, Q/K norm, and transpose staging up to SDPA.",
+            ),
+            template=ATTENTION_PRELUDE_TEMPLATE,
+            tolerance=5e-3,
+            quick_cases=(
+                LabCase((2, 512, 8, 64), "float16"),
+                LabCase((4, 1024, 8, 64), "float16"),
+            ),
+            full_cases=(
+                LabCase((1, 256, 8, 64), "float16"),
+                LabCase((2, 512, 8, 64), "float16"),
+                LabCase((4, 1024, 8, 64), "float16"),
+                LabCase((2, 512, 8, 64), "float32"),
+            ),
+            make_inputs=_attention_prelude_inputs,
+            reference=_attention_prelude_ref,
+            metric_value=_attention_prelude_metric,
         ),
         "fused_mlp": TargetSpec(
             info=LabTarget(

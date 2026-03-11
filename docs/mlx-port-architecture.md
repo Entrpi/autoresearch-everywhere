@@ -387,8 +387,12 @@ The current implementation is MLX-first and starter-target-first:
   - `reduce`
   - `softmax`
   - `value_embed_gate`
+  - `ve_lookup_reshape`
   - `attention_mask_local`
+  - `proj_head_reshape`
+  - `loss_logits_cast_softcap`
   - `cross_entropy_prelude`
+  - `attention_prelude`
   - `fused_mlp`
 - `flash_attention` is explicitly deferred as a first MLX lab target
 

@@ -29,7 +29,46 @@ On this hardware, the default canonical matched benchmark window for optimizatio
 
 ## Latest
 
-### New commit — lab: Add value-gate, mask, and loss-side starter targets — score `3` — complexity `6`
+### New commit — lab: Add reshape and broader attention/logits starter targets — score `3` — complexity `7`
+
+**AI-identified within brief, human-shaped (3)**
+
+- Extended the MLX lab into the next composed support-path targets: value-embed lookup reshaping, the final logits cast+softcap path, the attention output reshape path, and a broader attention prelude target that stops just before SDPA.
+  - Meaning: the lab now covers more of the reshape/cast/staging work that surrounds the large kernels, not just the elementwise and reduction pieces inside them.
+  - Motivation: after gating, mask, and loss-side reduction, the next useful additions were the common reshaping and pre-attention/post-head operations that can matter in end-to-end latency without requiring a full custom attention kernel.
+  - Purpose: keep broadening the kernel-lab catalog in model-faithful increments so the eventual cross-backend lab boundary can reason about more of the real training path than isolated toy ops.
+  - Added `ve_lookup_reshape` for the value-embed table lookup followed by reshape into KV heads.
+  - Added `proj_head_reshape` for the attention output transpose + reshape just before the output projection.
+  - Added `loss_logits_cast_softcap` for the final cast-to-float32 plus tanh softcap path.
+  - Added `attention_prelude` for the composed rotary + Q/K norm + transpose staging up to, but not including, scaled dot-product attention.
+
+**Grounding**
+
+- Files:
+  - `CHANGELOG.md`
+  - `README.md`
+  - `docs/kernel-lab.md`
+  - `docs/mlx-port-architecture.md`
+  - `autoresearch_mlx/lab_workspace.py`
+- Validation:
+  - `python3 -m py_compile kernel-lab.py autoresearch_lab/*.py autoresearch_mlx/lab.py autoresearch_mlx/lab_workspace.py`
+  - `./.venv/bin/python kernel-lab.py --engine mlx list-targets`
+  - `./.venv/bin/python kernel-lab.py --engine mlx init --target ve_lookup_reshape --workspace <tmp>`
+  - `./.venv/bin/python kernel-lab.py --engine mlx init --target proj_head_reshape --workspace <tmp>`
+  - `./.venv/bin/python kernel-lab.py --engine mlx init --target loss_logits_cast_softcap --workspace <tmp>`
+  - `./.venv/bin/python kernel-lab.py --engine mlx init --target attention_prelude --workspace <tmp>`
+  - `./.venv/bin/python kernel-lab.py --engine mlx bench --workspace <tmp> --quick`
+  - `python3 tools/changelog_scores.py --group-by entry --format csv --include-latest --verify`
+- Measurements:
+  - Quick MLX lab benchmarks for the four new support-path starter targets all completed with `max_abs_error=0.0`:
+    - `ve_lookup_reshape`: `median_latency_ms=0.346`, `median_throughput_gb_s=31.959`
+    - `proj_head_reshape`: `median_latency_ms=0.520`, `median_throughput_gb_s=9.149`
+    - `loss_logits_cast_softcap`: `median_latency_ms=20.332`, `median_throughput_gb_s=29.686`
+    - `attention_prelude`: `median_latency_ms=1.594`, `median_throughput_gb_s=12.563`
+
+## Committed History
+
+### March 11, 2026 — `cedaa52` — lab: Add value-gate, mask, and loss-side starter targets — score `3` — complexity `6`
 
 **AI-identified within brief, human-shaped (3)**
 
@@ -62,8 +101,6 @@ On this hardware, the default canonical matched benchmark window for optimizatio
     - `value_embed_gate`: `median_latency_ms=0.481`, `median_throughput_gb_s=15.150`
     - `attention_mask_local`: `median_latency_ms=0.536`, `median_throughput_gb_s=14.105`
     - `cross_entropy_prelude`: `median_latency_ms=0.496`, `median_throughput_gb_s=4.913`
-
-## Committed History
 
 ### March 11, 2026 — `3ac1984` — lab: Add backward norm starter targets and tuple-aware benching — score `3` — complexity `6`
 
