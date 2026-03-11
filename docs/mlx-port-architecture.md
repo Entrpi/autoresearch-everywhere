@@ -386,6 +386,9 @@ The current implementation is MLX-first and starter-target-first:
   - `rotary_embedding`
   - `reduce`
   - `softmax`
+  - `value_embed_gate`
+  - `attention_mask_local`
+  - `cross_entropy_prelude`
   - `fused_mlp`
 - `flash_attention` is explicitly deferred as a first MLX lab target
 

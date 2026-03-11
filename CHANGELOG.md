@@ -29,7 +29,43 @@ On this hardware, the default canonical matched benchmark window for optimizatio
 
 ## Latest
 
-### New commit — lab: Add backward norm starter targets and tuple-aware benching — score `3` — complexity `6`
+### New commit — lab: Add value-gate, mask, and loss-side starter targets — score `3` — complexity `6`
+
+**AI-identified within brief, human-shaped (3)**
+
+- Extended the MLX kernel lab into the next support-path starter targets: the value-embed gate, local attention-mask construction, and the byte-aware loss-side reduction around flattened cross-entropy output.
+  - Meaning: the lab now covers real support-path work from attention and loss evaluation instead of only forward-path math and backward norms.
+  - Motivation: after forward-path and backward-norm coverage, the next useful additions were kernels that represent real model plumbing and loss-side work without jumping directly to reshape-heavy composed kernels or full attention.
+  - Purpose: keep broadening the MLX lab along the actual training path so the later cross-backend lab boundary has starter patterns for attention gating, masking, and loss-side reduction too.
+  - Added `value_embed_gate` for the gate-and-add path around learned value embeddings inside attention.
+  - Added `attention_mask_local` for local-causal mask construction at a single window size.
+  - Added `cross_entropy_prelude` for the byte-aware masked reduction around flattened loss output and target-byte counting.
+
+**Grounding**
+
+- Files:
+  - `CHANGELOG.md`
+  - `README.md`
+  - `docs/kernel-lab.md`
+  - `docs/mlx-port-architecture.md`
+  - `autoresearch_mlx/lab_workspace.py`
+- Validation:
+  - `python3 -m py_compile kernel-lab.py autoresearch_lab/*.py autoresearch_mlx/lab.py autoresearch_mlx/lab_workspace.py`
+  - `./.venv/bin/python kernel-lab.py --engine mlx list-targets`
+  - `./.venv/bin/python kernel-lab.py --engine mlx init --target value_embed_gate --workspace <tmp>`
+  - `./.venv/bin/python kernel-lab.py --engine mlx init --target attention_mask_local --workspace <tmp>`
+  - `./.venv/bin/python kernel-lab.py --engine mlx init --target cross_entropy_prelude --workspace <tmp>`
+  - `./.venv/bin/python kernel-lab.py --engine mlx bench --workspace <tmp> --quick`
+  - `python3 tools/changelog_scores.py --group-by entry --format csv --include-latest --verify`
+- Measurements:
+  - Quick MLX lab benchmarks for the three support-path starter targets all completed with `max_abs_error=0.0`:
+    - `value_embed_gate`: `median_latency_ms=0.481`, `median_throughput_gb_s=15.150`
+    - `attention_mask_local`: `median_latency_ms=0.536`, `median_throughput_gb_s=14.105`
+    - `cross_entropy_prelude`: `median_latency_ms=0.496`, `median_throughput_gb_s=4.913`
+
+## Committed History
+
+### March 11, 2026 — `3ac1984` — lab: Add backward norm starter targets and tuple-aware benching — score `3` — complexity `6`
 
 **AI-identified within brief, human-shaped (3)**
 
@@ -60,8 +96,6 @@ On this hardware, the default canonical matched benchmark window for optimizatio
   - Quick MLX lab benchmarks for the two new backward starter targets both completed with `max_abs_error=0.0`:
     - `rmsnorm_backward`: `median_latency_ms=1.674`, `median_throughput_gb_s=6.167`
     - `layernorm_backward`: `median_latency_ms=2.815`, `median_throughput_gb_s=4.806`
-
-## Committed History
 
 ### March 11, 2026 — `a4524aa` — lab: Add next MLX training-path starter targets — score `3` — complexity `8`
 

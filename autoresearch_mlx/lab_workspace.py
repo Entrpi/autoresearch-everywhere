@@ -343,6 +343,82 @@ def kernel_fn(x: mx.array) -> mx.array:
 '''
 
 
+VALUE_EMBED_GATE_TEMPLATE = '''"""
+Autoresearch MLX kernel lab workspace.
+
+Target: Value embed gate
+Mutable file: yes
+
+Replace `kernel_fn` with a faster implementation. The starter path matches the
+repo's value-embed gate and add path in attention.
+"""
+
+from __future__ import annotations
+
+import mlx.core as mx
+
+
+KERNEL_TARGET = "value_embed_gate"
+
+
+def kernel_fn(x_gate: mx.array, gate_weight: mx.array, v: mx.array, ve: mx.array) -> mx.array:
+    gate = 2.0 * mx.sigmoid(x_gate @ gate_weight)
+    return v + gate[..., None] * ve
+'''
+
+
+ATTENTION_MASK_LOCAL_TEMPLATE = '''"""
+Autoresearch MLX kernel lab workspace.
+
+Target: Local attention mask
+Mutable file: yes
+
+Replace `kernel_fn` with a faster implementation. The starter path matches the
+repo's local-causal attention mask construction for one window size.
+"""
+
+from __future__ import annotations
+
+import mlx.core as mx
+
+
+KERNEL_TARGET = "attention_mask_local"
+
+
+def kernel_fn(rows: mx.array, cols: mx.array, window_size: int) -> mx.array:
+    causal = cols <= rows
+    local = cols >= (rows - window_size + 1)
+    allowed = causal & local
+    mask = (~allowed).astype(mx.float32) * mx.finfo(mx.float32).min
+    return mask[None, None, :, :]
+'''
+
+
+CROSS_ENTROPY_PRELUDE_TEMPLATE = '''"""
+Autoresearch MLX kernel lab workspace.
+
+Target: Cross-entropy prelude
+Mutable file: yes
+
+Replace `kernel_fn` with a faster implementation. The starter path matches the
+repo's byte-aware masked reduction around flattened cross-entropy loss output.
+"""
+
+from __future__ import annotations
+
+import mlx.core as mx
+
+
+KERNEL_TARGET = "cross_entropy_prelude"
+
+
+def kernel_fn(loss_flat: mx.array, target_ids: mx.array, token_bytes: mx.array) -> tuple[mx.array, mx.array]:
+    nbytes = token_bytes[target_ids]
+    mask = nbytes > 0
+    return mx.sum(loss_flat * mask.astype(loss_flat.dtype)), mx.sum(nbytes.astype(mx.int64))
+'''
+
+
 RMSNORM_BACKWARD_TEMPLATE = '''"""
 Autoresearch MLX kernel lab workspace.
 
@@ -484,6 +560,11 @@ def _iter_leaves(value):
 def _mx_array(shape: tuple[int, ...], dtype_name: str, scale: float = 1.0) -> mx.array:
     values = _rng().standard_normal(shape, dtype=np.float32) * scale
     return mx.array(values, dtype=_dtype(dtype_name))
+
+
+def _mx_int_array(shape: tuple[int, ...], *, low: int, high: int, dtype=mx.int32) -> mx.array:
+    values = _rng().integers(low, high, size=shape, dtype=np.int32)
+    return mx.array(values, dtype=dtype)
 
 
 def _rmsnorm_inputs(case: LabCase):
@@ -693,6 +774,87 @@ def _activation_metric(case: LabCase, latency_ms: float) -> float:
     rows, dim = case.shape
     itemsize = _numpy_dtype(case.dtype).itemsize
     return _throughput_gb_s((2 * rows * dim) * itemsize, latency_ms)
+
+
+def _value_embed_gate_inputs(case: LabCase):
+    batch, seq, kv_heads, head_dim = case.shape
+    gate_channels = case.aux["gate_channels"] if case.aux else 32
+    x_gate = _mx_array((batch, seq, gate_channels), case.dtype)
+    gate_weight = _mx_array((gate_channels, kv_heads), case.dtype)
+    v = _mx_array((batch, seq, kv_heads, head_dim), case.dtype)
+    ve = _mx_array((batch, seq, kv_heads, head_dim), case.dtype)
+    return x_gate, gate_weight, v, ve
+
+
+def _value_embed_gate_ref(x_gate: mx.array, gate_weight: mx.array, v: mx.array, ve: mx.array) -> mx.array:
+    gate = 2.0 * mx.sigmoid(x_gate @ gate_weight)
+    return v + gate[..., None] * ve
+
+
+def _value_embed_gate_metric(case: LabCase, latency_ms: float) -> float:
+    batch, seq, kv_heads, head_dim = case.shape
+    gate_channels = case.aux["gate_channels"] if case.aux else 32
+    itemsize = _numpy_dtype(case.dtype).itemsize
+    bytes_moved = (
+        batch * seq * gate_channels
+        + gate_channels * kv_heads
+        + 3 * batch * seq * kv_heads * head_dim
+        + batch * seq * kv_heads
+    ) * itemsize
+    return _throughput_gb_s(bytes_moved, latency_ms)
+
+
+def _attention_mask_local_inputs(case: LabCase):
+    seq_len, _ = case.shape
+    window_size = case.aux["window_size"] if case.aux else seq_len // 2
+    rows = mx.arange(seq_len, dtype=mx.int32)[:, None]
+    cols = mx.arange(seq_len, dtype=mx.int32)[None, :]
+    return rows, cols, window_size
+
+
+def _attention_mask_local_ref(rows: mx.array, cols: mx.array, window_size: int) -> mx.array:
+    causal = cols <= rows
+    local = cols >= (rows - window_size + 1)
+    allowed = causal & local
+    mask = (~allowed).astype(mx.float32) * mx.finfo(mx.float32).min
+    return mask[None, None, :, :]
+
+
+def _attention_mask_local_metric(case: LabCase, latency_ms: float) -> float:
+    seq_len, _ = case.shape
+    itemsize = np.dtype(np.float32).itemsize
+    bytes_moved = (3 * seq_len * seq_len + 2 * seq_len) * itemsize
+    return _throughput_gb_s(bytes_moved, latency_ms)
+
+
+def _cross_entropy_prelude_inputs(case: LabCase):
+    n = case.shape[0]
+    vocab_size = case.aux["vocab_size"] if case.aux else 32768
+    loss_flat = _mx_array((n,), case.dtype, scale=1.0)
+    target_ids = _mx_int_array((n,), low=0, high=vocab_size)
+    token_bytes_np = _rng().integers(0, 5, size=(vocab_size,), dtype=np.int32)
+    token_bytes_np[0] = 0
+    token_bytes = mx.array(token_bytes_np, dtype=mx.int32)
+    return loss_flat, target_ids, token_bytes
+
+
+def _cross_entropy_prelude_ref(
+    loss_flat: mx.array,
+    target_ids: mx.array,
+    token_bytes: mx.array,
+) -> tuple[mx.array, mx.array]:
+    nbytes = token_bytes[target_ids]
+    mask = nbytes > 0
+    return mx.sum(loss_flat * mask.astype(loss_flat.dtype)), mx.sum(nbytes.astype(mx.int64))
+
+
+def _cross_entropy_prelude_metric(case: LabCase, latency_ms: float) -> float:
+    n = case.shape[0]
+    vocab_size = case.aux["vocab_size"] if case.aux else 32768
+    float_itemsize = _numpy_dtype(case.dtype).itemsize
+    int_itemsize = np.dtype(np.int32).itemsize
+    bytes_moved = n * float_itemsize + n * int_itemsize + vocab_size * int_itemsize + n * int_itemsize
+    return _throughput_gb_s(bytes_moved, latency_ms)
 
 
 def _rmsnorm_backward_inputs(case: LabCase):
@@ -1112,6 +1274,76 @@ class MLXKernelLab:
             make_inputs=_activation_inputs,
             reference=_activation_ref,
             metric_value=_activation_metric,
+        ),
+        "value_embed_gate": TargetSpec(
+            info=LabTarget(
+                key="value_embed_gate",
+                description="Value embed gate lab",
+                metric="throughput_gb_s",
+                status="starter-ready",
+                notes="Matches the value-embed gate path inside attention.",
+            ),
+            template=VALUE_EMBED_GATE_TEMPLATE,
+            tolerance=5e-3,
+            quick_cases=(
+                LabCase((2, 512, 4, 64), "float16", {"gate_channels": 32}),
+                LabCase((4, 1024, 4, 64), "float16", {"gate_channels": 64}),
+            ),
+            full_cases=(
+                LabCase((1, 256, 4, 64), "float16", {"gate_channels": 32}),
+                LabCase((2, 512, 4, 64), "float16", {"gate_channels": 32}),
+                LabCase((4, 1024, 4, 64), "float16", {"gate_channels": 64}),
+                LabCase((2, 512, 4, 64), "float32", {"gate_channels": 32}),
+            ),
+            make_inputs=_value_embed_gate_inputs,
+            reference=_value_embed_gate_ref,
+            metric_value=_value_embed_gate_metric,
+        ),
+        "attention_mask_local": TargetSpec(
+            info=LabTarget(
+                key="attention_mask_local",
+                description="Local attention mask lab",
+                metric="throughput_gb_s",
+                status="starter-ready",
+                notes="Matches the local-causal mask construction used for windowed attention.",
+            ),
+            template=ATTENTION_MASK_LOCAL_TEMPLATE,
+            tolerance=0.0,
+            quick_cases=(
+                LabCase((512, 512), "float32", {"window_size": 256}),
+                LabCase((1024, 1024), "float32", {"window_size": 512}),
+            ),
+            full_cases=(
+                LabCase((256, 256), "float32", {"window_size": 128}),
+                LabCase((512, 512), "float32", {"window_size": 256}),
+                LabCase((1024, 1024), "float32", {"window_size": 512}),
+            ),
+            make_inputs=_attention_mask_local_inputs,
+            reference=_attention_mask_local_ref,
+            metric_value=_attention_mask_local_metric,
+        ),
+        "cross_entropy_prelude": TargetSpec(
+            info=LabTarget(
+                key="cross_entropy_prelude",
+                description="Cross-entropy prelude lab",
+                metric="throughput_gb_s",
+                status="starter-ready",
+                notes="Matches the byte-aware masked reduction around flattened loss output.",
+            ),
+            template=CROSS_ENTROPY_PRELUDE_TEMPLATE,
+            tolerance=0.0,
+            quick_cases=(
+                LabCase((32768,), "float32", {"vocab_size": 8192}),
+                LabCase((65536,), "float32", {"vocab_size": 8192}),
+            ),
+            full_cases=(
+                LabCase((16384,), "float32", {"vocab_size": 8192}),
+                LabCase((32768,), "float32", {"vocab_size": 8192}),
+                LabCase((65536,), "float32", {"vocab_size": 8192}),
+            ),
+            make_inputs=_cross_entropy_prelude_inputs,
+            reference=_cross_entropy_prelude_ref,
+            metric_value=_cross_entropy_prelude_metric,
         ),
         "fused_mlp": TargetSpec(
             info=LabTarget(

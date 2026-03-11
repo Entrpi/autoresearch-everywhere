@@ -140,6 +140,9 @@ That current lab exists to build the pattern, not to claim broad coverage yet. T
 - `rotary_embedding`
 - `reduce`
 - `softmax`
+- `value_embed_gate`
+- `attention_mask_local`
+- `cross_entropy_prelude`
 - `fused_mlp`
 
 `flash_attention` stays explicitly deferred as a first target. The long-term reason to keep the lab at the top level now is that the same outer workflow should later host Triton/CUDA, ROCm, and ANE labs without inventing a new orchestration tree each time.
@@ -236,10 +239,10 @@ Current project snapshot from [CHANGELOG.md](CHANGELOG.md):
 
 | Metric | Value |
 | --- | --- |
-| Mean autonomy score | `3.41 / 6` |
-| Mean complexity | `7.61 / commit` |
-| Mean score per top-level bullet | `3.48 / 6` |
-| History covered | `38` commits across `12` subsystems |
+| Mean autonomy score | `3.40 / 6` |
+| Mean complexity | `7.56 / commit` |
+| Mean score per top-level bullet | `3.47 / 6` |
+| History covered | `39` commits across `12` subsystems |
 <!-- autonomy-golf-snapshot:end -->
 
 Refresh with:

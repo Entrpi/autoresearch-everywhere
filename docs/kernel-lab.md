@@ -52,6 +52,9 @@ For now the MLX lab is deliberately narrow:
   - `rotary_embedding`
   - `reduce`
   - `softmax`
+  - `value_embed_gate`
+  - `attention_mask_local`
+  - `cross_entropy_prelude`
   - `fused_mlp`
 - `flash_attention` is explicitly deferred as a first target because MLX already has optimized attention primitives and custom backward there is a worse place to start
 
