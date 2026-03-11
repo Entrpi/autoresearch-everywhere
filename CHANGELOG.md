@@ -29,7 +29,56 @@ On this hardware, the default canonical matched benchmark window for optimizatio
 
 ## Latest
 
-### New commit — lab: add trace reviews, evidence summaries, and promotion checks — score `4` — complexity `8`
+### New commit — lab: add MLX integration A/B path for directly wired targets — score `4` — complexity `8`
+
+**Human-directed, AI-shaped (4)**
+
+- Added the first real trainer-side MLX integration path for kernel-lab targets that already have narrow direct hooks, so promotion can advance from “trace-backed workspace” to “measured end-to-end baseline vs candidate run” instead of stopping at instructions.
+  - Meaning: the lab now has a direct bridge into the real MLX trainer for a subset of targets. It can run a warmup + measured A/B, record the result in the ledger, and distinguish targets that are merely trace-backed from targets that have actually been tested in the live training path.
+  - Motivation: after trace-backed orchestration and promotion checks landed, the remaining gap was the most important one: promotion-ready targets still did not have a built-in way to prove they helped the real trainer. The loop needed to stop emitting “next, run an integration A/B” as a manual idea and start doing it.
+  - Purpose: close the lab loop so directly integrated targets can move from microbench and trace evidence into trainer evidence, while broader composed targets remain clearly marked as needing integration adapters before that comparison is meaningful.
+  - Added `autoresearch_mlx/lab_integration.py` plus trainer hooks in `autoresearch_mlx/model.py` for a first set of directly integrable MLX targets.
+  - Added `kernel-lab.py --engine mlx integration-ab ...`, which runs a fair warmup + measured baseline-vs-candidate trainer comparison and records the result.
+  - Taught the evidence ledger to aggregate integration A/B outcomes across runs instead of trusting only the latest result, including `integration-validated`, `integration-regressed`, and `integration-mixed`.
+  - Updated orchestration and promotion checks so direct targets can graduate into integration work, while broader targets such as `block_prelude` explicitly surface as `needs-integration-adapter`.
+
+**Grounding**
+
+- Files:
+  - `CHANGELOG.md`
+  - `README.md`
+  - `program.md`
+  - `docs/kernel-lab.md`
+  - `docs/mlx-port-architecture.md`
+  - `autoresearch_lab/labs.py`
+  - `autoresearch_lab/ledger.py`
+  - `autoresearch_mlx/lab.py`
+  - `autoresearch_mlx/lab_integration.py`
+  - `autoresearch_mlx/lab_profile.py`
+  - `autoresearch_mlx/lab_workspace.py`
+  - `autoresearch_mlx/model.py`
+- Validation:
+  - `python3 -m py_compile autoresearch_lab/labs.py autoresearch_lab/ledger.py autoresearch_mlx/lab.py autoresearch_mlx/lab_profile.py autoresearch_mlx/lab_workspace.py autoresearch_mlx/model.py autoresearch_mlx/lab_integration.py kernel-lab.py`
+  - `./.venv/bin/python kernel-lab.py --engine mlx init --target logits_softcap --workspace /tmp/mlx-logits-integration`
+  - `./.venv/bin/python kernel-lab.py --engine mlx integration-ab --workspace /tmp/mlx-logits-integration --preset m5-fast --time-budget 2 --benchmark-skip-eval --no-checkpoint`
+  - `./.venv/bin/python kernel-lab.py --engine mlx evidence --target logits_softcap --preset m5-fast`
+  - `./.venv/bin/python kernel-lab.py --engine mlx promotion-check --target logits_softcap --preset m5-fast --workspace /tmp/mlx-logits-integration`
+  - `./.venv/bin/python kernel-lab.py --engine mlx promotion-check --target block_prelude --preset m5-balanced --workspace /tmp/mlx-kernel-workspace-2`
+  - `./.venv/bin/python kernel-lab.py --engine mlx profile --preset m5-fast --top-k 12`
+  - `python3 tools/changelog_scores.py --group-by entry --format csv --include-latest --verify`
+- Measurements:
+  - `logits_softcap` now supports real trainer-side A/B runs through `integration-ab`.
+  - Two measured `m5-fast` A/B runs produced mixed evidence for `logits_softcap`:
+    - run 1: `steady_state_tok_per_sec_delta=+845.1`
+    - run 2: `steady_state_tok_per_sec_delta=-4674.1`
+    - summary: `integration_ab_ok_count=2`, `integration_ab_median_delta_steady_state_tok_per_sec=-1914.5`, `promotion_status=integration-mixed`
+  - `promotion-check` now reports:
+    - `logits_softcap -> integration-mixed`
+    - `block_prelude -> needs-integration-adapter`
+
+## Committed History
+
+### March 12, 2026 — `00eecef` — lab: Add trace reviews, evidence summaries, and promotion checks — score `4` — complexity `8`
 
 **Human-directed, AI-shaped (4)**
 
@@ -73,8 +122,6 @@ On this hardware, the default canonical matched benchmark window for optimizatio
   - A later recorded `high` trace review restored it to rank `1`, with:
     - `effective_priority_score=9.325`
     - `promotion_status=ready-for-integration-test`
-
-## Committed History
 
 ### March 12, 2026 — `587d4a8` — lab: Add evidence-aware MLX ranking and promotion — score `4` — complexity `7`
 

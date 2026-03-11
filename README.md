@@ -131,6 +131,7 @@ Today the lab is intentionally narrow and MLX-first:
 - `uv run kernel-lab.py --engine mlx verify --workspace /tmp/mlx-rmsnorm-lab --quick`
 - `uv run kernel-lab.py --engine mlx capture --workspace /tmp/mlx-rmsnorm-lab --output /tmp/mlx-rmsnorm-lab.gputrace --quick`
 - `uv run kernel-lab.py --engine mlx review-trace --workspace /tmp/mlx-rmsnorm-lab --metadata /tmp/mlx-rmsnorm-lab.metadata.json --relevance high`
+- `uv run kernel-lab.py --engine mlx integration-ab --workspace /tmp/mlx-rmsnorm-lab --preset m5-fast --time-budget 20 --benchmark-skip-eval --no-checkpoint`
 
 The lab now has two layers on purpose:
 
@@ -149,8 +150,11 @@ The lab also keeps a small evidence ledger at `results/kernel_lab/ledger.jsonl`.
 The extra commands make that visible:
 
 - `evidence` summarizes the current ledger state for one target/preset
-- `promotion-check` says whether a target is ready for an end-to-end integration A/B
+- `promotion-check` says whether a target is still gathering evidence, ready for an end-to-end integration A/B, mixed after repeated A/B runs, or already validated strongly enough to move toward a real trainer patch
 - `review-trace` lets a human or agent record whether a trace showed strong, weak, or negligible end-to-end relevance, so ranking can move down as well as up
+- `integration-ab` runs a real trainer-side baseline-vs-candidate comparison for the subset of targets that already have direct MLX integration hooks
+
+Only part of the MLX target catalog is directly wired into the trainer today. Small path targets like `logits_softcap`, `rotary_embedding`, `value_embed_gate`, `attention_prelude`, and `fused_mlp` can already run end-to-end A/B through `integration-ab`. Broader composed targets like `block_prelude` can still be profiled, verified, and traced, but they will report `needs-integration-adapter` until there is a direct training-path hook for them.
 
 That current lab exists to build the pattern, not to claim broad coverage yet. The current starter-ready MLX targets are:
 
@@ -272,10 +276,10 @@ Current project snapshot from [CHANGELOG.md](CHANGELOG.md):
 
 | Metric | Value |
 | --- | --- |
-| Mean autonomy score | `3.36 / 6` |
-| Mean complexity | `7.33 / commit` |
-| Mean score per top-level bullet | `3.43 / 6` |
-| History covered | `46` commits across `12` subsystems |
+| Mean autonomy score | `3.38 / 6` |
+| Mean complexity | `7.34 / commit` |
+| Mean score per top-level bullet | `3.44 / 6` |
+| History covered | `47` commits across `12` subsystems |
 <!-- autonomy-golf-snapshot:end -->
 
 Refresh with:

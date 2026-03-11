@@ -57,6 +57,16 @@ def build_parser() -> argparse.ArgumentParser:
     promotion_parser.add_argument("--preset", required=True)
     promotion_parser.add_argument("--workspace")
 
+    integration_parser = subparsers.add_parser(
+        "integration-ab",
+        help="Run a real MLX training A/B for a directly integrable lab target",
+    )
+    integration_parser.add_argument("--workspace", required=True)
+    integration_parser.add_argument("--preset", required=True)
+    integration_parser.add_argument("--time-budget", type=float, default=20.0)
+    integration_parser.add_argument("--benchmark-skip-eval", action="store_true")
+    integration_parser.add_argument("--no-checkpoint", action="store_true")
+
     capture_parser = subparsers.add_parser("capture", help="Capture a workspace run as a Metal trace artifact")
     capture_parser.add_argument("--workspace", required=True)
     capture_parser.add_argument("--output", required=True)
@@ -147,6 +157,17 @@ def main(argv: list[str] | None = None) -> None:
             target=args.target,
             preset=args.preset,
             workspace=Path(args.workspace).expanduser() if args.workspace else None,
+        )
+        print(json.dumps(asdict(result), indent=2, sort_keys=True))
+        return
+
+    if args.command == "integration-ab":
+        result = lab.run_integration_ab(
+            workspace=Path(args.workspace).expanduser(),
+            preset=args.preset,
+            time_budget=args.time_budget,
+            benchmark_skip_eval=args.benchmark_skip_eval,
+            no_checkpoint=args.no_checkpoint,
         )
         print(json.dumps(asdict(result), indent=2, sort_keys=True))
         return

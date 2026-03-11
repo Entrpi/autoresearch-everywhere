@@ -2,7 +2,10 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
 import statistics
+import subprocess
+import sys
 import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -18,18 +21,24 @@ from autoresearch_lab.labs import (
     LabCapabilities,
     LabEvidenceResult,
     LabExtractResult,
+    LabIntegrationABResult,
     LabOrchestrationPlan,
     LabPromotionCheck,
     LabProfileResult,
     LabTraceResult,
     LabTarget,
 )
+from autoresearch_mlx.lab_integration import integration_environment, supports_direct_integration
 from autoresearch_mlx.lab_profile import (
     extract_from_profile,
     orchestrate_from_profile,
     profile_mlx_targets,
 )
 from autoresearch_mlx.lab_trace import capture_workspace_trace
+from tools.calibrate_eval_policy import parse_summary
+
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
 @dataclass(frozen=True)
@@ -2121,12 +2130,39 @@ class MLXKernelLab:
             if candidate_workspace.exists():
                 chosen_workspace = candidate_workspace
 
-        if summary.promotion_status == "ready-for-integration-test" and chosen_workspace is not None:
+        if not supports_direct_integration(target):
+            status = "needs-integration-adapter"
+            commands = (
+                f"# {target} is trace-backed at the lab level, but it still needs a direct training-path adapter before end-to-end A/B is meaningful",
+            )
+        elif summary.promotion_status == "integration-validated":
+            status = "integration-validated"
+            commands = (
+                "# this target already has a successful end-to-end integration A/B result",
+                "# review the integration logs and, if the win is meaningful, move to a real trainer integration patch",
+            )
+        elif summary.promotion_status == "integration-tested":
+            status = "integration-tested"
+            commands = (
+                "# this target has completed an end-to-end integration A/B run",
+                "# inspect the measured delta and decide whether to promote, refine, or rerun on a stronger preset",
+            )
+        elif summary.promotion_status == "integration-mixed":
+            status = "integration-mixed"
+            commands = (
+                "# this target has mixed end-to-end integration A/B results",
+                "# rerun on a stronger preset or a longer budget before promoting it into the trainer",
+            )
+        elif summary.promotion_status == "integration-regressed":
+            status = "integration-regressed"
+            commands = (
+                "# this target regressed in end-to-end integration A/B",
+                "# inspect the integration logs before spending more lab time on it",
+            )
+        elif summary.promotion_status == "ready-for-integration-test" and chosen_workspace is not None:
             status = "ready-for-integration-ab"
             commands = (
-                f"# integrate {target} from {chosen_workspace} into the MLX training path",
-                f"uv run train.py --engine mlx --preset {preset} --time-budget 20 --benchmark-skip-eval --no-checkpoint",
-                f"# rerun the same command after integration and compare steady_state_tok_per_sec, peak_vram_mb, and val_bpb/proxy_val_bpb when eval is enabled",
+                f"uv run kernel-lab.py --engine mlx integration-ab --workspace {chosen_workspace} --preset {preset} --time-budget 20 --benchmark-skip-eval --no-checkpoint",
             )
         elif summary.promotion_status == "trace-deprioritized":
             status = "deprioritized-after-trace"
@@ -2151,6 +2187,162 @@ class MLXKernelLab:
                 "evidence_summary": asdict(summary),
                 "required_for_promotion": ["verify", "capture"],
             },
+        )
+
+    def run_integration_ab(
+        self,
+        *,
+        workspace: Path,
+        preset: str,
+        time_budget: float,
+        benchmark_skip_eval: bool = True,
+        no_checkpoint: bool = True,
+    ) -> LabIntegrationABResult:
+        workspace = workspace.expanduser().resolve()
+        metadata = json.loads((workspace / "metadata.json").read_text(encoding="utf-8"))
+        target = str(metadata["target"])
+        if not supports_direct_integration(target):
+            raise ValueError(
+                f"Target {target!r} does not yet support direct training-path integration."
+            )
+
+        run_root = workspace / "integration-ab" / time.strftime("%Y%m%d-%H%M%S")
+        run_root.mkdir(parents=True, exist_ok=True)
+        warmup_budget = min(2.0, time_budget)
+
+        def build_cmd(run_time_budget: float) -> list[str]:
+            cmd = [
+                sys.executable,
+                str(REPO_ROOT / "train.py"),
+                "--engine",
+                "mlx",
+                "--preset",
+                preset,
+                "--time-budget",
+                str(run_time_budget),
+            ]
+            if benchmark_skip_eval:
+                cmd.append("--benchmark-skip-eval")
+            if no_checkpoint:
+                cmd.append("--no-checkpoint")
+            return cmd
+
+        warmup_cmd = build_cmd(warmup_budget)
+        measured_cmd = build_cmd(time_budget)
+
+        baseline_warmup_stdout = run_root / "baseline-warmup.stdout.log"
+        baseline_warmup_stderr = run_root / "baseline-warmup.stderr.log"
+        candidate_warmup_stdout = run_root / "candidate-warmup.stdout.log"
+        candidate_warmup_stderr = run_root / "candidate-warmup.stderr.log"
+        baseline_stdout = run_root / "baseline.stdout.log"
+        baseline_stderr = run_root / "baseline.stderr.log"
+        candidate_stdout = run_root / "candidate.stdout.log"
+        candidate_stderr = run_root / "candidate.stderr.log"
+
+        baseline_env = os.environ.copy()
+        candidate_env = os.environ.copy()
+        candidate_env.update(integration_environment(workspace=workspace))
+
+        start = time.perf_counter()
+        baseline_warmup = self._run_train_command(
+            warmup_cmd,
+            baseline_warmup_stdout,
+            baseline_warmup_stderr,
+            env=baseline_env,
+        )
+        candidate_warmup = self._run_train_command(
+            warmup_cmd,
+            candidate_warmup_stdout,
+            candidate_warmup_stderr,
+            env=candidate_env,
+        )
+        baseline = self._run_train_command(
+            measured_cmd,
+            baseline_stdout,
+            baseline_stderr,
+            env=baseline_env,
+        )
+        candidate = self._run_train_command(
+            measured_cmd,
+            candidate_stdout,
+            candidate_stderr,
+            env=candidate_env,
+        )
+        wall_seconds = time.perf_counter() - start
+
+        baseline_warmup_summary = parse_summary(baseline_warmup.stdout) if baseline_warmup.returncode == 0 else {}
+        candidate_warmup_summary = parse_summary(candidate_warmup.stdout) if candidate_warmup.returncode == 0 else {}
+        baseline_summary = parse_summary(baseline.stdout) if baseline.returncode == 0 else {}
+        candidate_summary = parse_summary(candidate.stdout) if candidate.returncode == 0 else {}
+
+        status = (
+            "ok"
+            if all(
+                result.returncode == 0
+                for result in (baseline_warmup, candidate_warmup, baseline, candidate)
+            )
+            else "error"
+        )
+        details = {
+            "warmup_budget": warmup_budget,
+            "warmup": {
+                "baseline_stdout": str(baseline_warmup_stdout),
+                "baseline_stderr": str(baseline_warmup_stderr),
+                "candidate_stdout": str(candidate_warmup_stdout),
+                "candidate_stderr": str(candidate_warmup_stderr),
+                "baseline_returncode": baseline_warmup.returncode,
+                "candidate_returncode": candidate_warmup.returncode,
+                "baseline": baseline_warmup_summary,
+                "candidate": candidate_warmup_summary,
+            },
+            "baseline_stdout": str(baseline_stdout),
+            "baseline_stderr": str(baseline_stderr),
+            "candidate_stdout": str(candidate_stdout),
+            "candidate_stderr": str(candidate_stderr),
+            "baseline_returncode": baseline.returncode,
+            "candidate_returncode": candidate.returncode,
+            "benchmark_skip_eval": benchmark_skip_eval,
+            "no_checkpoint": no_checkpoint,
+            "baseline": baseline_summary,
+            "candidate": candidate_summary,
+            "delta": self._summary_delta(baseline_summary, candidate_summary),
+        }
+
+        append_lab_event(
+            engine="mlx",
+            backend_family="mlx",
+            target=target,
+            workspace=workspace,
+            event_type="integration-ab",
+            status=status,
+            preset=preset,
+            metric_name="steady_state_tok_per_sec_delta",
+            metric_value=details["delta"].get("steady_state_tok_per_sec"),
+            details={
+                "preset": preset,
+                "time_budget": time_budget,
+                "warmup_budget": warmup_budget,
+                "benchmark_skip_eval": benchmark_skip_eval,
+                "no_checkpoint": no_checkpoint,
+                "baseline_stdout": str(baseline_stdout),
+                "candidate_stdout": str(candidate_stdout),
+                "baseline_returncode": baseline.returncode,
+                "candidate_returncode": candidate.returncode,
+                "warmup_baseline_returncode": baseline_warmup.returncode,
+                "warmup_candidate_returncode": candidate_warmup.returncode,
+                "delta": details["delta"],
+            },
+        )
+
+        return LabIntegrationABResult(
+            engine="mlx",
+            backend_family="mlx",
+            target=target,
+            preset=preset,
+            workspace=str(workspace),
+            status=status,
+            wall_seconds=wall_seconds,
+            details=details,
         )
 
     def _get_spec(self, target: str) -> TargetSpec:
@@ -2178,3 +2370,35 @@ class MLXKernelLab:
             mx.eval(*tuple(_iter_leaves(out)))
             times.append((time.perf_counter() - start) * 1e3)
         return statistics.median(times)
+
+    def _run_train_command(
+        self,
+        cmd: list[str],
+        stdout_path: Path,
+        stderr_path: Path,
+        *,
+        env: dict[str, str],
+    ) -> subprocess.CompletedProcess[str]:
+        completed = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            env=env,
+            cwd=REPO_ROOT,
+        )
+        stdout_path.write_text(completed.stdout, encoding="utf-8")
+        stderr_path.write_text(completed.stderr, encoding="utf-8")
+        return completed
+
+    def _summary_delta(
+        self,
+        baseline_summary: dict[str, str | float | int],
+        candidate_summary: dict[str, str | float | int],
+    ) -> dict[str, float]:
+        deltas: dict[str, float] = {}
+        for key in ("steady_state_tok_per_sec", "peak_vram_mb", "val_bpb", "proxy_val_bpb"):
+            baseline = baseline_summary.get(key)
+            candidate = candidate_summary.get(key)
+            if isinstance(baseline, (int, float)) and isinstance(candidate, (int, float)):
+                deltas[key] = float(candidate) - float(baseline)
+        return deltas

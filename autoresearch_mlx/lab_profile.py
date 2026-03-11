@@ -13,6 +13,7 @@ from autoresearch_lab.labs import (
     LabProfileCandidate,
     LabProfileResult,
 )
+from autoresearch_mlx.lab_integration import supports_direct_integration
 from autoresearch_mlx.lab_trace import summarize_trace_metadata
 from autoresearch_mlx.model import has_ve
 from autoresearch_mlx.train import PRESETS, build_model_config
@@ -471,7 +472,41 @@ def orchestrate_from_profile(
                 "# the recorded trace review says this target has weak end-to-end relevance on the current preset",
             ]
         )
-    elif evidence_summary.promotion_status == "ready-for-integration-test" and use_existing_workspace:
+    elif evidence_summary.promotion_status == "integration-validated" and use_existing_workspace:
+        status = "integration-validated"
+        commands = tuple(
+            [
+                f"# {target} already has a positive end-to-end integration A/B result from {workspace}",
+                *trace_commands,
+                f"uv run kernel-lab.py --engine mlx evidence --target {target} --preset {payload['preset']}",
+                "# if the gain is meaningful and repeatable, move on to a real trainer integration patch",
+            ]
+        )
+    elif evidence_summary.promotion_status in {"integration-tested", "integration-regressed"} and use_existing_workspace:
+        status = evidence_summary.promotion_status
+        commands = tuple(
+            [
+                f"# reuse {workspace} and inspect the latest integration A/B result for {target}",
+                *trace_commands,
+                f"uv run kernel-lab.py --engine mlx evidence --target {target} --preset {payload['preset']}",
+                "# decide whether to refine the kernel, rerun on a stronger preset, or drop the target",
+            ]
+        )
+    elif evidence_summary.promotion_status == "integration-mixed" and use_existing_workspace:
+        status = "integration-mixed"
+        commands = tuple(
+            [
+                f"# {target} has mixed end-to-end integration A/B results from {workspace}",
+                *trace_commands,
+                f"uv run kernel-lab.py --engine mlx evidence --target {target} --preset {payload['preset']}",
+                "# rerun integration A/B on a longer budget or a stronger preset before promoting the target",
+            ]
+        )
+    elif (
+        evidence_summary.promotion_status == "ready-for-integration-test"
+        and use_existing_workspace
+        and supports_direct_integration(target)
+    ):
         status = "promotion-ready"
         commands = tuple(
             [
@@ -479,9 +514,17 @@ def orchestrate_from_profile(
                 *trace_commands,
                 f"uv run kernel-lab.py --engine mlx verify --workspace {workspace} --quick",
                 f"uv run kernel-lab.py --engine mlx bench --workspace {workspace}",
-                "# integrate this target into the MLX training path and run an end-to-end A/B",
-                "uv run train.py --engine mlx --preset m5-balanced --time-budget 20 --benchmark-skip-eval --no-checkpoint",
+                f"uv run kernel-lab.py --engine mlx integration-ab --workspace {workspace} --preset {payload['preset']} --time-budget 20 --benchmark-skip-eval --no-checkpoint",
                 f"uv run kernel-lab.py --engine mlx capture --workspace {workspace} --output {workspace / (target + '.gputrace')} --quick",
+            ]
+        )
+    elif evidence_summary.promotion_status == "ready-for-integration-test" and use_existing_workspace:
+        status = "needs-integration-adapter"
+        commands = tuple(
+            [
+                f"# {target} has enough evidence for end-to-end work, but it does not yet have a direct MLX training-path adapter",
+                *trace_commands,
+                f"# continue refining or add a direct integration hook before attempting A/B from {workspace}",
             ]
         )
     elif evidence_summary.promotion_status == "trace-backed" and use_existing_workspace:

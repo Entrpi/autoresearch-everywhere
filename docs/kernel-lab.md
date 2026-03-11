@@ -78,6 +78,12 @@ That writes:
 - a `.metadata.json` sidecar with the bench result, device info, and capture context
 - a persistent evidence entry in `results/kernel_lab/ledger.jsonl`
 
+Run a real end-to-end trainer A/B for a directly integrated target:
+
+```bash
+uv run kernel-lab.py --engine mlx integration-ab --workspace /tmp/mlx-lab/block-pipeline --preset m5-fast --time-budget 20 --benchmark-skip-eval --no-checkpoint
+```
+
 For now the MLX lab is deliberately narrow, but it is no longer just `init + bench`:
 
 - starter-ready targets:
@@ -122,11 +128,21 @@ That upgrades the plan from "interesting candidate" to "trace-backed target" and
 
 If a target has already been both verified and captured, orchestration will reuse the last known workspace and upgrade the plan again to `promotion-ready`, which means the next recommended step is an end-to-end integration A/B rather than another blank workspace.
 
+For the current MLX lab, only a subset of targets has a direct trainer-side integration hook. Narrow path targets such as `logits_softcap`, `rotary_embedding`, `value_embed_gate`, `attention_prelude`, and `fused_mlp` can already run through `integration-ab`. Broader composed targets like `block_prelude` can still be profiled and traced, but they will surface as `needs-integration-adapter` until a direct training-path hook exists.
+
 You can ask for that decision directly:
 
 ```bash
 uv run kernel-lab.py --engine mlx promotion-check --target block_prelude --preset m5-balanced
 ```
+
+Once `integration-ab` has run, the ledger can now distinguish:
+
+- `integration-validated`
+- `integration-regressed`
+- `integration-mixed`
+
+So promotion is no longer “trace-backed forever.” It can advance, stall, or back off based on actual trainer-side A/B evidence.
 
 ## Heuristic Layer vs Trace Layer
 

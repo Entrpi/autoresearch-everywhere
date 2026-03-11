@@ -5,6 +5,8 @@ import mlx.core as mx
 import mlx.nn as nn
 from mlx.utils import tree_flatten
 
+from autoresearch_mlx.lab_integration import maybe_call_integration_target
+
 
 @dataclass
 class GPTConfig:
@@ -23,17 +25,82 @@ def rms_norm(x: mx.array, eps: float = 1e-6) -> mx.array:
     return (x32 * scale).astype(x.dtype)
 
 
+def residual_blend(x: mx.array, x0: mx.array, resid_lambda: float, x0_lambda: float) -> mx.array:
+    overridden = maybe_call_integration_target("residual_blend", x, x0, resid_lambda, x0_lambda)
+    if overridden is not None:
+        return overridden
+    return resid_lambda * x + x0_lambda * x0
+
+
 def has_ve(layer_idx: int, n_layer: int) -> bool:
     return layer_idx % 2 == (n_layer - 1) % 2
 
 
 def apply_rotary_emb(x: mx.array, cos: mx.array, sin: mx.array) -> mx.array:
+    overridden = maybe_call_integration_target("rotary_embedding", x, cos, sin)
+    if overridden is not None:
+        return overridden
     d = x.shape[-1] // 2
     x1 = x[..., :d]
     x2 = x[..., d:]
     y1 = x1 * cos + x2 * sin
     y2 = x1 * (-sin) + x2 * cos
     return mx.concatenate([y1, y2], axis=-1)
+
+
+def qk_rms_norm(q: mx.array, k: mx.array, eps: float = 1e-6) -> tuple[mx.array, mx.array]:
+    overridden = maybe_call_integration_target("qk_rmsnorm", q, k, eps)
+    if overridden is not None:
+        return overridden
+    return rms_norm(q, eps=eps), rms_norm(k, eps=eps)
+
+
+def attention_prelude(
+    q_proj: mx.array,
+    k_proj: mx.array,
+    v_proj: mx.array,
+    cos: mx.array,
+    sin: mx.array,
+) -> tuple[mx.array, mx.array, mx.array]:
+    overridden = maybe_call_integration_target("attention_prelude", q_proj, k_proj, v_proj, cos, sin)
+    if overridden is not None:
+        return overridden
+    overridden = maybe_call_integration_target("rope_qk_fused", q_proj, k_proj, cos, sin)
+    if overridden is not None:
+        q, k = overridden
+    else:
+        q = apply_rotary_emb(q_proj, cos, sin)
+        k = apply_rotary_emb(k_proj, cos, sin)
+        q, k = qk_rms_norm(q, k)
+    return (
+        q.transpose(0, 2, 1, 3),
+        k.transpose(0, 2, 1, 3),
+        v_proj.transpose(0, 2, 1, 3),
+    )
+
+
+def proj_head_reshape(y: mx.array) -> mx.array:
+    overridden = maybe_call_integration_target("proj_head_reshape", y)
+    if overridden is not None:
+        return overridden
+    batch_size, _heads, seq_len, _head_dim = y.shape
+    return y.transpose(0, 2, 1, 3).reshape(batch_size, seq_len, -1)
+
+
+def activation_pointwise(x: mx.array) -> mx.array:
+    overridden = maybe_call_integration_target("activation_pointwise", x)
+    if overridden is not None:
+        return overridden
+    x32 = x.astype(mx.float32)
+    return mx.square(mx.maximum(x32, 0)).astype(x.dtype)
+
+
+def logits_softcap(logits: mx.array, softcap: float = 15.0) -> mx.array:
+    overridden = maybe_call_integration_target("logits_softcap", logits, softcap)
+    if overridden is not None:
+        return overridden
+    x32 = logits.astype(mx.float32)
+    return softcap * mx.tanh(x32 / softcap)
 
 
 def count_params(tree) -> int:
@@ -65,29 +132,43 @@ class CausalSelfAttention(nn.Module):
             else None
         )
 
-    def __call__(self, x: mx.array, ve: mx.array | None, cos_sin, attention_mask):
+    def _project_qkv(self, x: mx.array, ve: mx.array | None) -> tuple[mx.array, mx.array, mx.array]:
         batch_size, seq_len, _ = x.shape
         q = self.c_q(x).reshape(batch_size, seq_len, self.n_head, self.head_dim)
         k = self.c_k(x).reshape(batch_size, seq_len, self.n_kv_head, self.head_dim)
         v = self.c_v(x).reshape(batch_size, seq_len, self.n_kv_head, self.head_dim)
-
         if ve is not None:
-            ve = ve.reshape(batch_size, seq_len, self.n_kv_head, self.head_dim)
-            gate = 2.0 * mx.sigmoid(self.ve_gate(x[..., : self.ve_gate_channels]))
-            v = v + gate[..., None] * ve
+            overridden = maybe_call_integration_target(
+                "value_embed_gate",
+                x[..., : self.ve_gate_channels],
+                self.ve_gate.weight.transpose(1, 0),
+                v,
+                ve,
+            )
+            if overridden is not None:
+                v = overridden
+            else:
+                gate = 2.0 * mx.sigmoid(self.ve_gate(x[..., : self.ve_gate_channels]))
+                v = v + gate[..., None] * ve
+        return q, k, v
 
-        cos, sin = cos_sin
-        q = apply_rotary_emb(q, cos, sin)
-        k = apply_rotary_emb(k, cos, sin)
-        q = rms_norm(q)
-        k = rms_norm(k)
-
-        q = q.transpose(0, 2, 1, 3)
-        k = k.transpose(0, 2, 1, 3)
-        v = v.transpose(0, 2, 1, 3)
+    def _attention_from_prelude(
+        self,
+        q: mx.array,
+        k: mx.array,
+        v: mx.array,
+        attention_mask,
+    ) -> mx.array:
+        batch_size, _heads, seq_len, _head_dim = q.shape
         y = mx.fast.scaled_dot_product_attention(q, k, v, scale=self.scale, mask=attention_mask)
-        y = y.transpose(0, 2, 1, 3).reshape(batch_size, seq_len, -1)
+        y = proj_head_reshape(y)
         return self.c_proj(y)
+
+    def __call__(self, x: mx.array, ve: mx.array | None, cos_sin, attention_mask):
+        q, k, v = self._project_qkv(x, ve)
+        cos, sin = cos_sin
+        q, k, v = attention_prelude(q, k, v, cos, sin)
+        return self._attention_from_prelude(q, k, v, attention_mask)
 
 
 class MLP(nn.Module):
@@ -97,8 +178,16 @@ class MLP(nn.Module):
         self.c_proj = nn.Linear(4 * config.n_embd, config.n_embd, bias=False)
 
     def __call__(self, x: mx.array) -> mx.array:
+        overridden = maybe_call_integration_target(
+            "fused_mlp",
+            x,
+            self.c_fc.weight.transpose(1, 0),
+            self.c_proj.weight.transpose(1, 0),
+        )
+        if overridden is not None:
+            return overridden
         x = self.c_fc(x)
-        x = mx.square(mx.maximum(x, 0))
+        x = activation_pointwise(x)
         return self.c_proj(x)
 
 
@@ -279,16 +368,38 @@ class GPT(nn.Module):
         x0 = x
 
         for layer_idx, block in enumerate(self.transformer["h"]):
-            x = self.resid_lambdas[layer_idx] * x + self.x0_lambdas[layer_idx] * x0
+            x = residual_blend(x, x0, self.resid_lambdas[layer_idx], self.x0_lambdas[layer_idx])
             value_embed = self.value_embeds[layer_idx]
-            ve = value_embed(idx) if value_embed is not None else None
+            if value_embed is not None:
+                overridden_ve = maybe_call_integration_target(
+                    "ve_lookup_reshape",
+                    value_embed.weight,
+                    idx,
+                    self.config.n_kv_head,
+                    self.config.n_embd // self.config.n_head,
+                )
+                if overridden_ve is not None:
+                    ve = overridden_ve
+                else:
+                    batch_size, seq_len = idx.shape
+                    ve = value_embed(idx).reshape(
+                        batch_size,
+                        seq_len,
+                        self.config.n_kv_head,
+                        self.config.n_embd // self.config.n_head,
+                    )
+            else:
+                ve = None
             attention_mask = self._get_attention_mask(seq_len, self.window_sizes[layer_idx][0])
             x = block(x, ve, cos_sin, attention_mask)
 
         x = rms_norm(x)
-        logits = self.lm_head(x).astype(mx.float32)
-        softcap = 15.0
-        logits = softcap * mx.tanh(logits / softcap)
+        raw_logits = self.lm_head(x)
+        overridden = maybe_call_integration_target("loss_logits_cast_softcap", raw_logits)
+        if overridden is not None:
+            logits = overridden.astype(mx.float32)
+        else:
+            logits = logits_softcap(raw_logits.astype(mx.float32), softcap=15.0)
 
         if targets is None:
             return logits

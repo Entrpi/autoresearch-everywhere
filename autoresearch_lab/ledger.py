@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import statistics
 import subprocess
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -23,10 +24,12 @@ class LabEvidenceSummary:
     verify_ok_count: int
     capture_ok_count: int
     trace_review_ok_count: int
+    integration_ab_ok_count: int
     last_event_at: str | None
     last_verify_at: str | None
     last_capture_at: str | None
     last_trace_review_at: str | None
+    last_integration_ab_at: str | None
     last_workspace: str | None
     last_trace_metadata_path: str | None
     unique_workspaces: int
@@ -80,6 +83,7 @@ def append_lab_event(
     event_type: str,
     status: str,
     details: dict[str, Any],
+    preset: str | None = None,
     metric_name: str | None = None,
     metric_value: float | None = None,
     ledger_path: Path = DEFAULT_LAB_LEDGER_PATH,
@@ -98,7 +102,7 @@ def append_lab_event(
         "status": status,
         "metric_name": metric_name,
         "metric_value": metric_value,
-        "preset": context.get("preset"),
+        "preset": preset if preset is not None else context.get("preset"),
         "context": context,
         "details": details,
     }
@@ -158,8 +162,26 @@ def summarize_lab_evidence(
     trace_review_ok = [
         event for event in events if event.get("event_type") == "trace-review" and event.get("status") == "ok"
     ]
+    integration_ab_ok = [
+        event for event in events if event.get("event_type") == "integration-ab" and event.get("status") == "ok"
+    ]
     last_trace_review = trace_review_ok[-1] if trace_review_ok else None
     trace_relevance = last_trace_review.get("details", {}).get("relevance") if last_trace_review else None
+    last_integration_ab = integration_ab_ok[-1] if integration_ab_ok else None
+    integration_deltas = [
+        event.get("details", {}).get("delta", {}).get("steady_state_tok_per_sec")
+        for event in integration_ab_ok
+        if event.get("details", {}).get("delta", {}).get("steady_state_tok_per_sec") is not None
+    ]
+    positive_integration_count = sum(1 for value in integration_deltas if value > 0)
+    negative_integration_count = sum(1 for value in integration_deltas if value < 0)
+    zero_integration_count = sum(1 for value in integration_deltas if value == 0)
+    integration_delta = integration_deltas[-1] if integration_deltas else None
+    median_integration_delta = (
+        float(statistics.median(integration_deltas))
+        if integration_deltas
+        else None
+    )
 
     if trace_relevance == "none":
         promotion_status = "trace-deprioritized"
@@ -167,6 +189,19 @@ def summarize_lab_evidence(
     elif trace_relevance == "low":
         promotion_status = "trace-deprioritized"
         evidence_bonus = -0.35
+    elif integration_ab_ok:
+        if positive_integration_count and negative_integration_count:
+            promotion_status = "integration-mixed"
+            evidence_bonus = 0.2
+        elif integration_delta is not None and integration_delta > 0:
+            promotion_status = "integration-validated"
+            evidence_bonus = 1.5
+        elif integration_delta is not None and integration_delta < 0:
+            promotion_status = "integration-regressed"
+            evidence_bonus = -0.5
+        else:
+            promotion_status = "integration-tested"
+            evidence_bonus = 1.1
     elif verify_ok and capture_ok:
         promotion_status = "ready-for-integration-test"
         evidence_bonus = 1.2 if trace_relevance == "high" else 1.0
@@ -190,10 +225,12 @@ def summarize_lab_evidence(
         verify_ok_count=len(verify_ok),
         capture_ok_count=len(capture_ok),
         trace_review_ok_count=len(trace_review_ok),
+        integration_ab_ok_count=len(integration_ab_ok),
         last_event_at=events[-1]["created_at"] if events else None,
         last_verify_at=verify_ok[-1]["created_at"] if verify_ok else None,
         last_capture_at=last_capture["created_at"] if last_capture else None,
         last_trace_review_at=last_trace_review["created_at"] if last_trace_review else None,
+        last_integration_ab_at=last_integration_ab["created_at"] if last_integration_ab else None,
         last_workspace=events[-1]["workspace"] if events else None,
         last_trace_metadata_path=(
             last_capture.get("details", {}).get("trace_metadata_path") if last_capture else None
@@ -205,9 +242,20 @@ def summarize_lab_evidence(
             "last_metric_name": events[-1].get("metric_name") if events else None,
             "last_metric_value": events[-1].get("metric_value") if events else None,
             "last_trace_relevance": trace_relevance,
+            "last_integration_delta_steady_state_tok_per_sec": integration_delta,
+            "integration_ab_positive_count": positive_integration_count,
+            "integration_ab_negative_count": negative_integration_count,
+            "integration_ab_zero_count": zero_integration_count,
+            "integration_ab_median_delta_steady_state_tok_per_sec": median_integration_delta,
             "recommended_next_step": (
                 "reprioritize"
                 if promotion_status == "trace-deprioritized"
+                else "promote"
+                if promotion_status == "integration-validated"
+                else "stabilize-integration"
+                if promotion_status == "integration-mixed"
+                else "review-integration"
+                if promotion_status in {"integration-tested", "integration-regressed"}
                 else "integration-test"
                 if promotion_status == "ready-for-integration-test"
                 else "verify"

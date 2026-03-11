@@ -112,6 +112,18 @@ class LabTraceResult:
     details: dict[str, Any]
 
 
+@dataclass(frozen=True)
+class LabIntegrationABResult:
+    engine: str
+    backend_family: str
+    target: str
+    preset: str
+    workspace: str
+    status: str
+    wall_seconds: float
+    details: dict[str, Any]
+
+
 class KernelLab(Protocol):
     """Shared boundary for backend-specific kernel labs."""
 
@@ -154,6 +166,17 @@ class KernelLab(Protocol):
         ...
 
     def promotion_check(self, *, target: str, preset: str, workspace: Path | None = None) -> LabPromotionCheck:
+        ...
+
+    def run_integration_ab(
+        self,
+        *,
+        workspace: Path,
+        preset: str,
+        time_budget: float,
+        benchmark_skip_eval: bool = True,
+        no_checkpoint: bool = True,
+    ) -> LabIntegrationABResult:
         ...
 
 
