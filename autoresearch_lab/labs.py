@@ -13,6 +13,7 @@ class LabCapabilities:
     supports_extract: bool
     supports_orchestrate: bool
     supports_verify: bool
+    supports_capture: bool
 
 
 @dataclass(frozen=True)
@@ -76,6 +77,19 @@ class LabOrchestrationPlan:
     details: dict[str, Any]
 
 
+@dataclass(frozen=True)
+class LabTraceResult:
+    engine: str
+    backend_family: str
+    target: str
+    workspace: str
+    trace_path: str
+    metadata_path: str | None
+    status: str
+    wall_seconds: float
+    details: dict[str, Any]
+
+
 class KernelLab(Protocol):
     """Shared boundary for backend-specific kernel labs."""
 
@@ -108,6 +122,9 @@ class KernelLab(Protocol):
         workspace_root: Path,
         rank: int = 1,
     ) -> LabOrchestrationPlan:
+        ...
+
+    def capture_workspace(self, *, workspace: Path, output: Path, quick: bool = False) -> LabTraceResult:
         ...
 
 

@@ -7,6 +7,7 @@ from dataclasses import asdict
 from pathlib import Path
 
 from autoresearch_mlx.lab_profile import write_profile_result
+from autoresearch_mlx.lab_trace import run_capture_bench
 from autoresearch_mlx.lab_workspace import MLXKernelLab
 
 
@@ -42,6 +43,19 @@ def build_parser() -> argparse.ArgumentParser:
     orchestrate_parser.add_argument("--profile", required=True)
     orchestrate_parser.add_argument("--workspace-root", required=True)
     orchestrate_parser.add_argument("--rank", type=int, default=1)
+
+    capture_parser = subparsers.add_parser("capture", help="Capture a workspace run as a Metal trace artifact")
+    capture_parser.add_argument("--workspace", required=True)
+    capture_parser.add_argument("--output", required=True)
+    capture_parser.add_argument("--quick", action="store_true")
+
+    internal_capture = subparsers.add_parser(
+        "_capture-bench",
+        help=argparse.SUPPRESS,
+    )
+    internal_capture.add_argument("--workspace", required=True)
+    internal_capture.add_argument("--trace", required=True)
+    internal_capture.add_argument("--quick", action="store_true")
     return parser
 
 
@@ -98,6 +112,25 @@ def main(argv: list[str] | None = None) -> None:
             rank=args.rank,
         )
         print(json.dumps(asdict(result), indent=2, sort_keys=True))
+        return
+
+    if args.command == "capture":
+        result = lab.capture_workspace(
+            workspace=Path(args.workspace).expanduser(),
+            output=Path(args.output).expanduser(),
+            quick=args.quick,
+        )
+        print(json.dumps(asdict(result), indent=2, sort_keys=True))
+        return
+
+    if args.command == "_capture-bench":
+        payload = run_capture_bench(
+            workspace=Path(args.workspace).expanduser(),
+            trace_path=Path(args.trace).expanduser(),
+            quick=args.quick,
+            bench_fn=lab.bench_workspace,
+        )
+        print(json.dumps(payload, indent=2, sort_keys=True))
         return
 
     raise SystemExit(f"Unknown command: {args.command}")

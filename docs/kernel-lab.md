@@ -16,6 +16,11 @@ The pattern comes from the same idea behind `autokernel`, but adapted to this re
 - optimize one target kernel at a time
 - only later lift successful backend-specific labs into a shared cross-engine story
 
+The important split now is between:
+
+- a heuristic layer that is fast and useful for choosing candidates
+- a trace layer that records real Metal captures and acts as the truth source for Apple Silicon performance work
+
 ## Current MLX Flow
 
 List the current MLX targets:
@@ -55,6 +60,17 @@ uv run kernel-lab.py --engine mlx orchestrate --profile /tmp/mlx-profile.json --
 uv run kernel-lab.py --engine mlx extract --profile /tmp/mlx-profile.json --workspace /tmp/mlx-lab/block-pipeline --rank 1
 ```
 
+Capture a real Metal trace for a workspace:
+
+```bash
+uv run kernel-lab.py --engine mlx capture --workspace /tmp/mlx-lab/block-pipeline --output /tmp/mlx-lab/block-pipeline.gputrace --quick
+```
+
+That writes:
+
+- a `.gputrace` bundle you can open in Xcode
+- a `.metadata.json` sidecar with the bench result, device info, and capture context
+
 For now the MLX lab is deliberately narrow, but it is no longer just `init + bench`:
 
 - starter-ready targets:
@@ -87,6 +103,36 @@ For now the MLX lab is deliberately narrow, but it is no longer just `init + ben
   - `extract` creates a starter workspace from a profile artifact and preserves the profile context
   - `orchestrate` emits the next ready command sequence for a selected ranked target
   - `verify` is the fixed-harness promotion gate above a quick bench
+  - `capture` records a real MLX Metal trace plus metadata for a workspace run
+
+## Heuristic Layer vs Trace Layer
+
+The current MLX lab deliberately uses two different kinds of evidence.
+
+The heuristic layer is:
+
+- `profile`
+- `extract`
+- `orchestrate`
+- `bench`
+- `verify`
+
+Use it constantly. It is fast, cheap, and good at deciding what to try next.
+
+The trace layer is:
+
+- `capture`
+- Xcode Metal Debugger
+- Metal System Trace / GPU counters once a capture is open
+
+Use it when a target stops being "interesting" and starts being "worth believing."
+
+The rule of thumb is:
+
+- heuristics choose candidates
+- captures validate reality
+
+That matters on Apple Silicon because a synthetic microbench can miss the real cost of synchronization, hidden copies, queue pacing, or other host/device effects.
 
 ## Why A Shared Lab Boundary
 
@@ -101,5 +147,6 @@ The goal is to give them the same outer workflow:
 - extract the next target into a workspace
 - orchestrate the next kernel-lab step
 - verify candidate work before promotion
+- capture trace artifacts when the backend supports them
 
 That is why the current shared package is `autoresearch_lab/`, while the actual kernel mechanics stay backend-specific.

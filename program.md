@@ -97,6 +97,7 @@ What to mutate depends on the backend and the task:
 - MLX kernel-lab work:
   - `autoresearch_mlx/lab.py`
   - `autoresearch_mlx/lab_profile.py`
+  - `autoresearch_mlx/lab_trace.py`
   - `autoresearch_mlx/lab_workspace.py`
 - CUDA runtime/bring-up work:
   - `autoresearch_cuda/`
@@ -118,3 +119,4 @@ The signatures are the conservative backstop, not the primary decision-maker.
 
 - `docs/program-mlx.md` is now the MLX-specific supplement, not the generic front door.
 - `autoresearch_mlx/train.py` and `autoresearch_mlx/prepare.py` remain available as direct low-level entrypoints, but the repo-level interface is now the top-level `train.py` and `prepare.py`.
+- For kernel-lab work, treat `profile` / `extract` / `orchestrate` as the heuristic layer and `capture` as the trace-backed truth layer. Microbench wins are enough to justify trying a target; use a `.gputrace` before making stronger Apple Silicon performance claims when practical.

@@ -29,7 +29,47 @@ On this hardware, the default canonical matched benchmark window for optimizatio
 
 ## Latest
 
-### New commit — lab: Add MLX profile, extract, orchestrate, and verify workflow — score `3` — complexity `6`
+### New commit — lab: Add MLX capture mode and trace artifacts — score `3` — complexity `7`
+
+**AI-identified within brief, human-shaped (3)**
+
+- Split the MLX kernel-lab workflow into an explicit heuristic layer and trace layer, and added the first MLX capture path with real `.gputrace` artifacts.
+  - Meaning: the kernel lab no longer treats `profile` and microbench results as if they were the whole profiling story. It now has a separate trace-backed path for Apple Silicon work where the artifact you inspect in Xcode is the truth source and the heuristic/profile layer is only the candidate-selection layer.
+  - Motivation: after the first `profile / extract / orchestrate / verify` loop landed, the main blind spot was Apple traceability. The next useful step was to stop implying that model-aware heuristics are authoritative and add a first-class MLX capture flow that fits the actual Xcode/Instruments-shaped profiling ecosystem.
+  - Purpose: make the MLX lab trustworthy enough for real kernel work by keeping fast candidate selection while also producing trace artifacts that can validate synchronization, queue pacing, hidden copies, and other backend realities that a synthetic microbench misses.
+  - Added `LabTraceResult`, `supports_capture`, and `capture_workspace(...)` to the shared kernel-lab boundary in `autoresearch_lab/labs.py`.
+  - Added `autoresearch_mlx/lab_trace.py` to own the MLX capture implementation, `.gputrace` path handling, and sidecar metadata emission.
+  - Added MLX `capture` and internal `_capture-bench` commands in `autoresearch_mlx/lab.py`, and wired the MLX lab workspace to expose capture through the shared lab interface.
+  - Updated the README, kernel-lab note, architecture report, and generic agent prompt so they now describe the heuristic layer as "choose the next target" and the trace layer as "validate what really happened."
+
+**Grounding**
+
+- Files:
+  - `CHANGELOG.md`
+  - `README.md`
+  - `program.md`
+  - `docs/kernel-lab.md`
+  - `docs/mlx-port-architecture.md`
+  - `autoresearch_lab/labs.py`
+  - `autoresearch_mlx/lab.py`
+  - `autoresearch_mlx/lab_trace.py`
+  - `autoresearch_mlx/lab_workspace.py`
+- Validation:
+  - `python3 -m py_compile kernel-lab.py autoresearch_lab/*.py autoresearch_mlx/lab.py autoresearch_mlx/lab_workspace.py autoresearch_mlx/lab_profile.py autoresearch_mlx/lab_trace.py`
+  - `./.venv/bin/python kernel-lab.py --engine mlx capture --workspace /tmp/mlx-kernel-workspace-2 --output /tmp/mlx-kernel-workspace-2/block-prelude-trace.gputrace --quick`
+  - `python3 tools/changelog_scores.py --group-by entry --format csv --include-latest --verify`
+- Measurements:
+  - The first trace-backed capture completed successfully for the extracted `block_prelude` workspace:
+    - trace artifact: `/tmp/mlx-kernel-workspace-2/block-prelude-trace.gputrace`
+    - metadata sidecar: `/tmp/mlx-kernel-workspace-2/block-prelude-trace.metadata.json`
+    - captured target: `block_prelude`
+    - trace status: `ok`
+    - trace wall time: `0.895s`
+    - embedded bench result: `max_abs_error=0.0`, `median_latency_ms=6.861`, `median_throughput_gb_s=4.328`
+
+## Committed History
+
+### March 12, 2026 — `08832c3` — lab: Add MLX profile, extract, orchestrate, and verify workflow — score `3` — complexity `6`
 
 **AI-identified within brief, human-shaped (3)**
 
@@ -67,8 +107,6 @@ On this hardware, the default canonical matched benchmark window for optimizatio
     - `block_prelude` (`priority_score=8.125`)
     - `attention_prelude` (`priority_score=7.325`)
   - `verify` on the extracted `block_prelude` workspace completed with `max_abs_error=0.0`, `median_latency_ms=6.044`, and `median_throughput_gb_s=5.553`.
-
-## Committed History
 
 ### March 11, 2026 — `2c6bacc` — lab: Add composed loss and block-prelude starter targets — score `3` — complexity `5`
 

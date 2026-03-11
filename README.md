@@ -127,13 +127,18 @@ Today the lab is intentionally narrow and MLX-first:
 - `uv run kernel-lab.py --engine mlx init --target rmsnorm --workspace /tmp/mlx-rmsnorm-lab`
 - `uv run kernel-lab.py --engine mlx bench --workspace /tmp/mlx-rmsnorm-lab`
 - `uv run kernel-lab.py --engine mlx verify --workspace /tmp/mlx-rmsnorm-lab --quick`
+- `uv run kernel-lab.py --engine mlx capture --workspace /tmp/mlx-rmsnorm-lab --output /tmp/mlx-rmsnorm-lab.gputrace --quick`
 
-The first profiling/orchestration layer is now in place too:
+The lab now has two layers on purpose:
 
-- `profile` ranks likely MLX kernel targets for a preset using model-aware heuristics
-- `extract` turns a ranked profile result into a mutable workspace with saved context
-- `orchestrate` emits the next ready command sequence for a selected target
-- `verify` reruns the fixed harness as the promotion gate above a quick bench
+- heuristic layer:
+  - `profile` ranks likely MLX kernel targets for a preset using model-aware heuristics
+  - `extract` turns a ranked profile result into a mutable workspace with saved context
+  - `orchestrate` emits the next ready command sequence for a selected target
+  - `verify` reruns the fixed harness as the promotion gate above a quick bench
+- trace layer:
+  - `capture` records a real MLX Metal trace and a metadata sidecar
+  - the `.gputrace` artifact is the truth source when a candidate starts making performance claims instead of just being an interesting idea
 
 That current lab exists to build the pattern, not to claim broad coverage yet. The current starter-ready MLX targets are:
 
@@ -256,9 +261,9 @@ Current project snapshot from [CHANGELOG.md](CHANGELOG.md):
 | Metric | Value |
 | --- | --- |
 | Mean autonomy score | `3.37 / 6` |
-| Mean complexity | `7.45 / commit` |
+| Mean complexity | `7.44 / commit` |
 | Mean score per top-level bullet | `3.44 / 6` |
-| History covered | `42` commits across `12` subsystems |
+| History covered | `43` commits across `12` subsystems |
 <!-- autonomy-golf-snapshot:end -->
 
 Refresh with:
@@ -280,6 +285,7 @@ autoresearch_mlx/train.py          — direct MLX training implementation
 autoresearch_mlx/     — MLX data/model/optimizer implementation
 autoresearch_mlx/lab.py            — MLX kernel lab CLI implementation
 autoresearch_mlx/lab_profile.py    — MLX profile/extract/orchestrate heuristics
+autoresearch_mlx/lab_trace.py      — MLX capture-mode and trace artifact support
 autoresearch_mlx/lab_workspace.py  — MLX mutable workspace + fixed bench harness
 autoresearch_lab/     — shared kernel-lab boundary
 docs/program-mlx.md        — MLX agent instructions

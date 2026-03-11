@@ -18,6 +18,7 @@ from autoresearch_lab.labs import (
     LabExtractResult,
     LabOrchestrationPlan,
     LabProfileResult,
+    LabTraceResult,
     LabTarget,
 )
 from autoresearch_mlx.lab_profile import (
@@ -25,6 +26,7 @@ from autoresearch_mlx.lab_profile import (
     orchestrate_from_profile,
     profile_mlx_targets,
 )
+from autoresearch_mlx.lab_trace import capture_workspace_trace
 
 
 @dataclass(frozen=True)
@@ -1362,6 +1364,7 @@ class MLXKernelLab:
         supports_extract=True,
         supports_orchestrate=True,
         supports_verify=True,
+        supports_capture=True,
     )
 
     _SPECS: dict[str, TargetSpec] = {
@@ -2058,6 +2061,9 @@ class MLXKernelLab:
         rank: int = 1,
     ) -> LabOrchestrationPlan:
         return orchestrate_from_profile(profile_path=profile_path, workspace_root=workspace_root, rank=rank)
+
+    def capture_workspace(self, *, workspace: Path, output: Path, quick: bool = False) -> LabTraceResult:
+        return capture_workspace_trace(workspace=workspace, output=output, quick=quick)
 
     def _get_spec(self, target: str) -> TargetSpec:
         try:

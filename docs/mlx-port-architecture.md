@@ -360,6 +360,7 @@ This layer is the experimental sibling of the training-engine boundary. It exist
 - `autoresearch_lab/`
 - `autoresearch_mlx/lab.py`
 - `autoresearch_mlx/lab_profile.py`
+- `autoresearch_mlx/lab_trace.py`
 - `autoresearch_mlx/lab_workspace.py`
 - `docs/kernel-lab.md`
 
@@ -405,6 +406,23 @@ The first shared outer loop is now present too:
 - `extract` instantiates a mutable workspace from a saved profile artifact
 - `orchestrate` emits the next ready command sequence for a selected ranked target
 - `verify` reruns the fixed harness as the promotion gate above a quick bench
+- `capture` writes a real `.gputrace` and sidecar metadata artifact for a workspace run
+
+The important distinction is that the lab now has two evidence layers:
+
+- heuristic layer:
+  - `profile`
+  - `extract`
+  - `orchestrate`
+  - `bench`
+  - `verify`
+  - cheap, fast, and good for choosing work
+- trace layer:
+  - `capture`
+  - Xcode Metal Debugger / Metal System Trace after opening the artifact
+  - slower, but the truth source for Apple Silicon performance claims
+
+So the lab is no longer just "one mutable file plus a microbench." It is now a split system where heuristics select candidates and trace artifacts validate whether a candidate matters in the real backend.
 
 The long-term reason this matters now is not that MLX kernel work is already broad. It is that the repo now has a place where future Triton/CUDA, ROCm, and ANE labs can plug into the same outer workflow instead of growing separate kernel-optimization trees.
 
