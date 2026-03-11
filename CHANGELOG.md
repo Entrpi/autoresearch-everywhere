@@ -29,7 +29,48 @@ On this hardware, the default canonical matched benchmark window for optimizatio
 
 ## Latest
 
-### New commit — lab: Add composed loss and block-prelude starter targets — score `3` — complexity `5`
+### New commit — lab: Add MLX profile, extract, orchestrate, and verify workflow — score `3` — complexity `6`
+
+**AI-identified within brief, human-shaped (3)**
+
+- Added the first shared workflow layer above `list / init / bench`, with MLX implementations of `profile`, `extract`, `orchestrate`, and `verify`.
+  - Meaning: the kernel lab is no longer just a catalog of starter workspaces. It now has the beginning of a repeatable outer loop that can discover likely targets, turn them into workspaces, and emit the next ready kernel-work command sequence.
+  - Motivation: after the target catalog reached real training-path coverage, the next useful step was to stop broadening the catalog and start building the profile/extract/orchestrate layer that future MLX, Triton/CUDA, ROCm, and ANE labs can share.
+  - Purpose: create the first backend-agnostic outer workflow for kernel work, while keeping MLX-specific heuristics and starter extraction logic in MLX-owned code.
+  - Added shared profile/extract/orchestration result types and capability flags in `autoresearch_lab/labs.py`.
+  - Added MLX profile heuristics in `autoresearch_mlx/lab_profile.py`, ranking likely targets from real preset/model structure instead of a static target list.
+  - Added MLX `profile`, `extract`, `orchestrate`, and `verify` commands in `autoresearch_mlx/lab.py` and `autoresearch_mlx/lab_workspace.py`, including workspace metadata/context capture from saved profile artifacts.
+
+**Grounding**
+
+- Files:
+  - `CHANGELOG.md`
+  - `README.md`
+  - `program.md`
+  - `docs/kernel-lab.md`
+  - `docs/mlx-port-architecture.md`
+  - `autoresearch_lab/labs.py`
+  - `autoresearch_mlx/lab.py`
+  - `autoresearch_mlx/lab_profile.py`
+  - `autoresearch_mlx/lab_workspace.py`
+- Validation:
+  - `python3 -m py_compile kernel-lab.py autoresearch_lab/*.py autoresearch_mlx/lab.py autoresearch_mlx/lab_workspace.py autoresearch_mlx/lab_profile.py`
+  - `./.venv/bin/python kernel-lab.py --engine mlx profile --preset m5-balanced --top-k 8`
+  - `./.venv/bin/python kernel-lab.py --engine mlx profile --preset m5-balanced --top-k 6 --output /tmp/mlx-kernel-profile.json`
+  - `./.venv/bin/python kernel-lab.py --engine mlx extract --profile /tmp/mlx-kernel-profile.json --workspace /tmp/mlx-kernel-workspace-2 --rank 2`
+  - `./.venv/bin/python kernel-lab.py --engine mlx orchestrate --profile /tmp/mlx-kernel-profile.json --workspace-root /tmp/mlx-kernel-orch --rank 2`
+  - `./.venv/bin/python kernel-lab.py --engine mlx verify --workspace /tmp/mlx-kernel-workspace-2 --quick`
+  - `python3 tools/changelog_scores.py --group-by entry --format csv --include-latest --verify`
+- Measurements:
+  - `profile --preset m5-balanced --top-k 8` ranked the first MLX targets as:
+    - `fused_mlp` (`priority_score=8.5`)
+    - `block_prelude` (`priority_score=8.125`)
+    - `attention_prelude` (`priority_score=7.325`)
+  - `verify` on the extracted `block_prelude` workspace completed with `max_abs_error=0.0`, `median_latency_ms=6.044`, and `median_throughput_gb_s=5.553`.
+
+## Committed History
+
+### March 11, 2026 — `2c6bacc` — lab: Add composed loss and block-prelude starter targets — score `3` — complexity `5`
 
 **AI-identified within brief, human-shaped (3)**
 
@@ -59,8 +100,6 @@ On this hardware, the default canonical matched benchmark window for optimizatio
   - Quick MLX lab benchmarks for the two new composed starter targets both completed with `max_abs_error=0.0`:
     - `cross_entropy_full`: `median_latency_ms=5.743`, `median_throughput_gb_s=13.485`
     - `block_prelude`: `median_latency_ms=2.509`, `median_throughput_gb_s=12.604`
-
-## Committed History
 
 ### March 11, 2026 — `6aaac43` — lab: Add reshape and broader attention/logits starter targets — score `3` — complexity `7`
 

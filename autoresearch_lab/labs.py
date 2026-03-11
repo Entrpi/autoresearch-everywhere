@@ -9,7 +9,10 @@ from typing import Any, Protocol
 class LabCapabilities:
     supports_workspace_init: bool
     supports_fixed_bench: bool
-    supports_profile_extract: bool
+    supports_profile: bool
+    supports_extract: bool
+    supports_orchestrate: bool
+    supports_verify: bool
 
 
 @dataclass(frozen=True)
@@ -31,6 +34,48 @@ class LabBenchResult:
     details: dict[str, Any]
 
 
+@dataclass(frozen=True)
+class LabProfileCandidate:
+    target: str
+    rank: int
+    priority_score: float
+    category: str
+    status: str
+    rationale: str
+    details: dict[str, Any]
+
+
+@dataclass(frozen=True)
+class LabProfileResult:
+    engine: str
+    backend_family: str
+    preset: str
+    status: str
+    wall_seconds: float
+    candidates: tuple[LabProfileCandidate, ...]
+    details: dict[str, Any]
+
+
+@dataclass(frozen=True)
+class LabExtractResult:
+    engine: str
+    target: str
+    workspace: str
+    status: str
+    wall_seconds: float
+    details: dict[str, Any]
+
+
+@dataclass(frozen=True)
+class LabOrchestrationPlan:
+    engine: str
+    target: str
+    workspace: str
+    status: str
+    commands: tuple[str, ...]
+    details: dict[str, Any]
+
+
 class KernelLab(Protocol):
     """Shared boundary for backend-specific kernel labs."""
 
@@ -47,6 +92,24 @@ class KernelLab(Protocol):
     def bench_workspace(self, *, workspace: Path, quick: bool = False) -> LabBenchResult:
         ...
 
+    def verify_workspace(self, *, workspace: Path, quick: bool = False) -> LabBenchResult:
+        ...
+
+    def profile_targets(self, *, preset: str, top_k: int = 10) -> LabProfileResult:
+        ...
+
+    def extract_from_profile(self, *, profile_path: Path, workspace: Path, rank: int = 1) -> LabExtractResult:
+        ...
+
+    def orchestrate_from_profile(
+        self,
+        *,
+        profile_path: Path,
+        workspace_root: Path,
+        rank: int = 1,
+    ) -> LabOrchestrationPlan:
+        ...
+
 
 def available_labs() -> tuple[str, ...]:
     return ("mlx",)
@@ -58,4 +121,3 @@ def get_lab(name: str) -> KernelLab:
 
         return MLXKernelLab()
     raise ValueError(f"Unknown lab engine: {name}")
-

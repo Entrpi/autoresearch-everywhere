@@ -358,7 +358,8 @@ This layer is the experimental sibling of the training-engine boundary. It exist
 
 - `kernel-lab.py`
 - `autoresearch_lab/`
-- `autoresearch_mlx/kernel-lab.py`
+- `autoresearch_mlx/lab.py`
+- `autoresearch_mlx/lab_profile.py`
 - `autoresearch_mlx/lab_workspace.py`
 - `docs/kernel-lab.md`
 
@@ -397,6 +398,13 @@ The current implementation is MLX-first and starter-target-first:
   - `block_prelude`
   - `fused_mlp`
 - `flash_attention` is explicitly deferred as a first MLX lab target
+
+The first shared outer loop is now present too:
+
+- `profile` ranks likely MLX targets for a preset using model-aware heuristics
+- `extract` instantiates a mutable workspace from a saved profile artifact
+- `orchestrate` emits the next ready command sequence for a selected ranked target
+- `verify` reruns the fixed harness as the promotion gate above a quick bench
 
 The long-term reason this matters now is not that MLX kernel work is already broad. It is that the repo now has a place where future Triton/CUDA, ROCm, and ANE labs can plug into the same outer workflow instead of growing separate kernel-optimization trees.
 

@@ -12,7 +12,19 @@ import mlx.core as mx
 import mlx.nn as nn
 import numpy as np
 
-from autoresearch_lab.labs import LabBenchResult, LabCapabilities, LabTarget
+from autoresearch_lab.labs import (
+    LabBenchResult,
+    LabCapabilities,
+    LabExtractResult,
+    LabOrchestrationPlan,
+    LabProfileResult,
+    LabTarget,
+)
+from autoresearch_mlx.lab_profile import (
+    extract_from_profile,
+    orchestrate_from_profile,
+    profile_mlx_targets,
+)
 
 
 @dataclass(frozen=True)
@@ -1346,7 +1358,10 @@ class MLXKernelLab:
     capabilities = LabCapabilities(
         supports_workspace_init=True,
         supports_fixed_bench=True,
-        supports_profile_extract=False,
+        supports_profile=True,
+        supports_extract=True,
+        supports_orchestrate=True,
+        supports_verify=True,
     )
 
     _SPECS: dict[str, TargetSpec] = {
@@ -2020,6 +2035,29 @@ class MLXKernelLab:
             wall_seconds=wall_seconds,
             details=details,
         )
+
+    def verify_workspace(self, *, workspace: Path, quick: bool = False) -> LabBenchResult:
+        return self.bench_workspace(workspace=workspace, quick=quick)
+
+    def profile_targets(self, *, preset: str, top_k: int = 10) -> LabProfileResult:
+        return profile_mlx_targets(target_catalog=self.target_catalog(), preset=preset, top_k=top_k)
+
+    def extract_from_profile(self, *, profile_path: Path, workspace: Path, rank: int = 1) -> LabExtractResult:
+        return extract_from_profile(
+            init_workspace=self.init_workspace,
+            profile_path=profile_path,
+            workspace=workspace,
+            rank=rank,
+        )
+
+    def orchestrate_from_profile(
+        self,
+        *,
+        profile_path: Path,
+        workspace_root: Path,
+        rank: int = 1,
+    ) -> LabOrchestrationPlan:
+        return orchestrate_from_profile(profile_path=profile_path, workspace_root=workspace_root, rank=rank)
 
     def _get_spec(self, target: str) -> TargetSpec:
         try:

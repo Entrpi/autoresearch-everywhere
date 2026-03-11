@@ -96,6 +96,7 @@ What to mutate depends on the backend and the task:
   - `autoresearch_lab/`
 - MLX kernel-lab work:
   - `autoresearch_mlx/lab.py`
+  - `autoresearch_mlx/lab_profile.py`
   - `autoresearch_mlx/lab_workspace.py`
 - CUDA runtime/bring-up work:
   - `autoresearch_cuda/`
