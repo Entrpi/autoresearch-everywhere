@@ -43,6 +43,7 @@ def build_parser() -> argparse.ArgumentParser:
     orchestrate_parser.add_argument("--profile", required=True)
     orchestrate_parser.add_argument("--workspace-root", required=True)
     orchestrate_parser.add_argument("--rank", type=int, default=1)
+    orchestrate_parser.add_argument("--trace-metadata")
 
     capture_parser = subparsers.add_parser("capture", help="Capture a workspace run as a Metal trace artifact")
     capture_parser.add_argument("--workspace", required=True)
@@ -110,6 +111,7 @@ def main(argv: list[str] | None = None) -> None:
             profile_path=Path(args.profile).expanduser(),
             workspace_root=Path(args.workspace_root).expanduser(),
             rank=args.rank,
+            trace_metadata_path=Path(args.trace_metadata).expanduser() if args.trace_metadata else None,
         )
         print(json.dumps(asdict(result), indent=2, sort_keys=True))
         return

@@ -121,6 +121,7 @@ class KernelLab(Protocol):
         profile_path: Path,
         workspace_root: Path,
         rank: int = 1,
+        trace_metadata_path: Path | None = None,
     ) -> LabOrchestrationPlan:
         ...
 

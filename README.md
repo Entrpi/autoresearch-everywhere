@@ -139,6 +139,7 @@ The lab now has two layers on purpose:
 - trace layer:
   - `capture` records a real MLX Metal trace and a metadata sidecar
   - the `.gputrace` artifact is the truth source when a candidate starts making performance claims instead of just being an interesting idea
+  - `orchestrate --trace-metadata ...` can fold a real capture back into the next suggested workflow
 
 That current lab exists to build the pattern, not to claim broad coverage yet. The current starter-ready MLX targets are:
 
@@ -260,10 +261,10 @@ Current project snapshot from [CHANGELOG.md](CHANGELOG.md):
 
 | Metric | Value |
 | --- | --- |
-| Mean autonomy score | `3.37 / 6` |
-| Mean complexity | `7.44 / commit` |
-| Mean score per top-level bullet | `3.44 / 6` |
-| History covered | `43` commits across `12` subsystems |
+| Mean autonomy score | `3.33 / 6` |
+| Mean complexity | `7.32 / commit` |
+| Mean score per top-level bullet | `3.41 / 6` |
+| History covered | `44` commits across `12` subsystems |
 <!-- autonomy-golf-snapshot:end -->
 
 Refresh with:

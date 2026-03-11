@@ -100,10 +100,18 @@ For now the MLX lab is deliberately narrow, but it is no longer just `init + ben
 - `flash_attention` is explicitly deferred as a first target because MLX already has optimized attention primitives and custom backward there is a worse place to start
 - first orchestration layer:
   - `profile` emits ranked candidate targets for a preset using model-aware heuristics
-  - `extract` creates a starter workspace from a profile artifact and preserves the profile context
-  - `orchestrate` emits the next ready command sequence for a selected ranked target
-  - `verify` is the fixed-harness promotion gate above a quick bench
-  - `capture` records a real MLX Metal trace plus metadata for a workspace run
+- `extract` creates a starter workspace from a profile artifact and preserves the profile context
+- `orchestrate` emits the next ready command sequence for a selected ranked target
+- `verify` is the fixed-harness promotion gate above a quick bench
+- `capture` records a real MLX Metal trace plus metadata for a workspace run
+
+If you already captured a trace for a candidate workspace, pass its metadata back into orchestration:
+
+```bash
+uv run kernel-lab.py --engine mlx orchestrate --profile /tmp/mlx-profile.json --workspace-root /tmp/mlx-lab --rank 1 --trace-metadata /tmp/mlx-lab/block-pipeline.metadata.json
+```
+
+That upgrades the plan from "interesting candidate" to "trace-backed target" and adds the trace review step to the suggested workflow.
 
 ## Heuristic Layer vs Trace Layer
 

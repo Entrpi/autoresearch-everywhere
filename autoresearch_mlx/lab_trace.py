@@ -20,6 +20,36 @@ def _metadata_path_for(trace_path: Path) -> Path:
     return trace_path.with_suffix(".metadata.json")
 
 
+def load_trace_metadata(metadata_path: Path) -> dict:
+    payload = json.loads(metadata_path.expanduser().read_text(encoding="utf-8"))
+    if payload.get("trace_schema_version") != TRACE_SCHEMA_VERSION:
+        raise ValueError(
+            f"Trace metadata {metadata_path} has unsupported schema version "
+            f"{payload.get('trace_schema_version')!r}."
+        )
+    return payload
+
+
+def summarize_trace_metadata(metadata_path: Path) -> dict[str, object]:
+    payload = load_trace_metadata(metadata_path)
+    details = payload.get("details", {})
+    bench_details = details.get("bench_details", {})
+    return {
+        "trace_metadata_path": str(metadata_path.expanduser()),
+        "trace_status": payload.get("status"),
+        "trace_target": payload.get("target"),
+        "trace_metric_name": payload.get("metric_name"),
+        "trace_metric_value": payload.get("metric_value"),
+        "trace_wall_seconds": payload.get("wall_seconds"),
+        "bench_wall_seconds": details.get("bench_wall_seconds"),
+        "bench_max_abs_error": bench_details.get("max_abs_error"),
+        "bench_median_latency_ms": bench_details.get("median_latency_ms"),
+        "bench_cases": bench_details.get("cases"),
+        "device_info": details.get("device_info"),
+        "quick_capture": details.get("quick"),
+    }
+
+
 def capture_workspace_trace(*, workspace: Path, output: Path, quick: bool = False) -> LabTraceResult:
     trace_path = output.expanduser()
     if trace_path.suffix != ".gputrace":

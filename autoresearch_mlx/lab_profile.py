@@ -12,6 +12,7 @@ from autoresearch_lab.labs import (
     LabProfileCandidate,
     LabProfileResult,
 )
+from autoresearch_mlx.lab_trace import summarize_trace_metadata
 from autoresearch_mlx.model import has_ve
 from autoresearch_mlx.train import PRESETS, build_model_config
 
@@ -387,22 +388,46 @@ def orchestrate_from_profile(
     profile_path: Path,
     workspace_root: Path,
     rank: int = 1,
+    trace_metadata_path: Path | None = None,
 ) -> LabOrchestrationPlan:
     payload = _load_profile_payload(profile_path)
     candidate = _pick_candidate(payload, rank)
     target = candidate["target"]
     workspace = workspace_root / f"{payload['preset']}-{target}"
-    commands = (
-        f"uv run kernel-lab.py --engine mlx init --target {target} --workspace {workspace}",
-        f"# edit {workspace / 'kernel.py'}",
-        f"uv run kernel-lab.py --engine mlx verify --workspace {workspace} --quick",
-        f"uv run kernel-lab.py --engine mlx bench --workspace {workspace}",
+    trace_summary: dict[str, object] | None = None
+    trace_commands: list[str] = []
+    status = "ok"
+    if trace_metadata_path is not None:
+        trace_summary = summarize_trace_metadata(trace_metadata_path)
+        if trace_summary["trace_target"] != target:
+            raise ValueError(
+                f"Trace metadata target {trace_summary['trace_target']!r} does not match "
+                f"profile target {target!r}."
+            )
+        trace_metadata = Path(str(trace_summary["trace_metadata_path"]))
+        trace_path = Path(str(trace_metadata).removesuffix(".metadata.json") + ".gputrace")
+        trace_commands.extend(
+            [
+                f"# inspect {trace_path} in Xcode Metal Debugger before editing",
+                f"# review {trace_metadata_path} for bench and device context",
+            ]
+        )
+        status = "trace-backed"
+    commands = tuple(
+        [
+            f"uv run kernel-lab.py --engine mlx init --target {target} --workspace {workspace}",
+            *trace_commands,
+            f"# edit {workspace / 'kernel.py'}",
+            f"uv run kernel-lab.py --engine mlx verify --workspace {workspace} --quick",
+            f"uv run kernel-lab.py --engine mlx bench --workspace {workspace}",
+            f"uv run kernel-lab.py --engine mlx capture --workspace {workspace} --output {workspace / (target + '.gputrace')} --quick",
+        ]
     )
     return LabOrchestrationPlan(
         engine="mlx",
         target=target,
         workspace=str(workspace),
-        status="ok",
+        status=status,
         commands=commands,
         details={
             "profile_path": str(profile_path),
@@ -411,6 +436,7 @@ def orchestrate_from_profile(
             "priority_score": candidate["priority_score"],
             "category": candidate["category"],
             "rationale": candidate["rationale"],
+            "trace_summary": trace_summary,
         },
     )
 

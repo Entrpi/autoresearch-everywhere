@@ -2059,8 +2059,14 @@ class MLXKernelLab:
         profile_path: Path,
         workspace_root: Path,
         rank: int = 1,
+        trace_metadata_path: Path | None = None,
     ) -> LabOrchestrationPlan:
-        return orchestrate_from_profile(profile_path=profile_path, workspace_root=workspace_root, rank=rank)
+        return orchestrate_from_profile(
+            profile_path=profile_path,
+            workspace_root=workspace_root,
+            rank=rank,
+            trace_metadata_path=trace_metadata_path,
+        )
 
     def capture_workspace(self, *, workspace: Path, output: Path, quick: bool = False) -> LabTraceResult:
         return capture_workspace_trace(workspace=workspace, output=output, quick=quick)

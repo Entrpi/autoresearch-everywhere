@@ -29,7 +29,45 @@ On this hardware, the default canonical matched benchmark window for optimizatio
 
 ## Latest
 
-### New commit — lab: Add MLX capture mode and trace artifacts — score `3` — complexity `7`
+### New commit — lab: Feed MLX trace artifacts back into orchestration — score `2`
+
+**AI-identified within brief, human-approved (2)**
+
+- Made the MLX orchestration layer consume trace metadata as an optional second input, so a target can move from "heuristically ranked" to "trace-backed investigation" without leaving the shared kernel-lab workflow.
+  - Meaning: the trace layer is no longer just an isolated capture command. Once a workspace has a real `.gputrace`, the next orchestration plan can carry that evidence and explicitly tell the user to inspect the trace before editing and recapturing.
+  - Motivation: after capture mode landed, the next gap was that trace artifacts were still detached from the normal lab loop. The fastest useful improvement was to keep profile-based target selection, but let real capture evidence shape the next recommended workflow.
+  - Purpose: close the loop between heuristic ranking and trace-backed reality, so the kernel lab can escalate a target from "candidate" to "worth serious investigation" without inventing a separate manual process.
+  - Added trace-metadata loading and summary helpers in `autoresearch_mlx/lab_trace.py`.
+  - Extended MLX orchestration to accept `--trace-metadata`, validate target alignment, and emit a trace-backed workflow that includes inspecting the existing `.gputrace` and recapturing after edits.
+  - Updated the README, kernel-lab note, architecture report, and generic agent prompt so the trace-backed orchestration loop is visible in the public workflow.
+
+**Grounding**
+
+- Files:
+  - `CHANGELOG.md`
+  - `README.md`
+  - `program.md`
+  - `docs/kernel-lab.md`
+  - `docs/mlx-port-architecture.md`
+  - `autoresearch_lab/labs.py`
+  - `autoresearch_mlx/lab.py`
+  - `autoresearch_mlx/lab_profile.py`
+  - `autoresearch_mlx/lab_trace.py`
+  - `autoresearch_mlx/lab_workspace.py`
+- Validation:
+  - `python3 -m py_compile kernel-lab.py autoresearch_lab/*.py autoresearch_mlx/lab.py autoresearch_mlx/lab_workspace.py autoresearch_mlx/lab_profile.py autoresearch_mlx/lab_trace.py`
+  - `./.venv/bin/python kernel-lab.py --engine mlx orchestrate --profile /tmp/mlx-kernel-profile.json --workspace-root /tmp/mlx-kernel-orch-trace --rank 2 --trace-metadata /tmp/mlx-kernel-workspace-2/block-prelude-trace.metadata.json`
+  - `python3 tools/changelog_scores.py --group-by entry --format csv --include-latest --verify`
+- Measurements:
+  - The trace-backed orchestration plan for `block_prelude` completed successfully with:
+    - `status=trace-backed`
+    - trace target match: `block_prelude`
+    - embedded trace metric: `throughput_gb_s=4.328098329488359`
+    - embedded bench `max_abs_error=0.0`
+
+## Committed History
+
+### March 12, 2026 — `8adbf2d` — lab: Add MLX capture mode and trace artifacts — score `3` — complexity `7`
 
 **AI-identified within brief, human-shaped (3)**
 
@@ -66,8 +104,6 @@ On this hardware, the default canonical matched benchmark window for optimizatio
     - trace status: `ok`
     - trace wall time: `0.895s`
     - embedded bench result: `max_abs_error=0.0`, `median_latency_ms=6.861`, `median_throughput_gb_s=4.328`
-
-## Committed History
 
 ### March 12, 2026 — `08832c3` — lab: Add MLX profile, extract, orchestrate, and verify workflow — score `3` — complexity `6`
 
