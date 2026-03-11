@@ -6,6 +6,7 @@ import time
 from dataclasses import asdict
 from pathlib import Path
 
+from autoresearch_lab.ledger import summarize_lab_evidence
 from autoresearch_lab.labs import (
     LabExtractResult,
     LabOrchestrationPlan,
@@ -18,6 +19,16 @@ from autoresearch_mlx.train import PRESETS, build_model_config
 
 
 PROFILE_SCHEMA_VERSION = 1
+
+
+def _priority_bonus_from_evidence(promotion_status: str) -> float:
+    if promotion_status == "ready-for-integration-test":
+        return 0.75
+    if promotion_status == "trace-backed":
+        return 0.45
+    if promotion_status == "verified-only":
+        return 0.20
+    return 0.0
 
 
 def _current_git_commit() -> str | None:
@@ -278,12 +289,37 @@ def profile_mlx_targets(*, target_catalog: dict[str, object], preset: str, top_k
         {"path_scope": "primitive"},
     )
 
-    scored.sort(key=lambda item: (-item[2], item[0]))
+    scored_with_evidence = []
+    for target, category, priority_score, rationale, details in scored:
+        evidence = summarize_lab_evidence(
+            engine="mlx",
+            backend_family="mlx",
+            target=target,
+            preset=preset,
+        )
+        effective_priority = priority_score + _priority_bonus_from_evidence(evidence.promotion_status)
+        scored_with_evidence.append(
+            (
+                target,
+                category,
+                priority_score,
+                effective_priority,
+                rationale,
+                {
+                    **details,
+                    "base_priority_score": round(priority_score, 3),
+                    "effective_priority_score": round(effective_priority, 3),
+                    "evidence_summary": asdict(evidence),
+                },
+            )
+        )
+
+    scored_with_evidence.sort(key=lambda item: (-item[3], -item[2], item[0]))
     candidates = tuple(
         _candidate_payload(
             target=target,
             category=category,
-            priority_score=priority_score,
+            priority_score=effective_priority,
             status=details["status"],
             rationale=rationale,
             rank=idx,
@@ -296,7 +332,9 @@ def profile_mlx_targets(*, target_catalog: dict[str, object], preset: str, top_k
                 if key != "status"
             },
         )
-        for idx, (target, category, priority_score, rationale, details) in enumerate(scored[:top_k], start=1)
+        for idx, (target, category, _priority_score, effective_priority, rationale, details) in enumerate(
+            scored_with_evidence[:top_k], start=1
+        )
     )
 
     return LabProfileResult(
@@ -393,12 +431,33 @@ def orchestrate_from_profile(
     payload = _load_profile_payload(profile_path)
     candidate = _pick_candidate(payload, rank)
     target = candidate["target"]
-    workspace = workspace_root / f"{payload['preset']}-{target}"
+    evidence_summary = summarize_lab_evidence(
+        engine="mlx",
+        backend_family="mlx",
+        target=target,
+        preset=payload["preset"],
+    )
+    existing_workspace = (
+        Path(evidence_summary.last_workspace).expanduser()
+        if evidence_summary.last_workspace is not None
+        else None
+    )
+    use_existing_workspace = bool(existing_workspace and existing_workspace.exists())
+    workspace = (
+        existing_workspace
+        if use_existing_workspace
+        else workspace_root / f"{payload['preset']}-{target}"
+    )
     trace_summary: dict[str, object] | None = None
     trace_commands: list[str] = []
     status = "ok"
-    if trace_metadata_path is not None:
-        trace_summary = summarize_trace_metadata(trace_metadata_path)
+    resolved_trace_metadata = trace_metadata_path
+    if resolved_trace_metadata is None and evidence_summary.last_trace_metadata_path:
+        candidate_trace_metadata = Path(evidence_summary.last_trace_metadata_path).expanduser()
+        if candidate_trace_metadata.exists():
+            resolved_trace_metadata = candidate_trace_metadata
+    if resolved_trace_metadata is not None:
+        trace_summary = summarize_trace_metadata(resolved_trace_metadata)
         if trace_summary["trace_target"] != target:
             raise ValueError(
                 f"Trace metadata target {trace_summary['trace_target']!r} does not match "
@@ -409,20 +468,57 @@ def orchestrate_from_profile(
         trace_commands.extend(
             [
                 f"# inspect {trace_path} in Xcode Metal Debugger before editing",
-                f"# review {trace_metadata_path} for bench and device context",
+                f"# review {trace_metadata} for bench and device context",
             ]
         )
         status = "trace-backed"
-    commands = tuple(
-        [
-            f"uv run kernel-lab.py --engine mlx init --target {target} --workspace {workspace}",
-            *trace_commands,
-            f"# edit {workspace / 'kernel.py'}",
-            f"uv run kernel-lab.py --engine mlx verify --workspace {workspace} --quick",
-            f"uv run kernel-lab.py --engine mlx bench --workspace {workspace}",
-            f"uv run kernel-lab.py --engine mlx capture --workspace {workspace} --output {workspace / (target + '.gputrace')} --quick",
-        ]
-    )
+    if evidence_summary.promotion_status == "ready-for-integration-test" and use_existing_workspace:
+        status = "promotion-ready"
+        commands = tuple(
+            [
+                f"# reuse {workspace} as the current best trace-backed workspace",
+                *trace_commands,
+                f"uv run kernel-lab.py --engine mlx verify --workspace {workspace} --quick",
+                f"uv run kernel-lab.py --engine mlx bench --workspace {workspace}",
+                "# integrate this target into the MLX training path and run an end-to-end A/B",
+                "uv run train.py --engine mlx --preset m5-balanced --time-budget 20 --benchmark-skip-eval --no-checkpoint",
+                f"uv run kernel-lab.py --engine mlx capture --workspace {workspace} --output {workspace / (target + '.gputrace')} --quick",
+            ]
+        )
+    elif evidence_summary.promotion_status == "trace-backed" and use_existing_workspace:
+        status = "trace-backed"
+        commands = tuple(
+            [
+                f"# continue from traced workspace {workspace}",
+                *trace_commands,
+                f"# edit {workspace / 'kernel.py'}",
+                f"uv run kernel-lab.py --engine mlx verify --workspace {workspace} --quick",
+                f"uv run kernel-lab.py --engine mlx bench --workspace {workspace}",
+                f"uv run kernel-lab.py --engine mlx capture --workspace {workspace} --output {workspace / (target + '.gputrace')} --quick",
+            ]
+        )
+    elif evidence_summary.promotion_status == "verified-only" and use_existing_workspace:
+        status = "verified-only"
+        commands = tuple(
+            [
+                f"# continue from verified workspace {workspace}",
+                f"# edit {workspace / 'kernel.py'}",
+                f"uv run kernel-lab.py --engine mlx verify --workspace {workspace} --quick",
+                f"uv run kernel-lab.py --engine mlx bench --workspace {workspace}",
+                f"uv run kernel-lab.py --engine mlx capture --workspace {workspace} --output {workspace / (target + '.gputrace')} --quick",
+            ]
+        )
+    else:
+        commands = tuple(
+            [
+                f"uv run kernel-lab.py --engine mlx init --target {target} --workspace {workspace}",
+                *trace_commands,
+                f"# edit {workspace / 'kernel.py'}",
+                f"uv run kernel-lab.py --engine mlx verify --workspace {workspace} --quick",
+                f"uv run kernel-lab.py --engine mlx bench --workspace {workspace}",
+                f"uv run kernel-lab.py --engine mlx capture --workspace {workspace} --output {workspace / (target + '.gputrace')} --quick",
+            ]
+        )
     return LabOrchestrationPlan(
         engine="mlx",
         target=target,
@@ -436,6 +532,8 @@ def orchestrate_from_profile(
             "priority_score": candidate["priority_score"],
             "category": candidate["category"],
             "rationale": candidate["rationale"],
+            "evidence_summary": asdict(evidence_summary),
+            "using_existing_workspace": use_existing_workspace,
             "trace_summary": trace_summary,
         },
     )

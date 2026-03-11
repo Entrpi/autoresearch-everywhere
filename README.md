@@ -134,12 +134,14 @@ The lab now has two layers on purpose:
 - heuristic layer:
   - `profile` ranks likely MLX kernel targets for a preset using model-aware heuristics
   - `extract` turns a ranked profile result into a mutable workspace with saved context
-  - `orchestrate` emits the next ready command sequence for a selected target
+  - `orchestrate` emits the next ready command sequence for a selected target, and can now reuse an existing workspace when earlier verify/capture evidence already exists
   - `verify` reruns the fixed harness as the promotion gate above a quick bench
 - trace layer:
   - `capture` records a real MLX Metal trace and a metadata sidecar
   - the `.gputrace` artifact is the truth source when a candidate starts making performance claims instead of just being an interesting idea
   - `orchestrate --trace-metadata ...` can fold a real capture back into the next suggested workflow
+
+The lab also keeps a small evidence ledger at `results/kernel_lab/ledger.jsonl`. That lets later profiles and plans see whether a target is still unexplored, only verified, trace-backed, or ready for an integration A/B instead of treating every target as a fresh idea.
 
 That current lab exists to build the pattern, not to claim broad coverage yet. The current starter-ready MLX targets are:
 
@@ -261,10 +263,10 @@ Current project snapshot from [CHANGELOG.md](CHANGELOG.md):
 
 | Metric | Value |
 | --- | --- |
-| Mean autonomy score | `3.33 / 6` |
-| Mean complexity | `7.32 / commit` |
-| Mean score per top-level bullet | `3.41 / 6` |
-| History covered | `44` commits across `12` subsystems |
+| Mean autonomy score | `3.35 / 6` |
+| Mean complexity | `7.31 / commit` |
+| Mean score per top-level bullet | `3.42 / 6` |
+| History covered | `45` commits across `12` subsystems |
 <!-- autonomy-golf-snapshot:end -->
 
 Refresh with:

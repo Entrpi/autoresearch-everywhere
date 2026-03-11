@@ -12,6 +12,7 @@ import mlx.core as mx
 import mlx.nn as nn
 import numpy as np
 
+from autoresearch_lab.ledger import append_lab_event
 from autoresearch_lab.labs import (
     LabBenchResult,
     LabCapabilities,
@@ -2040,7 +2041,25 @@ class MLXKernelLab:
         )
 
     def verify_workspace(self, *, workspace: Path, quick: bool = False) -> LabBenchResult:
-        return self.bench_workspace(workspace=workspace, quick=quick)
+        result = self.bench_workspace(workspace=workspace, quick=quick)
+        append_lab_event(
+            engine="mlx",
+            backend_family="mlx",
+            target=result.target,
+            workspace=workspace,
+            event_type="verify",
+            status=result.status,
+            metric_name=result.metric_name,
+            metric_value=result.metric_value,
+            details={
+                "quick": quick,
+                "wall_seconds": result.wall_seconds,
+                "max_abs_error": result.details.get("max_abs_error"),
+                "median_latency_ms": result.details.get("median_latency_ms"),
+                "cases": result.details.get("cases"),
+            },
+        )
+        return result
 
     def profile_targets(self, *, preset: str, top_k: int = 10) -> LabProfileResult:
         return profile_mlx_targets(target_catalog=self.target_catalog(), preset=preset, top_k=top_k)

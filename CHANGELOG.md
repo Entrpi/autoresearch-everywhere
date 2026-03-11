@@ -29,7 +29,52 @@ On this hardware, the default canonical matched benchmark window for optimizatio
 
 ## Latest
 
-### New commit — lab: Feed MLX trace artifacts back into orchestration — score `2`
+### New commit — lab: Persist MLX kernel evidence and use it in ranking/promotion — score `4` — complexity `7`
+
+**Human-directed, AI-shaped (4)**
+
+- Added a persistent MLX kernel-lab evidence ledger and made both ranking and orchestration react to it, so the next step can advance from fresh exploration to trace-backed promotion instead of redoing the same workspace loop forever.
+  - Meaning: the kernel lab now has a third layer between heuristics and traces: a ledger that remembers successful `verify` and `capture` events by target/preset/backend, and uses that memory to adjust candidate ranking and pick a different next workflow when a target is already proven enough.
+  - Motivation: after trace-backed orchestration landed, the next gap was that the system still forgot everything between commands. The lab needed a persistent notion of "already verified", "already traced", and "ready for integration test" so orchestration could stop treating every target as brand new.
+  - Purpose: turn the kernel lab from a task suggester into the beginning of a real optimization loop, where evidence accumulates over time and promotion decisions become explicit rather than informal.
+  - Added `autoresearch_lab/ledger.py` with persistent JSONL events and evidence summaries.
+  - Wired MLX `verify` and `capture` to append ledger events, including recapture to an existing `.gputrace` path.
+  - Made MLX profile ranking evidence-aware and taught orchestration to reuse existing workspaces, auto-load trace metadata when available, and emit `promotion-ready` plans when both verify and trace evidence exist.
+
+**Grounding**
+
+- Files:
+  - `CHANGELOG.md`
+  - `README.md`
+  - `program.md`
+  - `docs/kernel-lab.md`
+  - `docs/mlx-port-architecture.md`
+  - `autoresearch_lab/ledger.py`
+  - `autoresearch_mlx/lab_profile.py`
+  - `autoresearch_mlx/lab_trace.py`
+  - `autoresearch_mlx/lab_workspace.py`
+- Validation:
+  - `python3 -m py_compile autoresearch_lab/ledger.py autoresearch_mlx/lab_trace.py autoresearch_mlx/lab_profile.py autoresearch_mlx/lab_workspace.py autoresearch_mlx/lab.py kernel-lab.py`
+  - `./.venv/bin/python kernel-lab.py --engine mlx verify --workspace /tmp/mlx-kernel-workspace-2 --quick`
+  - `./.venv/bin/python kernel-lab.py --engine mlx capture --workspace /tmp/mlx-kernel-workspace-2 --output /tmp/mlx-kernel-workspace-2/block-prelude-trace.gputrace --quick`
+  - `./.venv/bin/python kernel-lab.py --engine mlx profile --preset m5-balanced --top-k 6`
+  - `./.venv/bin/python kernel-lab.py --engine mlx orchestrate --profile /tmp/mlx-kernel-profile-ledger.json --workspace-root /tmp/mlx-kernel-orch-ledger --rank 1`
+  - `python3 tools/changelog_scores.py --group-by entry --format csv --include-latest --verify`
+- Measurements:
+  - `block_prelude` now records:
+    - `verify_ok_count=1`
+    - `capture_ok_count=1`
+    - `promotion_status=ready-for-integration-test`
+  - The same target moved to rank `1` for `m5-balanced`, with:
+    - `base_priority_score=8.125`
+    - `effective_priority_score=8.875`
+  - The resulting orchestration plan upgraded from "open a new workspace" to:
+    - `status=promotion-ready`
+    - `workspace=/tmp/mlx-kernel-workspace-2`
+
+## Committed History
+
+### March 12, 2026 — `03f729b` — lab: Feed MLX trace artifacts back into orchestration — score `2`
 
 **AI-identified within brief, human-approved (2)**
 
@@ -64,8 +109,6 @@ On this hardware, the default canonical matched benchmark window for optimizatio
     - trace target match: `block_prelude`
     - embedded trace metric: `throughput_gb_s=4.328098329488359`
     - embedded bench `max_abs_error=0.0`
-
-## Committed History
 
 ### March 12, 2026 — `8adbf2d` — lab: Add MLX capture mode and trace artifacts — score `3` — complexity `7`
 

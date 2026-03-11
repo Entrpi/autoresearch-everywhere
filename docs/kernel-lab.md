@@ -70,6 +70,7 @@ That writes:
 
 - a `.gputrace` bundle you can open in Xcode
 - a `.metadata.json` sidecar with the bench result, device info, and capture context
+- a persistent evidence entry in `results/kernel_lab/ledger.jsonl`
 
 For now the MLX lab is deliberately narrow, but it is no longer just `init + bench`:
 
@@ -113,6 +114,8 @@ uv run kernel-lab.py --engine mlx orchestrate --profile /tmp/mlx-profile.json --
 
 That upgrades the plan from "interesting candidate" to "trace-backed target" and adds the trace review step to the suggested workflow.
 
+If a target has already been both verified and captured, orchestration will reuse the last known workspace and upgrade the plan again to `promotion-ready`, which means the next recommended step is an end-to-end integration A/B rather than another blank workspace.
+
 ## Heuristic Layer vs Trace Layer
 
 The current MLX lab deliberately uses two different kinds of evidence.
@@ -124,6 +127,8 @@ The heuristic layer is:
 - `orchestrate`
 - `bench`
 - `verify`
+
+It also now includes a persistent evidence ledger. Heuristic profiles are no longer stateless: they can see whether a target already has successful `verify` and `capture` events for the same preset and backend family.
 
 Use it constantly. It is fast, cheap, and good at deciding what to try next.
 
@@ -138,6 +143,7 @@ Use it when a target stops being "interesting" and starts being "worth believing
 The rule of thumb is:
 
 - heuristics choose candidates
+- the ledger remembers what has already been proved
 - captures validate reality
 
 That matters on Apple Silicon because a synthetic microbench can miss the real cost of synchronization, hidden copies, queue pacing, or other host/device effects.

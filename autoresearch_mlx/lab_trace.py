@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
 import sys
 import time
@@ -10,6 +11,7 @@ from pathlib import Path
 
 import mlx.core as mx
 
+from autoresearch_lab.ledger import append_lab_event
 from autoresearch_lab.labs import LabBenchResult, LabTraceResult
 
 
@@ -54,6 +56,14 @@ def capture_workspace_trace(*, workspace: Path, output: Path, quick: bool = Fals
     trace_path = output.expanduser()
     if trace_path.suffix != ".gputrace":
         trace_path = trace_path.with_suffix(".gputrace")
+    if trace_path.exists():
+        if trace_path.is_dir():
+            shutil.rmtree(trace_path)
+        else:
+            trace_path.unlink()
+    metadata_path = _metadata_path_for(trace_path)
+    if metadata_path.exists():
+        metadata_path.unlink()
     trace_path.parent.mkdir(parents=True, exist_ok=True)
 
     env = os.environ.copy()
@@ -78,9 +88,8 @@ def capture_workspace_trace(*, workspace: Path, output: Path, quick: bool = Fals
         env=env,
     )
     payload = json.loads(proc.stdout)
-    metadata_path = _metadata_path_for(trace_path)
     metadata_path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
-    return LabTraceResult(
+    result = LabTraceResult(
         engine="mlx",
         backend_family="mlx",
         target=payload["target"],
@@ -95,6 +104,23 @@ def capture_workspace_trace(*, workspace: Path, output: Path, quick: bool = Fals
             **payload["details"],
         },
     )
+    append_lab_event(
+        engine="mlx",
+        backend_family="mlx",
+        target=payload["target"],
+        workspace=workspace,
+        event_type="capture",
+        status=payload["status"],
+        metric_name=payload.get("metric_name"),
+        metric_value=payload.get("metric_value"),
+        details={
+            "trace_path": str(trace_path),
+            "trace_metadata_path": str(metadata_path),
+            "quick": quick,
+            "trace_wall_seconds": result.wall_seconds,
+        },
+    )
+    return result
 
 
 def run_capture_bench(*, workspace: Path, trace_path: Path, quick: bool, bench_fn) -> dict:

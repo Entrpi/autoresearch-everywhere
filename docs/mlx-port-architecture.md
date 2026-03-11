@@ -422,9 +422,9 @@ The important distinction is that the lab now has two evidence layers:
 - Xcode Metal Debugger / Metal System Trace after opening the artifact
 - slower, but the truth source for Apple Silicon performance claims
 
-So the lab is no longer just "one mutable file plus a microbench." It is now a split system where heuristics select candidates and trace artifacts validate whether a candidate matters in the real backend.
+So the lab is no longer just "one mutable file plus a microbench." It is now a split system where heuristics select candidates, a persistent ledger remembers which targets have already been verified or traced, and trace artifacts validate whether a candidate matters in the real backend.
 
-That split now also feeds back into orchestration: once a workspace has a real trace artifact, the next lab plan can carry that trace context and treat the target as trace-backed rather than only heuristically ranked.
+That split now also feeds back into orchestration: once a workspace has real verify/capture evidence, the next plan can either treat the target as trace-backed or upgrade it to promotion-ready and reuse the last workspace instead of opening a fresh one.
 
 The long-term reason this matters now is not that MLX kernel work is already broad. It is that the repo now has a place where future Triton/CUDA, ROCm, and ANE labs can plug into the same outer workflow instead of growing separate kernel-optimization trees.
 
