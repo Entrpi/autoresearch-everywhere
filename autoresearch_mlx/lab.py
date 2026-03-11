@@ -9,7 +9,7 @@ from autoresearch_mlx.lab_workspace import MLXKernelLab
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="lab.py")
+    parser = argparse.ArgumentParser(prog="kernel-lab.py")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     subparsers.add_parser("list-targets", help="List available MLX lab targets")

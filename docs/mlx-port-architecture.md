@@ -116,7 +116,7 @@ flowchart TD
     end
 
     subgraph S6["Kernel Lab Boundary"]
-        L0["lab.py"]
+        L0["kernel-lab.py"]
         L0 --> L1["autoresearch_lab/*"]
         L1 --> L2["MLX lab"]
         L1 --> L3["future Triton/CUDA lab"]
@@ -356,9 +356,9 @@ This layer is the experimental sibling of the training-engine boundary. It exist
 
 ### Main files
 
-- `lab.py`
+- `kernel-lab.py`
 - `autoresearch_lab/`
-- `autoresearch_mlx/lab.py`
+- `autoresearch_mlx/kernel-lab.py`
 - `autoresearch_mlx/lab_workspace.py`
 - `docs/kernel-lab.md`
 
@@ -366,14 +366,19 @@ This layer is the experimental sibling of the training-engine boundary. It exist
 
 The lab is intentionally narrower than the training path:
 
-- the top level owns the generic `lab.py` front door
+- the top level owns the generic `kernel-lab.py` front door
 - `autoresearch_lab/` owns the shared boundary and backend registry
 - each backend owns its own mutable workspace and fixed benchmark harness
 
 The current implementation is MLX-first and starter-target-first:
 
-- `rmsnorm` is the first starter-ready workspace
-- `layernorm`, `rotary_embedding`, `reduce`, and fused MLP work are queued behind it
+- starter-ready workspaces:
+  - `rmsnorm`
+  - `layernorm`
+  - `rotary_embedding`
+  - `reduce`
+  - `softmax`
+  - `fused_mlp`
 - `flash_attention` is explicitly deferred as a first MLX lab target
 
 The long-term reason this matters now is not that MLX kernel work is already broad. It is that the repo now has a place where future Triton/CUDA, ROCm, and ANE labs can plug into the same outer workflow instead of growing separate kernel-optimization trees.
@@ -458,6 +463,6 @@ The simplest correct way to think about the current repo is:
 - `eval_policy.py` decides how much evaluation fidelity the runtime is allowed to trust
 - `eval_telemetry.py` lets ordinary runs strengthen or age that trust
 - `calibrate.py` is the one-button path that turns an unfamiliar machine into a measured default for the rest of the system
-- `lab.py` is the top-level experimental front door for backend-specific kernel work under a shared outer workflow
+- `kernel-lab.py` is the top-level experimental front door for backend-specific kernel work under a shared outer workflow
 
 That is the current architecture. The port is no longer just an MLX training path. It is an MLX research platform with explicit machine bring-up.

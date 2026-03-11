@@ -29,7 +29,55 @@ On this hardware, the default canonical matched benchmark window for optimizatio
 
 ## Latest
 
-### New commit — lab: Add shared kernel-lab boundary and first MLX workspace — score `4` — complexity `7`
+### New commit — lab: Expand MLX starter targets and rename top-level lab entrypoint — score `4` — complexity `10`
+
+**Human-directed, AI-shaped (4)**
+
+- Requested working through the practical MLX lab targets in order after the first RMSNorm foundation, with an eye toward the same top-level lab eventually hosting Triton/CUDA and other backend labs too, and then clarified that the public front door should be named like a real subsystem rather than `lab.py`.
+  - Meaning: expanded the MLX lab from a single RMSNorm starter into a small starter-ready catalog with `layernorm`, `rotary_embedding`, `reduce`, `softmax`, and `fused_mlp`, all using the same mutable-workspace pattern and fixed benchmark harness, and renamed the public top-level entrypoint from `lab.py` to `kernel-lab.py`.
+  - Motivation: the initial lab boundary was real, but still too narrow to prove the pattern would scale beyond one norm kernel, and once the lab became a first-class top-level system, `lab.py` was too generic and easy to confuse with unrelated experimentation or helper scripts.
+  - Purpose: turn the MLX lab into a real backend workspace system that is useful now, serves as a believable template for future Triton/CUDA, ROCm, and ANE labs, and has a public front door whose name matches the rest of the repo's named subsystems.
+  - Refactored the MLX lab harness around target-specific specs so new targets can bring their own templates, input generation, reference implementations, cases, and metrics without growing one giant conditional bench function.
+  - Promoted `layernorm`, `rotary_embedding`, `reduce`, `softmax`, and `fused_mlp` to `starter-ready` targets with generated mutable workspaces and fixed quick/full benchmark cases.
+  - Added `softmax` as an explicit starter target, since it is both common and numerically sensitive enough to justify a dedicated lab rather than hiding inside a broader MLP or attention target.
+  - Hardened the bench harness so non-finite outputs now fail loudly instead of accidentally slipping through the error check, and scaled the fused-MLP random inputs/weights into a realistic range so the starter implementation can be benchmarked meaningfully in float16.
+  - Renamed the public entrypoint to `kernel-lab.py`, updated the dispatcher/help text, and rewired the top-level docs so the kernel-lab surface now matches the rest of the repo's named subsystems.
+  - Kept the backend implementation filenames under `autoresearch_*` unchanged so only the public front door changed.
+
+**Grounding**
+
+- Files:
+  - `CHANGELOG.md`
+  - `README.md`
+  - `program.md`
+  - `docs/kernel-lab.md`
+  - `docs/mlx-port-architecture.md`
+  - `docs/platform-calibration.md`
+  - `kernel-lab.py`
+  - `autoresearch_lab/entrypoints.py`
+  - `autoresearch_mlx/lab_workspace.py`
+- Validation:
+  - `python3 -m py_compile kernel-lab.py autoresearch_lab/*.py autoresearch_mlx/lab.py autoresearch_mlx/lab_workspace.py`
+  - `./.venv/bin/python kernel-lab.py --list-engines`
+  - `./.venv/bin/python kernel-lab.py --engine mlx list-targets`
+  - `./.venv/bin/python kernel-lab.py --engine mlx init --target layernorm --workspace <tmp>`
+  - `./.venv/bin/python kernel-lab.py --engine mlx init --target rotary_embedding --workspace <tmp>`
+  - `./.venv/bin/python kernel-lab.py --engine mlx init --target reduce --workspace <tmp>`
+  - `./.venv/bin/python kernel-lab.py --engine mlx init --target softmax --workspace <tmp>`
+  - `./.venv/bin/python kernel-lab.py --engine mlx init --target fused_mlp --workspace <tmp>`
+  - `./.venv/bin/python kernel-lab.py --engine mlx bench --workspace <tmp> --quick`
+  - `python3 tools/changelog_scores.py --group-by entry --format csv --include-latest --verify`
+- Measurements:
+  - Quick MLX lab benchmarks for the expanded starter set all completed with `max_abs_error=0.0`:
+    - `layernorm`: `median_latency_ms=0.900`, `median_throughput_gb_s=7.882`
+    - `rotary_embedding`: `median_latency_ms=0.848`, `median_throughput_gb_s=5.852`
+    - `reduce`: `median_latency_ms=0.496`, `median_throughput_gb_s=10.955`
+    - `softmax`: `median_latency_ms=0.921`, `median_throughput_gb_s=7.015`
+    - `fused_mlp`: `median_latency_ms=1.588`, `median_throughput_tflops=2.525`
+
+## Committed History
+
+### March 11, 2026 — `5592d01` — lab: Add shared kernel-lab boundary and first MLX workspace — score `4` — complexity `7`
 
 **Human-directed, AI-shaped (4)**
 
@@ -65,8 +113,6 @@ On this hardware, the default canonical matched benchmark window for optimizatio
   - `python3 tools/changelog_scores.py --group-by entry --format csv --include-latest --verify`
 - Measurements:
   - The first MLX lab workspace completed a quick RMSNorm benchmark with `max_abs_error=0.0`, `median_latency_ms=0.500`, and `median_throughput_gb_s=9.516` across the two quick benchmark cases.
-
-## Committed History
 
 ### March 11, 2026 — `5c9ee53` — docs: Rename project to autoresearch-everywhere — score `4` — complexity `6`
 

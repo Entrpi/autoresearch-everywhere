@@ -73,7 +73,7 @@ The repo now has a simple top-level surface:
 - `prepare.py` prepares data and caches
 - `train.py` runs experiments
 - `calibrate.py` finds the best starting point for a machine
-- `lab.py` is the backend-specific kernel-lab front door
+- `kernel-lab.py` is the backend-specific kernel-lab front door
 - `program.md` is the generic agent prompt
 
 Under that, the code is split by role:
@@ -111,7 +111,7 @@ If you want more detail about the calibration logic beneath those defaults, see 
 
 ## Kernel Lab
 
-The repo now also has a top-level `lab.py` entrypoint for backend-specific kernel work.
+The repo now also has a top-level `kernel-lab.py` entrypoint for backend-specific kernel work.
 
 The idea is the same one that makes the rest of the repo manageable:
 
@@ -121,11 +121,20 @@ The idea is the same one that makes the rest of the repo manageable:
 
 Today the lab is intentionally narrow and MLX-first:
 
-- `uv run lab.py --engine mlx list-targets`
-- `uv run lab.py --engine mlx init --target rmsnorm --workspace /tmp/mlx-rmsnorm-lab`
-- `uv run lab.py --engine mlx bench --workspace /tmp/mlx-rmsnorm-lab`
+- `uv run kernel-lab.py --engine mlx list-targets`
+- `uv run kernel-lab.py --engine mlx init --target rmsnorm --workspace /tmp/mlx-rmsnorm-lab`
+- `uv run kernel-lab.py --engine mlx bench --workspace /tmp/mlx-rmsnorm-lab`
 
-That current lab exists to build the pattern, not to claim broad coverage yet. The first target is RMSNorm, and the next likely MLX targets are `layernorm`, `rotary_embedding`, `reduce`, and fused MLP work. The long-term reason to keep it at the top level now is that the same outer workflow should later host Triton/CUDA, ROCm, and ANE labs without inventing a new orchestration tree each time.
+That current lab exists to build the pattern, not to claim broad coverage yet. The current starter-ready MLX targets are:
+
+- `rmsnorm`
+- `layernorm`
+- `rotary_embedding`
+- `reduce`
+- `softmax`
+- `fused_mlp`
+
+`flash_attention` stays explicitly deferred as a first target. The long-term reason to keep the lab at the top level now is that the same outer workflow should later host Triton/CUDA, ROCm, and ANE labs without inventing a new orchestration tree each time.
 
 For the current design and scope, see [docs/kernel-lab.md](docs/kernel-lab.md).
 
@@ -219,10 +228,10 @@ Current project snapshot from [CHANGELOG.md](CHANGELOG.md):
 
 | Metric | Value |
 | --- | --- |
-| Mean autonomy score | `3.42 / 6` |
-| Mean complexity | `7.57 / commit` |
-| Mean score per top-level bullet | `3.49 / 6` |
-| History covered | `35` commits across `12` subsystems |
+| Mean autonomy score | `3.44 / 6` |
+| Mean complexity | `7.64 / commit` |
+| Mean score per top-level bullet | `3.50 / 6` |
+| History covered | `36` commits across `12` subsystems |
 <!-- autonomy-golf-snapshot:end -->
 
 Refresh with:
@@ -237,12 +246,12 @@ python3 tools/render_autonomy_badge.py
 prepare.py            — generic data prep entrypoint with engine dispatch
 train.py              — generic training entrypoint with engine dispatch
 calibrate.py          — one-button platform bring-up calibration
-lab.py                — top-level backend-specific kernel lab entrypoint
+kernel-lab.py                — top-level backend-specific kernel lab entrypoint
 program.md            — generic agent instructions
 autoresearch_mlx/prepare.py        — direct MLX data prep implementation
 autoresearch_mlx/train.py          — direct MLX training implementation
 autoresearch_mlx/     — MLX data/model/optimizer implementation
-autoresearch_mlx/lab.py            — MLX kernel lab CLI implementation
+autoresearch_mlx/kernel-lab.py            — MLX kernel lab CLI implementation
 autoresearch_mlx/lab_workspace.py  — MLX mutable workspace + fixed bench harness
 autoresearch_lab/     — shared kernel-lab boundary
 docs/program-mlx.md        — MLX agent instructions

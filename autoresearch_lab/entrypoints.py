@@ -42,10 +42,9 @@ def dispatch_lab_entrypoint(argv: list[str] | None = None) -> None:
     except KeyError as exc:
         raise SystemExit(f"Unsupported lab/engine combination: lab:{engine}") from exc
     env = os.environ.copy()
-    env["AUTORESEARCH_ENTRYPOINT_PROG"] = "lab.py"
+    env["AUTORESEARCH_ENTRYPOINT_PROG"] = "kernel-lab.py"
     if target_kind == "module":
         argv = [sys.executable, "-m", str(target), *remaining]
     else:
         argv = [sys.executable, str(target), *remaining]
     os.execve(sys.executable, argv, env)
-

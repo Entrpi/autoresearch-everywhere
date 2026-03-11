@@ -4,7 +4,7 @@ The kernel lab is the repo's place for backend-specific kernel work under one to
 
 The current shape is intentionally modest:
 
-- top-level entrypoint: `lab.py`
+- top-level entrypoint: `kernel-lab.py`
 - shared boundary: `autoresearch_lab/`
 - first implementation: MLX under `autoresearch_mlx/`
 - future implementations: Triton/CUDA, ROCm, ANE
@@ -21,25 +21,30 @@ The pattern comes from the same idea behind `autokernel`, but adapted to this re
 List the current MLX targets:
 
 ```bash
-uv run lab.py --engine mlx list-targets
+uv run kernel-lab.py --engine mlx list-targets
 ```
 
 Create a workspace for the starter-ready target:
 
 ```bash
-uv run lab.py --engine mlx init --target rmsnorm --workspace /tmp/mlx-rmsnorm-lab
+uv run kernel-lab.py --engine mlx init --target rmsnorm --workspace /tmp/mlx-rmsnorm-lab
 ```
 
 Run the fixed bench harness against that workspace:
 
 ```bash
-uv run lab.py --engine mlx bench --workspace /tmp/mlx-rmsnorm-lab
+uv run kernel-lab.py --engine mlx bench --workspace /tmp/mlx-rmsnorm-lab
 ```
 
 For now the MLX lab is deliberately narrow:
 
-- `rmsnorm` is the first starter-ready target
-- `layernorm`, `rotary_embedding`, `reduce`, and `fused_mlp` are queued next
+- starter-ready targets:
+  - `rmsnorm`
+  - `layernorm`
+  - `rotary_embedding`
+  - `reduce`
+  - `softmax`
+  - `fused_mlp`
 - `flash_attention` is explicitly deferred as a first target because MLX already has optimized attention primitives and custom backward there is a worse place to start
 
 ## Why A Shared Lab Boundary

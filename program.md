@@ -92,7 +92,7 @@ What to mutate depends on the backend and the task:
   - `tools/calibrate_platform.py`
   - `autoresearch_platform/`
 - Shared kernel-lab work:
-  - `lab.py`
+  - `kernel-lab.py`
   - `autoresearch_lab/`
 - MLX kernel-lab work:
   - `autoresearch_mlx/lab.py`
