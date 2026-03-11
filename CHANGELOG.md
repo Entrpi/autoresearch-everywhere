@@ -29,7 +29,51 @@ On this hardware, the default canonical matched benchmark window for optimizatio
 
 ## Latest
 
-### New commit — lab: Expand MLX starter targets and rename top-level lab entrypoint — score `4` — complexity `10`
+### New commit — lab: Add next MLX training-path starter targets — score `3` — complexity `8`
+
+**AI-identified within brief, human-shaped (3)**
+
+- Extended the MLX kernel lab from generic math kernels into the next set of real training-path kernels: residual blend, residual+RMSNorm, Q/K RMSNorm, RoPE+Q/K fused, logits softcap, and the pointwise activation stage.
+  - Meaning: the MLX lab can now target much more of the actual forward path used by the model, not just isolated norms and generic primitives.
+  - Motivation: after proving the starter pattern on norms, reductions, softmax, and fused MLP, the next useful step was to cover repeated block-local operations that are closer to real training bottlenecks and would still make sense later in Triton/CUDA, ROCm, or ANE labs.
+  - Purpose: make the kernel lab more useful as a real optimization workspace for the training path, while still staying well short of full attention or optimizer-kernel complexity.
+  - Added `residual_blend` for the per-layer `resid_lambda * x + x0_lambda * x0` path.
+  - Added `residual_rmsnorm` to capture the natural fused follow-up to residual blending.
+  - Added `qk_rmsnorm` and `rope_qk_fused` so the lab can now cover the post-RoPE Q/K normalization path directly.
+  - Added `logits_softcap` for the final tanh-based logits clamp and `activation_pointwise` for the squared-ReLU activation stage inside the MLP.
+  - Updated the public kernel-lab docs/catalogs so the visible MLX target set stays aligned with the actual workspace support.
+
+**Grounding**
+
+- Files:
+  - `CHANGELOG.md`
+  - `README.md`
+  - `docs/kernel-lab.md`
+  - `docs/mlx-port-architecture.md`
+  - `autoresearch_mlx/lab_workspace.py`
+- Validation:
+  - `python3 -m py_compile kernel-lab.py autoresearch_lab/*.py autoresearch_mlx/lab.py autoresearch_mlx/lab_workspace.py`
+  - `./.venv/bin/python kernel-lab.py --engine mlx list-targets`
+  - `./.venv/bin/python kernel-lab.py --engine mlx init --target residual_blend --workspace <tmp>`
+  - `./.venv/bin/python kernel-lab.py --engine mlx init --target residual_rmsnorm --workspace <tmp>`
+  - `./.venv/bin/python kernel-lab.py --engine mlx init --target qk_rmsnorm --workspace <tmp>`
+  - `./.venv/bin/python kernel-lab.py --engine mlx init --target rope_qk_fused --workspace <tmp>`
+  - `./.venv/bin/python kernel-lab.py --engine mlx init --target logits_softcap --workspace <tmp>`
+  - `./.venv/bin/python kernel-lab.py --engine mlx init --target activation_pointwise --workspace <tmp>`
+  - `./.venv/bin/python kernel-lab.py --engine mlx bench --workspace <tmp> --quick`
+  - `python3 tools/changelog_scores.py --group-by entry --format csv --include-latest --verify`
+- Measurements:
+  - Quick MLX lab benchmarks for the six new training-path starter targets all completed with `max_abs_error=0.0`:
+    - `residual_blend`: `median_latency_ms=0.545`, `median_throughput_gb_s=14.587`
+    - `residual_rmsnorm`: `median_latency_ms=0.467`, `median_throughput_gb_s=9.826`
+    - `qk_rmsnorm`: `median_latency_ms=1.492`, `median_throughput_gb_s=6.726`
+    - `rope_qk_fused`: `median_latency_ms=2.595`, `median_throughput_gb_s=6.013`
+    - `logits_softcap`: `median_latency_ms=21.573`, `median_throughput_gb_s=9.245`
+    - `activation_pointwise`: `median_latency_ms=1.840`, `median_throughput_gb_s=12.644`
+
+## Committed History
+
+### March 11, 2026 — `b8f91ba` — lab: Expand MLX starter targets and rename top-level lab entrypoint — score `4` — complexity `10`
 
 **Human-directed, AI-shaped (4)**
 
@@ -74,8 +118,6 @@ On this hardware, the default canonical matched benchmark window for optimizatio
     - `reduce`: `median_latency_ms=0.496`, `median_throughput_gb_s=10.955`
     - `softmax`: `median_latency_ms=0.921`, `median_throughput_gb_s=7.015`
     - `fused_mlp`: `median_latency_ms=1.588`, `median_throughput_tflops=2.525`
-
-## Committed History
 
 ### March 11, 2026 — `5592d01` — lab: Add shared kernel-lab boundary and first MLX workspace — score `4` — complexity `7`
 

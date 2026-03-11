@@ -165,6 +165,184 @@ def kernel_fn(x: mx.array) -> mx.array:
 '''
 
 
+RESIDUAL_BLEND_TEMPLATE = '''"""
+Autoresearch MLX kernel lab workspace.
+
+Target: Residual blend
+Mutable file: yes
+
+Replace `kernel_fn` with a faster implementation. The starter path matches the
+repo's per-layer residual blend before each block.
+"""
+
+from __future__ import annotations
+
+import mlx.core as mx
+
+
+KERNEL_TARGET = "residual_blend"
+
+
+def kernel_fn(x: mx.array, x0: mx.array, resid_lambda: float, x0_lambda: float) -> mx.array:
+    return resid_lambda * x + x0_lambda * x0
+'''
+
+
+RESIDUAL_RMSNORM_TEMPLATE = '''"""
+Autoresearch MLX kernel lab workspace.
+
+Target: Residual blend + RMSNorm
+Mutable file: yes
+
+Replace `kernel_fn` with a faster implementation. The starter path matches the
+repo's residual blend followed by RMSNorm.
+"""
+
+from __future__ import annotations
+
+import mlx.core as mx
+
+
+KERNEL_TARGET = "residual_rmsnorm"
+
+
+def kernel_fn(
+    x: mx.array,
+    x0: mx.array,
+    resid_lambda: float,
+    x0_lambda: float,
+    eps: float = 1e-6,
+) -> mx.array:
+    blended = resid_lambda * x + x0_lambda * x0
+    x32 = blended.astype(mx.float32)
+    scale = mx.rsqrt(mx.mean(mx.square(x32), axis=-1, keepdims=True) + eps)
+    return (x32 * scale).astype(blended.dtype)
+'''
+
+
+QK_RMSNORM_TEMPLATE = '''"""
+Autoresearch MLX kernel lab workspace.
+
+Target: Q/K RMSNorm
+Mutable file: yes
+
+Replace `kernel_fn` with a faster implementation. The starter path matches the
+repo's post-RoPE RMSNorm over Q and K.
+"""
+
+from __future__ import annotations
+
+import mlx.core as mx
+
+
+KERNEL_TARGET = "qk_rmsnorm"
+
+
+def _rms_norm(x: mx.array, eps: float = 1e-6) -> mx.array:
+    x32 = x.astype(mx.float32)
+    scale = mx.rsqrt(mx.mean(mx.square(x32), axis=-1, keepdims=True) + eps)
+    return (x32 * scale).astype(x.dtype)
+
+
+def kernel_fn(q: mx.array, k: mx.array, eps: float = 1e-6) -> tuple[mx.array, mx.array]:
+    return _rms_norm(q, eps=eps), _rms_norm(k, eps=eps)
+'''
+
+
+ROPE_QK_FUSED_TEMPLATE = '''"""
+Autoresearch MLX kernel lab workspace.
+
+Target: RoPE + Q/K RMSNorm
+Mutable file: yes
+
+Replace `kernel_fn` with a faster implementation. The starter path matches the
+repo's apply_rotary_emb -> RMSNorm path for Q and K.
+"""
+
+from __future__ import annotations
+
+import mlx.core as mx
+
+
+KERNEL_TARGET = "rope_qk_fused"
+
+
+def _apply_rotary(x: mx.array, cos: mx.array, sin: mx.array) -> mx.array:
+    d = x.shape[-1] // 2
+    x1 = x[..., :d]
+    x2 = x[..., d:]
+    y1 = x1 * cos + x2 * sin
+    y2 = x1 * (-sin) + x2 * cos
+    return mx.concatenate([y1, y2], axis=-1)
+
+
+def _rms_norm(x: mx.array, eps: float = 1e-6) -> mx.array:
+    x32 = x.astype(mx.float32)
+    scale = mx.rsqrt(mx.mean(mx.square(x32), axis=-1, keepdims=True) + eps)
+    return (x32 * scale).astype(x.dtype)
+
+
+def kernel_fn(
+    q: mx.array,
+    k: mx.array,
+    cos: mx.array,
+    sin: mx.array,
+    eps: float = 1e-6,
+) -> tuple[mx.array, mx.array]:
+    q = _apply_rotary(q, cos, sin)
+    k = _apply_rotary(k, cos, sin)
+    return _rms_norm(q, eps=eps), _rms_norm(k, eps=eps)
+'''
+
+
+LOGITS_SOFTCAP_TEMPLATE = '''"""
+Autoresearch MLX kernel lab workspace.
+
+Target: Logits softcap
+Mutable file: yes
+
+Replace `kernel_fn` with a faster implementation. The starter path matches the
+repo's final tanh-based logits softcap.
+"""
+
+from __future__ import annotations
+
+import mlx.core as mx
+
+
+KERNEL_TARGET = "logits_softcap"
+
+
+def kernel_fn(logits: mx.array, softcap: float = 15.0) -> mx.array:
+    x32 = logits.astype(mx.float32)
+    return (softcap * mx.tanh(x32 / softcap)).astype(logits.dtype)
+'''
+
+
+ACTIVATION_POINTWISE_TEMPLATE = '''"""
+Autoresearch MLX kernel lab workspace.
+
+Target: Activation pointwise
+Mutable file: yes
+
+Replace `kernel_fn` with a faster implementation. The starter path matches the
+repo's squared-ReLU activation in the MLP.
+"""
+
+from __future__ import annotations
+
+import mlx.core as mx
+
+
+KERNEL_TARGET = "activation_pointwise"
+
+
+def kernel_fn(x: mx.array) -> mx.array:
+    x32 = x.astype(mx.float32)
+    return mx.square(mx.maximum(x32, 0)).astype(x.dtype)
+'''
+
+
 FUSED_MLP_TEMPLATE = '''"""
 Autoresearch MLX kernel lab workspace.
 
@@ -198,6 +376,10 @@ def _dtype(dtype_name: str):
     raise ValueError(f"Unsupported dtype for MLX lab: {dtype_name}")
 
 
+def _numpy_dtype(dtype_name: str):
+    return np.dtype(np.float16 if dtype_name == "float16" else np.float32)
+
+
 def _throughput_gb_s(bytes_moved: int, latency_ms: float) -> float:
     return bytes_moved / (latency_ms / 1e3) / 1e9
 
@@ -228,7 +410,7 @@ def _rmsnorm_ref(x: mx.array, weight: mx.array, eps: float = 1e-6) -> mx.array:
 
 def _rmsnorm_metric(case: LabCase, latency_ms: float) -> float:
     rows, dim = case.shape
-    itemsize = np.dtype(np.float16 if case.dtype == "float16" else np.float32).itemsize
+    itemsize = _numpy_dtype(case.dtype).itemsize
     return _throughput_gb_s((2 * rows * dim + dim) * itemsize, latency_ms)
 
 
@@ -248,7 +430,7 @@ def _layernorm_ref(x: mx.array, weight: mx.array, bias: mx.array, eps: float = 1
 
 def _layernorm_metric(case: LabCase, latency_ms: float) -> float:
     rows, dim = case.shape
-    itemsize = np.dtype(np.float16 if case.dtype == "float16" else np.float32).itemsize
+    itemsize = _numpy_dtype(case.dtype).itemsize
     return _throughput_gb_s((3 * rows * dim + 2 * dim) * itemsize, latency_ms)
 
 
@@ -273,7 +455,7 @@ def _rotary_ref(x: mx.array, cos: mx.array, sin: mx.array) -> mx.array:
 def _rotary_metric(case: LabCase, latency_ms: float) -> float:
     batch, seq, heads, dim = case.shape
     half = dim // 2
-    itemsize = np.dtype(np.float16 if case.dtype == "float16" else np.float32).itemsize
+    itemsize = _numpy_dtype(case.dtype).itemsize
     bytes_moved = (2 * batch * seq * heads * dim + 2 * seq * half) * itemsize
     return _throughput_gb_s(bytes_moved, latency_ms)
 
@@ -288,7 +470,7 @@ def _reduce_ref(x: mx.array) -> mx.array:
 
 def _reduce_metric(case: LabCase, latency_ms: float) -> float:
     rows, dim = case.shape
-    itemsize = np.dtype(np.float16 if case.dtype == "float16" else np.float32).itemsize
+    itemsize = _numpy_dtype(case.dtype).itemsize
     return _throughput_gb_s((rows * dim + rows) * itemsize, latency_ms)
 
 
@@ -305,7 +487,122 @@ def _softmax_ref(x: mx.array) -> mx.array:
 
 def _softmax_metric(case: LabCase, latency_ms: float) -> float:
     rows, dim = case.shape
-    itemsize = np.dtype(np.float16 if case.dtype == "float16" else np.float32).itemsize
+    itemsize = _numpy_dtype(case.dtype).itemsize
+    return _throughput_gb_s((2 * rows * dim) * itemsize, latency_ms)
+
+
+def _residual_blend_inputs(case: LabCase):
+    rows, dim = case.shape
+    return _mx_array((rows, dim), case.dtype), _mx_array((rows, dim), case.dtype), 1.0, 0.1
+
+
+def _residual_blend_ref(x: mx.array, x0: mx.array, resid_lambda: float, x0_lambda: float) -> mx.array:
+    return resid_lambda * x + x0_lambda * x0
+
+
+def _residual_blend_metric(case: LabCase, latency_ms: float) -> float:
+    rows, dim = case.shape
+    itemsize = _numpy_dtype(case.dtype).itemsize
+    return _throughput_gb_s((3 * rows * dim) * itemsize, latency_ms)
+
+
+def _residual_rmsnorm_inputs(case: LabCase):
+    rows, dim = case.shape
+    return _mx_array((rows, dim), case.dtype), _mx_array((rows, dim), case.dtype), 1.0, 0.1
+
+
+def _residual_rmsnorm_ref(
+    x: mx.array,
+    x0: mx.array,
+    resid_lambda: float,
+    x0_lambda: float,
+    eps: float = 1e-6,
+) -> mx.array:
+    blended = resid_lambda * x + x0_lambda * x0
+    x32 = blended.astype(mx.float32)
+    scale = mx.rsqrt(mx.mean(mx.square(x32), axis=-1, keepdims=True) + eps)
+    return (x32 * scale).astype(blended.dtype)
+
+
+def _residual_rmsnorm_metric(case: LabCase, latency_ms: float) -> float:
+    rows, dim = case.shape
+    itemsize = _numpy_dtype(case.dtype).itemsize
+    return _throughput_gb_s((4 * rows * dim) * itemsize, latency_ms)
+
+
+def _qk_rmsnorm_inputs(case: LabCase):
+    return _mx_array(case.shape, case.dtype), _mx_array(case.shape, case.dtype)
+
+
+def _qk_rmsnorm_ref(q: mx.array, k: mx.array, eps: float = 1e-6) -> tuple[mx.array, mx.array]:
+    return _residual_rmsnorm_ref(q, mx.zeros_like(q), 1.0, 0.0, eps=eps), _residual_rmsnorm_ref(
+        k, mx.zeros_like(k), 1.0, 0.0, eps=eps
+    )
+
+
+def _qk_rmsnorm_metric(case: LabCase, latency_ms: float) -> float:
+    batch, seq, heads, dim = case.shape
+    itemsize = _numpy_dtype(case.dtype).itemsize
+    return _throughput_gb_s((4 * batch * seq * heads * dim) * itemsize, latency_ms)
+
+
+def _rope_qk_inputs(case: LabCase):
+    batch, seq, heads, dim = case.shape
+    q = _mx_array((batch, seq, heads, dim), case.dtype)
+    k = _mx_array((batch, seq, heads, dim), case.dtype)
+    half = dim // 2
+    cos = _mx_array((1, seq, 1, half), case.dtype)
+    sin = _mx_array((1, seq, 1, half), case.dtype)
+    return q, k, cos, sin
+
+
+def _rope_qk_ref(
+    q: mx.array,
+    k: mx.array,
+    cos: mx.array,
+    sin: mx.array,
+    eps: float = 1e-6,
+) -> tuple[mx.array, mx.array]:
+    q = _rotary_ref(q, cos, sin)
+    k = _rotary_ref(k, cos, sin)
+    return _qk_rmsnorm_ref(q, k, eps=eps)
+
+
+def _rope_qk_metric(case: LabCase, latency_ms: float) -> float:
+    batch, seq, heads, dim = case.shape
+    half = dim // 2
+    itemsize = _numpy_dtype(case.dtype).itemsize
+    bytes_moved = (6 * batch * seq * heads * dim + 4 * seq * half) * itemsize
+    return _throughput_gb_s(bytes_moved, latency_ms)
+
+
+def _logits_softcap_inputs(case: LabCase):
+    return (_mx_array(case.shape, case.dtype, scale=2.0),)
+
+
+def _logits_softcap_ref(logits: mx.array, softcap: float = 15.0) -> mx.array:
+    x32 = logits.astype(mx.float32)
+    return (softcap * mx.tanh(x32 / softcap)).astype(logits.dtype)
+
+
+def _logits_softcap_metric(case: LabCase, latency_ms: float) -> float:
+    rows, dim = case.shape
+    itemsize = _numpy_dtype(case.dtype).itemsize
+    return _throughput_gb_s((2 * rows * dim) * itemsize, latency_ms)
+
+
+def _activation_inputs(case: LabCase):
+    return (_mx_array(case.shape, case.dtype, scale=0.2),)
+
+
+def _activation_ref(x: mx.array) -> mx.array:
+    x32 = x.astype(mx.float32)
+    return mx.square(mx.maximum(x32, 0)).astype(x.dtype)
+
+
+def _activation_metric(case: LabCase, latency_ms: float) -> float:
+    rows, dim = case.shape
+    itemsize = _numpy_dtype(case.dtype).itemsize
     return _throughput_gb_s((2 * rows * dim) * itemsize, latency_ms)
 
 
@@ -464,6 +761,150 @@ class MLXKernelLab:
             make_inputs=_softmax_inputs,
             reference=_softmax_ref,
             metric_value=_softmax_metric,
+        ),
+        "residual_blend": TargetSpec(
+            info=LabTarget(
+                key="residual_blend",
+                description="Residual blend kernel lab",
+                metric="throughput_gb_s",
+                status="starter-ready",
+                notes="Matches the repo's per-layer resid/x0 scaling blend.",
+            ),
+            template=RESIDUAL_BLEND_TEMPLATE,
+            tolerance=5e-3,
+            quick_cases=(
+                LabCase((1024, 768), "float16"),
+                LabCase((2048, 768), "float16"),
+            ),
+            full_cases=(
+                LabCase((512, 384), "float16"),
+                LabCase((1024, 768), "float16"),
+                LabCase((2048, 768), "float16"),
+                LabCase((1024, 768), "float32"),
+            ),
+            make_inputs=_residual_blend_inputs,
+            reference=_residual_blend_ref,
+            metric_value=_residual_blend_metric,
+        ),
+        "residual_rmsnorm": TargetSpec(
+            info=LabTarget(
+                key="residual_rmsnorm",
+                description="Residual blend + RMSNorm lab",
+                metric="throughput_gb_s",
+                status="starter-ready",
+                notes="A better training-path target than another standalone norm.",
+            ),
+            template=RESIDUAL_RMSNORM_TEMPLATE,
+            tolerance=5e-3,
+            quick_cases=(
+                LabCase((512, 768), "float16"),
+                LabCase((1024, 768), "float16"),
+            ),
+            full_cases=(
+                LabCase((256, 384), "float16"),
+                LabCase((512, 768), "float16"),
+                LabCase((1024, 768), "float16"),
+                LabCase((512, 768), "float32"),
+            ),
+            make_inputs=_residual_rmsnorm_inputs,
+            reference=_residual_rmsnorm_ref,
+            metric_value=_residual_rmsnorm_metric,
+        ),
+        "qk_rmsnorm": TargetSpec(
+            info=LabTarget(
+                key="qk_rmsnorm",
+                description="Q/K RMSNorm lab",
+                metric="throughput_gb_s",
+                status="starter-ready",
+                notes="Matches the post-RoPE normalization path in attention.",
+            ),
+            template=QK_RMSNORM_TEMPLATE,
+            tolerance=5e-3,
+            quick_cases=(
+                LabCase((2, 512, 8, 64), "float16"),
+                LabCase((4, 1024, 8, 64), "float16"),
+            ),
+            full_cases=(
+                LabCase((1, 256, 8, 64), "float16"),
+                LabCase((2, 512, 8, 64), "float16"),
+                LabCase((4, 1024, 8, 64), "float16"),
+                LabCase((2, 512, 8, 64), "float32"),
+            ),
+            make_inputs=_qk_rmsnorm_inputs,
+            reference=_qk_rmsnorm_ref,
+            metric_value=_qk_rmsnorm_metric,
+        ),
+        "rope_qk_fused": TargetSpec(
+            info=LabTarget(
+                key="rope_qk_fused",
+                description="RoPE + Q/K RMSNorm lab",
+                metric="throughput_gb_s",
+                status="starter-ready",
+                notes="Useful medium-step before any attention-core kernel work.",
+            ),
+            template=ROPE_QK_FUSED_TEMPLATE,
+            tolerance=5e-3,
+            quick_cases=(
+                LabCase((2, 512, 8, 64), "float16"),
+                LabCase((4, 1024, 8, 64), "float16"),
+            ),
+            full_cases=(
+                LabCase((1, 256, 8, 64), "float16"),
+                LabCase((2, 512, 8, 64), "float16"),
+                LabCase((4, 1024, 8, 64), "float16"),
+                LabCase((2, 512, 8, 64), "float32"),
+            ),
+            make_inputs=_rope_qk_inputs,
+            reference=_rope_qk_ref,
+            metric_value=_rope_qk_metric,
+        ),
+        "logits_softcap": TargetSpec(
+            info=LabTarget(
+                key="logits_softcap",
+                description="Logits softcap lab",
+                metric="throughput_gb_s",
+                status="starter-ready",
+                notes="Matches the final tanh-based logits clamp in the model head.",
+            ),
+            template=LOGITS_SOFTCAP_TEMPLATE,
+            tolerance=5e-3,
+            quick_cases=(
+                LabCase((1024, 32768), "float16"),
+                LabCase((2048, 32768), "float16"),
+            ),
+            full_cases=(
+                LabCase((256, 8192), "float16"),
+                LabCase((1024, 32768), "float16"),
+                LabCase((2048, 32768), "float16"),
+                LabCase((1024, 32768), "float32"),
+            ),
+            make_inputs=_logits_softcap_inputs,
+            reference=_logits_softcap_ref,
+            metric_value=_logits_softcap_metric,
+        ),
+        "activation_pointwise": TargetSpec(
+            info=LabTarget(
+                key="activation_pointwise",
+                description="Squared-ReLU activation lab",
+                metric="throughput_gb_s",
+                status="starter-ready",
+                notes="Useful family target if the MLP changes, including SwiGLU experiments.",
+            ),
+            template=ACTIVATION_POINTWISE_TEMPLATE,
+            tolerance=5e-3,
+            quick_cases=(
+                LabCase((1024, 3072), "float16"),
+                LabCase((2048, 4096), "float16"),
+            ),
+            full_cases=(
+                LabCase((256, 1536), "float16"),
+                LabCase((1024, 3072), "float16"),
+                LabCase((2048, 4096), "float16"),
+                LabCase((1024, 3072), "float32"),
+            ),
+            make_inputs=_activation_inputs,
+            reference=_activation_ref,
+            metric_value=_activation_metric,
         ),
         "fused_mlp": TargetSpec(
             info=LabTarget(

@@ -41,6 +41,12 @@ For now the MLX lab is deliberately narrow:
 - starter-ready targets:
   - `rmsnorm`
   - `layernorm`
+  - `residual_blend`
+  - `residual_rmsnorm`
+  - `qk_rmsnorm`
+  - `rope_qk_fused`
+  - `logits_softcap`
+  - `activation_pointwise`
   - `rotary_embedding`
   - `reduce`
   - `softmax`

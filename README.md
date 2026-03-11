@@ -129,6 +129,12 @@ That current lab exists to build the pattern, not to claim broad coverage yet. T
 
 - `rmsnorm`
 - `layernorm`
+- `residual_blend`
+- `residual_rmsnorm`
+- `qk_rmsnorm`
+- `rope_qk_fused`
+- `logits_softcap`
+- `activation_pointwise`
 - `rotary_embedding`
 - `reduce`
 - `softmax`
@@ -228,10 +234,10 @@ Current project snapshot from [CHANGELOG.md](CHANGELOG.md):
 
 | Metric | Value |
 | --- | --- |
-| Mean autonomy score | `3.44 / 6` |
-| Mean complexity | `7.64 / commit` |
-| Mean score per top-level bullet | `3.50 / 6` |
-| History covered | `36` commits across `12` subsystems |
+| Mean autonomy score | `3.42 / 6` |
+| Mean complexity | `7.65 / commit` |
+| Mean score per top-level bullet | `3.49 / 6` |
+| History covered | `37` commits across `12` subsystems |
 <!-- autonomy-golf-snapshot:end -->
 
 Refresh with:

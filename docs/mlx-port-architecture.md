@@ -375,6 +375,12 @@ The current implementation is MLX-first and starter-target-first:
 - starter-ready workspaces:
   - `rmsnorm`
   - `layernorm`
+  - `residual_blend`
+  - `residual_rmsnorm`
+  - `qk_rmsnorm`
+  - `rope_qk_fused`
+  - `logits_softcap`
+  - `activation_pointwise`
   - `rotary_embedding`
   - `reduce`
   - `softmax`
