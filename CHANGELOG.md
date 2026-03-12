@@ -29,7 +29,60 @@ On this hardware, the default canonical matched benchmark window for optimizatio
 
 ## Latest
 
-### New commit — train: rename the M5 preset ladder and retune shipped defaults — score `4` — complexity `9`
+### New commit — lab: add CUDA trace automation and orchestration foundation — score `4` — complexity `10`
+
+**Human-directed, AI-shaped (4)**
+
+- Added the first CUDA trace-first kernel-lab path through Nsight capture, machine-readable trace profiling, automated first-pass review, and trace-backed orchestration, without pretending CUDA workspaces exist yet.
+  - Meaning: the shared kernel-lab boundary now covers a second backend in a substantively different way. MLX remains the deep workspace-first path, while CUDA starts with trace-first commands (`capture`, `trace-profile`, `auto-review`, `evidence`, `orchestrate`, `promotion-check`) because that is where the NVIDIA tooling advantage actually is.
+  - Motivation: MLX proved the kernel-lab workflow, but Apple trace truth is still GUI/manual. CUDA is the backend where the repo can start automating trace review for real, so the next useful proof is scripted trace capture, classification, evidence tracking, and next-step selection rather than rushing straight into Triton workspaces.
+  - Purpose: make real CUDA trace evidence a first-class lab artifact, establish the cross-engine boundary on something operationally meaningful, and ensure later CUDA/Triton workspace work starts from measured bottlenecks instead of guesses.
+  - Extended the shared lab boundary with trace-profile / auto-review result types and capability flags, and registered `--engine cuda` at the top-level `kernel-lab.py` front door.
+  - Added a CUDA target-family catalog plus a new trace-first lab implementation that can capture trainer runs under Nsight Systems, store `.nsys-rep` metadata sidecars, and summarize exported reports into ranked kernel target families.
+  - Added `trace-profile` and `auto-review` commands so CUDA can classify end-to-end runs as launch-bound, sync-bound, copy-bound, kernel-dominated, or mixed, and record that result into the shared ledger as machine-generated evidence.
+  - Added CUDA `evidence` and `promotion-check` so trace-backed targets can now be summarized and gated through the same shared ledger model as MLX, even before CUDA workspaces exist.
+  - Added CUDA `orchestrate` so a trace-profile artifact plus accumulated evidence can now answer “what should we optimize next?” instead of stopping at a passive report.
+  - Updated the user and agent docs to explain the new split: MLX capture remains human-reviewed, while CUDA is now the first backend where the repo aims for automated trace review by default.
+
+**Grounding**
+
+- Files:
+  - `CHANGELOG.md`
+  - `README.md`
+  - `program.md`
+  - `docs/kernel-lab.md`
+  - `docs/mlx-port-architecture.md`
+  - `autoresearch_lab/entrypoints.py`
+  - `autoresearch_lab/labs.py`
+  - `autoresearch_cuda/lab.py`
+  - `autoresearch_cuda/lab_trace.py`
+  - `autoresearch_mlx/lab_workspace.py`
+- Validation:
+  - `python3 -m py_compile autoresearch_lab/labs.py autoresearch_lab/entrypoints.py autoresearch_cuda/lab.py autoresearch_cuda/lab_trace.py autoresearch_mlx/lab_workspace.py`
+  - `./.venv/bin/python kernel-lab.py --list-engines`
+  - `./.venv/bin/python kernel-lab.py --engine cuda list-targets`
+  - `./.venv/bin/python kernel-lab.py --engine cuda capture --preset upstream --time-budget 1 --output /tmp/cuda-trace-foundation`
+  - `./.venv/bin/python kernel-lab.py --engine cuda trace-profile --metadata /tmp/cuda-trace-foundation.metadata.json --output /tmp/cuda-trace-foundation.profile.json`
+  - `./.venv/bin/python kernel-lab.py --engine cuda auto-review --trace-profile /tmp/cuda-trace-foundation.profile.json`
+  - `python3 - <<'PY' ...` to write `/tmp/cuda-trace-sim.profile.json` with a synthetic launch-bound trace-profile fixture
+  - `./.venv/bin/python kernel-lab.py --engine cuda orchestrate --trace-profile /tmp/cuda-trace-sim.profile.json --workspace-root /tmp/cuda-kernel-orch --rank 1`
+  - `./.venv/bin/python kernel-lab.py --engine cuda evidence --target launch_fusion --preset upstream`
+  - `./.venv/bin/python kernel-lab.py --engine cuda promotion-check --target launch_fusion --preset upstream`
+  - `python3 tools/changelog_scores.py --group-by entry --format csv --include-latest --verify`
+- Measurements:
+  - On this machine `nsys` is not installed, so `capture` returns a structured `missing-tool` result instead of crashing.
+  - The downstream CUDA commands degrade cleanly from that state:
+    - `trace-profile -> capture-unavailable`
+    - `auto-review -> insufficient-trace-data`
+  - A synthetic launch-bound trace-profile fixture was enough to exercise the post-capture path:
+    - `orchestrate -> trace-prioritized`
+    - `evidence -> trace-backed`
+    - `promotion-check -> ready-for-cuda-workspace`
+  - The top-level engine list now includes both `mlx` and `cuda`.
+
+## Committed History
+
+### March 12, 2026 — `4be493b` — train: rename the M5 preset ladder and retune shipped defaults — score `4` — complexity `9`
 
 **Human-directed, AI-shaped (4)**
 
@@ -77,8 +130,6 @@ On this hardware, the default canonical matched benchmark window for optimizatio
     - `eval_semantics_signature=896401b41fddf1c4`
     - `runtime_shape_signature=2706200255536d41`
   - No-preset kernel-lab promotion checks now resolve directly from that refreshed calibrated platform default with no preset-translation layer.
-
-## Committed History
 
 ### March 12, 2026 — `2a86f0d` — lab: strengthen MLX integration evidence with repeated and cross-preset A/Bs — score `3` — complexity `7`
 

@@ -1385,6 +1385,8 @@ class MLXKernelLab:
         supports_orchestrate=True,
         supports_verify=True,
         supports_capture=True,
+        supports_trace_profile=False,
+        supports_auto_trace_review=False,
     )
 
     _SPECS: dict[str, TargetSpec] = {

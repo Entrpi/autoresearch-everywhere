@@ -119,7 +119,8 @@ flowchart TD
         L0["kernel-lab.py"]
         L0 --> L1["autoresearch_lab/*"]
         L1 --> L2["MLX lab"]
-        L1 --> L3["future Triton/CUDA lab"]
+        L1 --> L3["CUDA trace lab"]
+        L1 --> L4["future Triton/ROCm/ANE labs"]
         L1 --> L4["future ROCm / ANE lab"]
     end
 
@@ -428,7 +429,7 @@ So the lab is no longer just "one mutable file plus a microbench." It is now a s
 
 That split now also feeds back into orchestration: once a workspace has real verify/capture evidence, the next plan can either treat the target as trace-backed or upgrade it to promotion-ready and reuse the last workspace instead of opening a fresh one. For directly integrated targets, `integration-ab` closes the loop with repeated balanced trainer-side A/B runs, and `integration-suite` carries that evidence onto the calibrated point and a stronger preset. When `--preset` is omitted, those integration checks default to the calibrated platform default for the current device rather than a hand-picked preset. The new `evidence` and `promotion-check` commands expose both preset-local and cross-preset state directly instead of making the user infer it from profile output.
 
-The long-term reason this matters now is not that MLX kernel work is already broad. It is that the repo now has a place where future Triton/CUDA, ROCm, and ANE labs can plug into the same outer workflow instead of growing separate kernel-optimization trees.
+The long-term reason this matters now is not that MLX kernel work is already broad. It is that the repo now has a place where CUDA trace automation already plugs into the same outer workflow, and where future Triton workspaces, ROCm, and ANE labs can grow without inventing separate kernel-optimization trees.
 
 ## Subsystem 7: Optional Local Sweep Tooling
 
@@ -511,5 +512,6 @@ The simplest correct way to think about the current repo is:
 - `eval_telemetry.py` lets ordinary runs strengthen or age that trust
 - `calibrate.py` is the one-button path that turns an unfamiliar machine into a measured default for the rest of the system
 - `kernel-lab.py` is the top-level experimental front door for backend-specific kernel work under a shared outer workflow
+- MLX is the deepest current lab path, but CUDA now has the first automated trace-review and trace-backed orchestration path via Nsight capture, machine-readable trace profiling, auto-review, and ledger-aware promotion checks
 
 That is the current architecture. The port is no longer just an MLX training path. It is an MLX research platform with explicit machine bring-up.

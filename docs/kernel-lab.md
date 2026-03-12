@@ -25,8 +25,9 @@ The current shape is intentionally modest:
 
 - top-level entrypoint: `kernel-lab.py`
 - shared boundary: `autoresearch_lab/`
-- first implementation: MLX under `autoresearch_mlx/`
-- future implementations: Triton/CUDA, ROCm, ANE
+- first deep implementation: MLX under `autoresearch_mlx/`
+- first non-MLX expansion: CUDA trace automation under `autoresearch_cuda/`
+- future implementations: Triton workspaces on CUDA, ROCm, ANE
 
 The pattern comes from the same idea behind `autokernel`, but adapted to this repo:
 
@@ -175,9 +176,61 @@ Once `integration-ab` has run, the ledger can now distinguish:
 
 So promotion is no longer “trace-backed forever.” It can advance, stall, or back off based on repeated trainer-side A/B evidence with pair counts, cross-preset coverage, and relative effect sizes, not just one baseline/candidate pair.
 
+## CUDA Trace Automation
+
+CUDA now has the first trace-first kernel-lab path, even though it does not yet have Triton workspaces.
+
+The point of this first CUDA slice is different from the MLX slice:
+
+- MLX proves the end-to-end lab workflow, but its serious trace tooling is still GUI/manual
+- CUDA is where the repo can start automating trace review in earnest
+
+So the first CUDA lab commands are:
+
+```bash
+uv run kernel-lab.py --engine cuda list-targets
+uv run kernel-lab.py --engine cuda capture --preset upstream --time-budget 20 --output /tmp/cuda-upstream-trace
+uv run kernel-lab.py --engine cuda trace-profile --metadata /tmp/cuda-upstream-trace.metadata.json --output /tmp/cuda-upstream-trace.profile.json
+uv run kernel-lab.py --engine cuda auto-review --trace-profile /tmp/cuda-upstream-trace.profile.json
+uv run kernel-lab.py --engine cuda evidence --target launch_fusion --preset upstream
+uv run kernel-lab.py --engine cuda orchestrate --trace-profile /tmp/cuda-upstream-trace.profile.json --workspace-root /tmp/cuda-lab
+uv run kernel-lab.py --engine cuda promotion-check --target launch_fusion --preset upstream
+```
+
+That flow currently does seven things:
+
+- `capture`
+  - runs the real CUDA trainer under Nsight Systems
+  - writes a `.nsys-rep`
+  - writes a metadata sidecar that records the trainer command, tool versions, and report artifacts
+- `trace-profile`
+  - parses the machine-readable Nsight report exports
+  - groups kernel names into target families such as `flash_attention`, `fused_mlp`, `norm`, `data_movement`, or `launch_fusion`
+  - ranks them by observed time share plus simple bottleneck-aware heuristics
+- `auto-review`
+  - classifies the run as `launch-bound`, `sync-bound`, `copy-bound`, `kernel-dominated`, or `mixed`
+  - records that judgment into the shared ledger as machine-generated evidence
+- `evidence`
+  - summarizes what the ledger currently knows about one CUDA target on one preset
+  - exposes whether trace review is still thin, already trace-backed, or currently deprioritized
+- `orchestrate`
+  - consumes a trace-profile artifact plus accumulated evidence
+  - picks the next CUDA target family to pursue, even though backend-specific workspaces do not exist yet
+- `promotion-check`
+  - tells you whether a target still needs capture, needs structured trace review, is trace-backed enough to justify future CUDA/Triton workspace work, or is currently deprioritized
+
+If Nsight is not installed, the CUDA commands still emit structured metadata and explicit fallback statuses (`missing-tool`, `capture-unavailable`, `insufficient-trace-data`) instead of failing as an opaque shell error. That makes it possible to keep the outer workflow stable across developer machines that do not yet have NVIDIA tooling installed.
+
+This is the inverse of the MLX constraint:
+
+- on MLX, capture is scriptable but serious review is still mostly manual
+- on CUDA, the long-term goal is for capture and first-pass review to be scriptable by default, with Nsight GUI inspection as the escalation path
+
+That is why the current CUDA lab starts from traceability rather than from Triton workspaces. The first thing worth proving on NVIDIA is that the repo can discover and classify real kernel opportunities automatically before it starts minting backend-specific workspaces.
+
 ## Heuristic Layer vs Trace Layer
 
-The current MLX lab deliberately uses two different kinds of evidence.
+The current MLX lab deliberately uses two different kinds of evidence, and CUDA is starting from the trace-heavy half of that split.
 
 The heuristic layer is:
 
@@ -194,13 +247,17 @@ Use it constantly. It is fast, cheap, and good at deciding what to try next.
 The trace layer is:
 
 - `capture`
-- `review-trace`
+- `review-trace` on MLX
+- `trace-profile` and `auto-review` on CUDA
 - Xcode Metal Debugger
 - Metal System Trace / GPU counters once a capture is open
+- Nsight Systems, and later Nsight Compute, on CUDA
 
 Use it when a target stops being "interesting" and starts being "worth believing."
 
-`review-trace` is the bridge between the Xcode-facing world and the orchestration loop. It records whether the captured target looked `high`, `medium`, `low`, or `none` in end-to-end relevance, so later profiles can both boost and demote targets instead of only rewarding the existence of a capture.
+On MLX, `review-trace` is the bridge between the Xcode-facing world and the orchestration loop. It records whether the captured target looked `high`, `medium`, `low`, or `none` in end-to-end relevance, so later profiles can both boost and demote targets instead of only rewarding the existence of a capture.
+
+On CUDA, the analogous bridge is now `trace-profile` plus `auto-review`, with `evidence`, `orchestrate`, and `promotion-check` layered on top. The trace is captured from a real trainer run, summarized into target families automatically, classified into a bottleneck mode, and then fed back into the same “what should we optimize next?” loop before the repo asks a human to look at a GUI.
 
 The rule of thumb is:
 

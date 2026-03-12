@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import os
 import platform
+import shutil
 import sys
 
 from .labs import available_labs
@@ -11,6 +12,7 @@ from .labs import available_labs
 ENTRYPOINT_TARGETS = {
     "lab": {
         "mlx": ("module", "autoresearch_mlx.lab"),
+        "cuda": ("module", "autoresearch_cuda.lab"),
     },
 }
 
@@ -18,7 +20,9 @@ ENTRYPOINT_TARGETS = {
 def detect_default_lab() -> str:
     if sys.platform == "darwin" and platform.machine() in {"arm64", "aarch64"}:
         return "mlx"
-    raise SystemExit("Unable to infer a default lab backend. Pass --engine mlx.")
+    if shutil.which("nvidia-smi"):
+        return "cuda"
+    raise SystemExit("Unable to infer a default lab backend. Pass --engine mlx or --engine cuda.")
 
 
 def _parse_entrypoint_args(argv: list[str]) -> tuple[str, list[str], bool]:

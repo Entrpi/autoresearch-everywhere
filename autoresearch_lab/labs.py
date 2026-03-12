@@ -14,6 +14,8 @@ class LabCapabilities:
     supports_orchestrate: bool
     supports_verify: bool
     supports_capture: bool
+    supports_trace_profile: bool
+    supports_auto_trace_review: bool
 
 
 @dataclass(frozen=True)
@@ -113,6 +115,42 @@ class LabTraceResult:
 
 
 @dataclass(frozen=True)
+class LabTraceProfileCandidate:
+    target: str
+    rank: int
+    priority_score: float
+    time_share_pct: float | None
+    category: str
+    status: str
+    rationale: str
+    details: dict[str, Any]
+
+
+@dataclass(frozen=True)
+class LabTraceProfileResult:
+    engine: str
+    backend_family: str
+    preset: str
+    status: str
+    trace_path: str | None
+    wall_seconds: float
+    dominant_issue: str | None
+    candidates: tuple[LabTraceProfileCandidate, ...]
+    details: dict[str, Any]
+
+
+@dataclass(frozen=True)
+class LabAutoTraceReviewResult:
+    engine: str
+    backend_family: str
+    preset: str
+    status: str
+    dominant_issue: str | None
+    confidence: float | None
+    details: dict[str, Any]
+
+
+@dataclass(frozen=True)
 class LabIntegrationABResult:
     engine: str
     backend_family: str
@@ -174,6 +212,12 @@ class KernelLab(Protocol):
     def capture_workspace(self, *, workspace: Path, output: Path, quick: bool = False) -> LabTraceResult:
         ...
 
+    def trace_profile(self, *, metadata_path: Path) -> LabTraceProfileResult:
+        ...
+
+    def auto_review_trace(self, *, trace_profile_path: Path) -> LabAutoTraceReviewResult:
+        ...
+
     def summarize_evidence(self, *, target: str, preset: str | None = None) -> LabEvidenceResult:
         ...
 
@@ -207,7 +251,7 @@ class KernelLab(Protocol):
 
 
 def available_labs() -> tuple[str, ...]:
-    return ("mlx",)
+    return ("mlx", "cuda")
 
 
 def get_lab(name: str) -> KernelLab:
@@ -215,4 +259,8 @@ def get_lab(name: str) -> KernelLab:
         from autoresearch_mlx.lab_workspace import MLXKernelLab
 
         return MLXKernelLab()
+    if name == "cuda":
+        from autoresearch_cuda.lab_trace import CudaKernelLab
+
+        return CudaKernelLab()
     raise ValueError(f"Unknown lab engine: {name}")

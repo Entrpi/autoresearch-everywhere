@@ -137,7 +137,7 @@ That workflow is meant to generalize across backends even though the kernel subs
 
 If you already know tools like CUTLASS or Triton, the easiest framing is: those are implementation substrates; kernel-lab is the workflow layer above them that decides which kernel opportunities are worth pursuing, how they are benchmarked, how trace evidence is collected, and what it takes to promote them into the actual training engine.
 
-Today the lab is intentionally narrow and MLX-first:
+Today the lab is still MLX-deep first, but CUDA now has the first trace-first automation path:
 
 - `uv run kernel-lab.py --engine mlx list-targets`
 - `uv run kernel-lab.py --engine mlx profile --preset m5-balanced --top-k 8 --output /tmp/mlx-profile.json`
@@ -151,6 +151,16 @@ Today the lab is intentionally narrow and MLX-first:
 - `uv run kernel-lab.py --engine mlx review-trace --workspace /tmp/mlx-rmsnorm-lab --metadata /tmp/mlx-rmsnorm-lab.metadata.json --relevance high`
 - `uv run kernel-lab.py --engine mlx integration-ab --workspace /tmp/mlx-rmsnorm-lab --time-budget 20 --benchmark-skip-eval --no-checkpoint`
 
+CUDA now has the first trace-first automation path too:
+
+- `uv run kernel-lab.py --engine cuda list-targets`
+- `uv run kernel-lab.py --engine cuda capture --preset upstream --time-budget 20 --output /tmp/cuda-upstream-trace`
+- `uv run kernel-lab.py --engine cuda trace-profile --metadata /tmp/cuda-upstream-trace.metadata.json --output /tmp/cuda-upstream-trace.profile.json`
+- `uv run kernel-lab.py --engine cuda auto-review --trace-profile /tmp/cuda-upstream-trace.profile.json`
+- `uv run kernel-lab.py --engine cuda evidence --target launch_fusion --preset upstream`
+- `uv run kernel-lab.py --engine cuda orchestrate --trace-profile /tmp/cuda-upstream-trace.profile.json --workspace-root /tmp/cuda-lab`
+- `uv run kernel-lab.py --engine cuda promotion-check --target launch_fusion --preset upstream`
+
 The lab now has two layers on purpose:
 
 - heuristic layer:
@@ -162,6 +172,15 @@ The lab now has two layers on purpose:
   - `capture` records a real MLX Metal trace and a metadata sidecar
   - the `.gputrace` artifact is the truth source when a candidate starts making performance claims instead of just being an interesting idea
   - `orchestrate --trace-metadata ...` can fold a real capture back into the next suggested workflow
+
+For CUDA, the split is similar but the trace side is more automatable:
+
+- `capture` wraps the real trainer under Nsight Systems and writes a `.nsys-rep` plus a metadata sidecar
+- `trace-profile` turns the exported Nsight reports into ranked kernel target families
+- `auto-review` classifies the run as launch-bound, sync-bound, copy-bound, kernel-dominated, or mixed
+- `evidence` and `promotion-check` expose whether a target is still just trace-ranked, already trace-backed, or deprioritized by the automated review
+- `orchestrate` now consumes the trace profile plus accumulated evidence to pick the next CUDA target family to pursue, even though backend-specific workspaces are still deferred
+- the long-term goal is that CUDA trace review becomes automated-by-default, with GUI inspection as the escalation path rather than the first step
 
 The lab also keeps a small evidence ledger at `results/kernel_lab/ledger.jsonl`. That lets later profiles and plans see whether a target is still unexplored, only verified, trace-backed, or ready for an integration A/B instead of treating every target as a fresh idea.
 
@@ -312,10 +331,10 @@ Current project snapshot from [CHANGELOG.md](CHANGELOG.md):
 
 | Metric | Value |
 | --- | --- |
-| Mean autonomy score | `3.39 / 6` |
-| Mean complexity | `7.36 / commit` |
-| Mean score per top-level bullet | `3.45 / 6` |
-| History covered | `50` commits across `12` subsystems |
+| Mean autonomy score | `3.41 / 6` |
+| Mean complexity | `7.41 / commit` |
+| Mean score per top-level bullet | `3.46 / 6` |
+| History covered | `51` commits across `12` subsystems |
 <!-- autonomy-golf-snapshot:end -->
 
 Refresh with:
