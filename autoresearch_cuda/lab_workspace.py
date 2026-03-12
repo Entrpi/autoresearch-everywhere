@@ -542,16 +542,78 @@ Autoresearch CUDA kernel lab workspace.
 Target: Attention prelude
 Mutable file: yes
 
-Replace `kernel_fn` with a faster Triton/CUDA implementation once the reference
-path is working.
+This starter target ships with an optional Triton pointwise gate-application
+implementation inside the broader attention staging path and falls back to the
+reference path when Triton or CUDA is unavailable. The Q/K/V projection matmuls
+still use the reference path.
 """
 
 from __future__ import annotations
 
 import torch
 
+try:
+    import triton
+    import triton.language as tl
+except Exception:  # pragma: no cover - workspace fallback path
+    triton = None
+    tl = None
+
 
 KERNEL_TARGET = "attention_prelude"
+WORKSPACE_IMPL = "triton-optional"
+
+if triton is not None:
+
+    @triton.jit
+    def _attention_gate_kernel(
+        v_ptr,
+        ve_ptr,
+        gate_ptr,
+        output_ptr,
+        n_elements,
+        head_dim,
+        BLOCK_SIZE: tl.constexpr,
+    ):
+        pid = tl.program_id(axis=0)
+        offsets = pid * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+        mask = offsets < n_elements
+        gate_offsets = offsets // head_dim
+        v = tl.load(v_ptr + offsets, mask=mask).to(tl.float32)
+        ve = tl.load(ve_ptr + offsets, mask=mask).to(tl.float32)
+        gate = tl.load(gate_ptr + gate_offsets, mask=mask).to(tl.float32)
+        output = v + gate * ve
+        tl.store(output_ptr + offsets, output, mask=mask)
+
+
+def _attention_gate_triton(
+    gate_input: torch.Tensor,
+    v: torch.Tensor,
+    ve: torch.Tensor,
+    ve_gate_weight: torch.Tensor,
+) -> torch.Tensor:
+    gate = 2 * torch.sigmoid(torch.matmul(gate_input, ve_gate_weight))
+    v_contig = v.contiguous()
+    ve_contig = ve.contiguous()
+    gate_contig = gate.contiguous()
+    output = torch.empty_like(v_contig)
+    v_flat = v_contig.view(-1)
+    ve_flat = ve_contig.view(-1)
+    output_flat = output.view(-1)
+    gate_flat = gate_contig.view(-1)
+    n_elements = output_flat.numel()
+    head_dim = v_contig.shape[-1]
+    grid = lambda meta: (triton.cdiv(n_elements, meta["BLOCK_SIZE"]),)
+    _attention_gate_kernel[grid](
+        v_flat,
+        ve_flat,
+        gate_flat,
+        output_flat,
+        n_elements,
+        head_dim,
+        BLOCK_SIZE=1024,
+    )
+    return output
 
 
 def kernel_fn(
@@ -571,8 +633,20 @@ def kernel_fn(
     v = torch.matmul(x, wv).view(bsz, seqlen, n_head, head_dim)
     if ve is not None and ve_gate_weight is not None:
         ve_view = ve.view(bsz, seqlen, n_head, head_dim)
-        gate = 2 * torch.sigmoid(torch.matmul(x[..., :ve_gate_channels], ve_gate_weight))
-        v = v + gate.unsqueeze(-1) * ve_view
+        gate_input = x[..., :ve_gate_channels]
+        if (
+            triton is not None
+            and gate_input.is_cuda
+            and v.is_cuda
+            and ve_view.is_cuda
+            and ve_gate_weight.is_cuda
+            and v.is_contiguous()
+            and ve_view.is_contiguous()
+        ):
+            v = _attention_gate_triton(gate_input, v, ve_view, ve_gate_weight)
+        else:
+            gate = 2 * torch.sigmoid(torch.matmul(gate_input, ve_gate_weight))
+            v = v + gate.unsqueeze(-1) * ve_view
     return q, k, v
 '''
 
@@ -1507,7 +1581,7 @@ def init_cuda_workspace(*, target: str, workspace: Path, profile_context: dict[s
             "metric": "throughput_gb_s",
             "workspace_impl": (
                 "triton-optional"
-                if target in {"launch_fusion", "norm", "loss_prelude", "logits_softcap", "value_embed_gate", "rope_qk_fused", "fused_mlp", "data_movement", "matmul_epilogue"}
+                if target in {"launch_fusion", "norm", "loss_prelude", "logits_softcap", "value_embed_gate", "rope_qk_fused", "fused_mlp", "data_movement", "matmul_epilogue", "attention_prelude"}
                 else "reference"
             ),
             "profile_context": profile_context or {},

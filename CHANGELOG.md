@@ -29,7 +29,38 @@ On this hardware, the default canonical matched benchmark window for optimizatio
 
 ## Latest
 
-### New commit — lab: add Triton-backed CUDA fused MLP workspace — score `3` — complexity `5`
+### New commit — lab: add Triton-backed CUDA attention prelude workspace — score `3` — complexity `5`
+
+**AI-identified within brief, human-shaped (3)**
+
+- Promote `attention_prelude` from a reference-first CUDA target into a Triton-optional starter workspace.
+  - Meaning: `attention_prelude` no longer stops at the pure reference path. It now has a real optional Triton pointwise implementation for the value-embed gate-application stage inside the broader Q/K/V staging path, while keeping the existing fixed starter harness and reference projection path.
+  - Motivation: after the pointwise, RoPE-side, loss-side, and MLP-side Triton slices, the next practical step was the broader attention staging seam. The honest first cut is the repeated gate-application subpath, not a fake full Triton rewrite of the whole attention-prelude stack.
+  - Purpose: keep extending Triton support incrementally with honest starter workspaces that accelerate real repeated seams inside larger block-local paths without overselling full attention-side coverage.
+  - Extending `/Users/ent/Codex/autoresearch/autoresearch_cuda/lab_workspace.py` with an optional Triton gate-application kernel and marking `attention_prelude` as `triton-optional`.
+  - Updating `/Users/ent/Codex/autoresearch/autoresearch_cuda/lab_trace.py`, `README.md`, and `docs/kernel-lab.md` so the CUDA starter catalog now reports `attention_prelude` as part of the Triton-backed slice.
+
+**Grounding**
+
+- Files:
+  - `CHANGELOG.md`
+  - `README.md`
+  - `docs/kernel-lab.md`
+  - `autoresearch_cuda/lab_trace.py`
+  - `autoresearch_cuda/lab_workspace.py`
+- Validation:
+  - `python3 -m py_compile autoresearch_cuda/lab_trace.py autoresearch_cuda/lab_workspace.py`
+  - `./.venv/bin/python kernel-lab.py --engine cuda init --target attention_prelude --workspace /tmp/cuda-triton-attention-prelude`
+  - `python3 -m py_compile /tmp/cuda-triton-attention-prelude/kernel.py`
+  - `./.venv/bin/python kernel-lab.py --engine cuda bench --workspace /tmp/cuda-triton-attention-prelude --quick`
+  - `./.venv/bin/python kernel-lab.py --engine cuda verify --workspace /tmp/cuda-triton-attention-prelude --quick`
+  - `python3 tools/changelog_scores.py --group-by entry --format csv --include-latest --verify`
+- Measurements:
+  - On this Apple machine, the new Triton-optional starter workspace still degrades cleanly to `missing-runtime` because PyTorch/CUDA are unavailable.
+
+## Committed History
+
+### March 12, 2026 — `bbc9a01` — lab: add Triton-backed CUDA fused MLP workspace — score `3` — complexity `5`
 
 **AI-identified within brief, human-shaped (3)**
 
@@ -58,7 +89,34 @@ On this hardware, the default canonical matched benchmark window for optimizatio
 - Measurements:
   - On this Apple machine, the new Triton-optional starter workspace still degrades cleanly to `missing-runtime` because PyTorch/CUDA are unavailable.
 
-## Committed History
+### March 12, 2026 — `998f752` — lab: add Triton-backed CUDA loss prelude workspace — score `3` — complexity `5`
+
+**AI-identified within brief, human-shaped (3)**
+
+- Promote `loss_prelude` from a reference-first CUDA target into a Triton-optional starter workspace.
+  - Meaning: `loss_prelude` no longer stops at the pure reference path. It now has a real optional Triton row-wise implementation for the softcapped cross-entropy-prelude path, while keeping the existing fixed starter harness.
+  - Motivation: after the narrower pointwise and RoPE-side Triton targets, the next practical step was a loss-side row kernel that is still trace-visible and benchmarkable without pretending the whole logits/loss stack is already fused.
+  - Purpose: keep extending Triton support incrementally with honest starter workspaces that match the real scope of what has been optimized so far.
+  - Extending `/Users/ent/Codex/autoresearch/autoresearch_cuda/lab_workspace.py` with an optional Triton row-wise cross-entropy-prelude kernel and marking `loss_prelude` as `triton-optional`.
+  - Updating `/Users/ent/Codex/autoresearch/autoresearch_cuda/lab_trace.py`, `README.md`, and `docs/kernel-lab.md` so the CUDA starter catalog now reports `loss_prelude` as part of the Triton-backed slice.
+
+**Grounding**
+
+- Files:
+  - `CHANGELOG.md`
+  - `README.md`
+  - `docs/kernel-lab.md`
+  - `autoresearch_cuda/lab_trace.py`
+  - `autoresearch_cuda/lab_workspace.py`
+- Validation:
+  - `python3 -m py_compile autoresearch_cuda/lab_trace.py autoresearch_cuda/lab_workspace.py`
+  - `./.venv/bin/python kernel-lab.py --engine cuda init --target loss_prelude --workspace /tmp/cuda-triton-loss-prelude`
+  - `python3 -m py_compile /tmp/cuda-triton-loss-prelude/kernel.py`
+  - `./.venv/bin/python kernel-lab.py --engine cuda bench --workspace /tmp/cuda-triton-loss-prelude --quick`
+  - `./.venv/bin/python kernel-lab.py --engine cuda verify --workspace /tmp/cuda-triton-loss-prelude --quick`
+  - `python3 tools/changelog_scores.py --group-by entry --format csv --include-latest --verify`
+- Measurements:
+  - On this Apple machine, the new Triton-optional starter workspace still degrades cleanly to `missing-runtime` because PyTorch/CUDA are unavailable.
 
 ### March 12, 2026 — `602b2f8` — lab: add Triton-backed CUDA rope/QK starter workspace — score `3` — complexity `5`
 

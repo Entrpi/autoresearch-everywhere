@@ -67,7 +67,7 @@ CUDA_TRACE_TARGETS: dict[str, LabTarget] = {
         description="Attention setup, masking, softmax-adjacent, and Q/K/V staging work",
         metric="time_share_pct",
         status="starter-ready",
-        notes="Starter-ready fixed workspace harness exists for Q/K/V staging and norm-prelude work.",
+        notes="Starter-ready fixed workspace harness exists for Q/K/V staging and norm-prelude work, with a first optional Triton gate-application implementation inside attention staging.",
     ),
     "value_embed_gate": LabTarget(
         key="value_embed_gate",
