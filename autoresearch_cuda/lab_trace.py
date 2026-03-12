@@ -81,7 +81,7 @@ CUDA_TRACE_TARGETS: dict[str, LabTarget] = {
         description="RMSNorm / LayerNorm family kernels",
         metric="time_share_pct",
         status="starter-ready",
-        notes="Starter-ready fixed workspace harness exists.",
+        notes="Starter-ready fixed workspace harness exists, with a first optional Triton RMSNorm implementation.",
     ),
     "fused_mlp": LabTarget(
         key="fused_mlp",
@@ -122,7 +122,7 @@ CUDA_TRACE_TARGETS: dict[str, LabTarget] = {
         description="Launch-bound regions where fusion or batching may matter more than a single kernel rewrite",
         metric="time_share_pct",
         status="starter-ready",
-        notes="Starter-ready fused pointwise workspace exists; use traces to validate that launch pressure is real.",
+        notes="Starter-ready fused pointwise workspace exists, with a first optional Triton residual-add kernel; use traces to validate that launch pressure is real.",
     ),
 }
 

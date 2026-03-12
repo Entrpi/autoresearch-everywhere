@@ -30,17 +30,68 @@ Autoresearch CUDA kernel lab workspace.
 Target: Launch fusion
 Mutable file: yes
 
-This starter target represents a launch-bound residual-add region. Replace
-`kernel_fn` with a fused Triton/CUDA implementation once the reference path is
-working.
+This starter target represents a launch-bound residual-add region. It ships
+with an optional Triton implementation and falls back to the reference path
+when Triton or CUDA is unavailable.
 """
 
 from __future__ import annotations
 
+import torch
+
+try:
+    import triton
+    import triton.language as tl
+except Exception:  # pragma: no cover - workspace fallback path
+    triton = None
+    tl = None
+
 KERNEL_TARGET = "launch_fusion"
+WORKSPACE_IMPL = "triton-optional"
+
+if triton is not None:
+
+    @triton.jit
+    def _launch_fusion_kernel(
+        residual_ptr,
+        update_ptr,
+        output_ptr,
+        n_elements,
+        BLOCK_SIZE: tl.constexpr,
+    ):
+        pid = tl.program_id(axis=0)
+        offsets = pid * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+        mask = offsets < n_elements
+        residual = tl.load(residual_ptr + offsets, mask=mask)
+        update = tl.load(update_ptr + offsets, mask=mask)
+        tl.store(output_ptr + offsets, residual + update, mask=mask)
+
+
+def _launch_fusion_triton(residual: torch.Tensor, update: torch.Tensor) -> torch.Tensor:
+    residual_flat = residual.contiguous().view(-1)
+    update_flat = update.contiguous().view(-1)
+    output_flat = torch.empty_like(residual_flat)
+    n_elements = output_flat.numel()
+    grid = lambda meta: (triton.cdiv(n_elements, meta["BLOCK_SIZE"]),)
+    _launch_fusion_kernel[grid](
+        residual_flat,
+        update_flat,
+        output_flat,
+        n_elements,
+        BLOCK_SIZE=1024,
+    )
+    return output_flat.view_as(residual)
 
 
 def kernel_fn(residual: torch.Tensor, update: torch.Tensor) -> torch.Tensor:
+    if (
+        triton is not None
+        and residual.is_cuda
+        and update.is_cuda
+        and residual.is_contiguous()
+        and update.is_contiguous()
+    ):
+        return _launch_fusion_triton(residual, update)
     return residual + update
 '''
 
@@ -51,19 +102,73 @@ Autoresearch CUDA kernel lab workspace.
 Target: RMSNorm
 Mutable file: yes
 
-Replace `kernel_fn` with a faster Triton/CUDA implementation once the reference
-path is working.
+This starter target ships with an optional Triton row-wise RMSNorm
+implementation and falls back to the reference path when Triton or CUDA is
+unavailable.
 """
 
 from __future__ import annotations
 
 import torch
 
+try:
+    import triton
+    import triton.language as tl
+except Exception:  # pragma: no cover - workspace fallback path
+    triton = None
+    tl = None
+
 
 KERNEL_TARGET = "norm"
+WORKSPACE_IMPL = "triton-optional"
+
+if triton is not None:
+
+    @triton.jit
+    def _rmsnorm_kernel(
+        x_ptr,
+        weight_ptr,
+        output_ptr,
+        stride_row,
+        n_cols,
+        eps,
+        BLOCK_SIZE: tl.constexpr,
+    ):
+        row_idx = tl.program_id(axis=0)
+        offsets = tl.arange(0, BLOCK_SIZE)
+        mask = offsets < n_cols
+        x = tl.load(x_ptr + row_idx * stride_row + offsets, mask=mask, other=0.0).to(tl.float32)
+        weight = tl.load(weight_ptr + offsets, mask=mask, other=0.0).to(tl.float32)
+        mean_square = tl.sum(x * x, axis=0) / n_cols
+        inv_rms = tl.rsqrt(mean_square + eps)
+        y = x * inv_rms * weight
+        tl.store(output_ptr + row_idx * stride_row + offsets, y, mask=mask)
+
+
+def _rmsnorm_triton(x: torch.Tensor, weight: torch.Tensor, eps: float = 1e-6) -> torch.Tensor:
+    x_contig = x.contiguous()
+    rows = x_contig.numel() // x_contig.shape[-1]
+    n_cols = x_contig.shape[-1]
+    x_2d = x_contig.view(rows, n_cols)
+    output = torch.empty_like(x_2d)
+    block_size = min(4096, triton.next_power_of_2(n_cols))
+    num_warps = 4 if block_size <= 1024 else 8
+    _rmsnorm_kernel[(rows,)](
+        x_2d,
+        weight.contiguous(),
+        output,
+        x_2d.stride(0),
+        n_cols,
+        eps,
+        BLOCK_SIZE=block_size,
+        num_warps=num_warps,
+    )
+    return output.view_as(x_contig)
 
 
 def kernel_fn(x: torch.Tensor, weight: torch.Tensor, eps: float = 1e-6) -> torch.Tensor:
+    if triton is not None and x.is_cuda and weight.is_cuda and x.is_contiguous() and weight.is_contiguous():
+        return _rmsnorm_triton(x, weight, eps=eps)
     x32 = x.float()
     scale = torch.rsqrt(torch.mean(x32.square(), dim=-1, keepdim=True) + eps)
     return (x32 * scale * weight.float()).to(dtype=x.dtype)
@@ -798,6 +903,7 @@ def _run_workspace_harness(
             "max_abs_error": max_abs_error,
             "tolerance": spec.tolerance,
             "median_latency_ms": median_latency_ms,
+            "workspace_impl": getattr(module, "WORKSPACE_IMPL", "reference"),
         },
     )
     append_lab_event(
@@ -831,6 +937,7 @@ def init_cuda_workspace(*, target: str, workspace: Path, profile_context: dict[s
             "target": target,
             "status": "starter-ready",
             "metric": "throughput_gb_s",
+            "workspace_impl": "triton-optional" if target in {"launch_fusion", "norm"} else "reference",
             "profile_context": profile_context or {},
         },
     )

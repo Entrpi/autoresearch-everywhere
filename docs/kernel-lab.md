@@ -245,6 +245,12 @@ Starter CUDA workspaces currently exist for:
 - `rope_qk_fused`
 - `fused_mlp`
 
+The first Triton-backed CUDA workspace slice is intentionally narrow:
+
+- `launch_fusion` now ships with an optional Triton residual-add kernel
+- `norm` now ships with an optional Triton RMSNorm kernel
+- the rest of the CUDA starter catalog is still reference-first, so the CUDA substrate can grow incrementally instead of pretending every starter target is already Triton-native
+
 `norm`, `loss_prelude`, `matmul_epilogue`, `fused_mlp`, `attention_prelude`, `rope_qk_fused`, `launch_fusion`, and `data_movement` currently have direct CUDA trainer-side hooks. They are the CUDA targets that can now move past workspace-local evidence into real `integration-ab` and `integration-suite` runs.
 
 The intended first CUDA trainer-side loop is:

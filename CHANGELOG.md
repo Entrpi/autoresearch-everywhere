@@ -29,7 +29,40 @@ On this hardware, the default canonical matched benchmark window for optimizatio
 
 ## Latest
 
-### New commit — lab: make CUDA deeper diagnosis shape ranking and promotion — score `3` — complexity `6`
+### New commit — lab: start Triton-backed CUDA starter workspaces — score `3` — complexity `5`
+
+**AI-identified within brief, human-shaped (3)**
+
+- Added the first real Triton-backed CUDA workspace implementations, but kept the slice intentionally narrow so the existing fixed harness and trace-first CUDA workflow stay honest.
+  - Meaning: the CUDA lab is no longer only a reference starter-harness plus trace automation story. Two starter-ready families, `launch_fusion` and `norm`, now ship generated workspaces that can use Triton on real NVIDIA machines while still falling back cleanly to the reference path elsewhere.
+  - Motivation: the next useful CUDA-lab proof after trace-first orchestration and deeper diagnosis was to show that the lab can host real backend-specific kernel code, not just plan for it. Starting with narrow residual-add and RMSNorm targets keeps the first Triton slice tractable without pretending the full CUDA starter catalog is already Triton-native.
+  - Purpose: begin the actual Triton-backed CUDA workspace implementation while preserving the repo's current trace-first prioritization model and clean fallback behavior on non-CUDA developer machines.
+  - Updated `/Users/ent/Codex/autoresearch/autoresearch_cuda/lab_workspace.py` so generated `launch_fusion` and `norm` workspaces include optional Triton kernels and annotate themselves as `triton-optional`.
+  - Updated `/Users/ent/Codex/autoresearch/autoresearch_cuda/lab_trace.py` and the kernel-lab docs to make it explicit which CUDA starter targets are now genuinely Triton-backed and which remain reference-first.
+
+**Grounding**
+
+- Files:
+  - `CHANGELOG.md`
+  - `README.md`
+  - `docs/kernel-lab.md`
+  - `autoresearch_cuda/lab_trace.py`
+  - `autoresearch_cuda/lab_workspace.py`
+- Validation:
+  - `python3 -m py_compile autoresearch_cuda/lab_workspace.py autoresearch_cuda/lab_trace.py`
+  - `./.venv/bin/python kernel-lab.py --engine cuda init --target launch_fusion --workspace /tmp/cuda-triton-launch-fusion`
+  - `./.venv/bin/python kernel-lab.py --engine cuda init --target norm --workspace /tmp/cuda-triton-norm`
+  - `python3 -m py_compile /tmp/cuda-triton-launch-fusion/kernel.py /tmp/cuda-triton-norm/kernel.py`
+  - `./.venv/bin/python kernel-lab.py --engine cuda bench --workspace /tmp/cuda-triton-launch-fusion --quick`
+  - `./.venv/bin/python kernel-lab.py --engine cuda verify --workspace /tmp/cuda-triton-norm --quick`
+  - `python3 tools/changelog_scores.py --group-by entry --format csv --include-latest --verify`
+- Measurements:
+  - On this Apple machine, the generated Triton-backed workspaces still degrade cleanly through the existing `missing-runtime` path because PyTorch/CUDA are unavailable.
+  - The first Triton slice is intentionally partial: only `launch_fusion` and `norm` are Triton-backed so far, while the rest of the CUDA starter catalog remains reference-first.
+
+## Committed History
+
+### March 12, 2026 — `36bea5b` — lab: make CUDA deep-profile evidence policy-driving — score `3` — complexity `6`
 
 **AI-identified within brief, human-shaped (3)**
 
@@ -60,8 +93,6 @@ On this hardware, the default canonical matched benchmark window for optimizatio
 - Measurements:
   - Strong deeper diagnoses now contribute more evidence bonus than generic trace-backed timing alone.
   - Weak or mixed deeper diagnoses now block starter-ready CUDA targets from drifting into trainer integration without manual review.
-
-## Committed History
 
 ### March 12, 2026 — `f8779c0` — lab: add CUDA deeper kernel diagnosis — score `3` — complexity `8`
 

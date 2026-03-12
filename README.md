@@ -197,6 +197,10 @@ For CUDA, the split is similar but the trace side is more automatable:
   - `attention_prelude`
   - `rope_qk_fused`
   - `fused_mlp`
+- the first Triton-backed CUDA workspace slice is intentionally narrow:
+  - `launch_fusion` now ships with an optional Triton residual-add kernel
+  - `norm` now ships with an optional Triton RMSNorm kernel
+  - the rest of the CUDA starter catalog is still reference-first, so the CUDA substrate can grow incrementally instead of pretending every starter target is already Triton-native
 - `norm`, `loss_prelude`, `matmul_epilogue`, `fused_mlp`, `attention_prelude`, `rope_qk_fused`, `launch_fusion`, and `data_movement` currently have direct CUDA trainer-side hooks, so they are the CUDA starter targets that can collect real `integration-ab` / `integration-suite` evidence today
 - on non-CUDA machines or machines without PyTorch/CUDA installed, those CUDA integration commands return structured `missing-runtime` results instead of pretending the target is promotable
 - the long-term goal is that CUDA trace review becomes automated-by-default, with GUI inspection as the escalation path rather than the first step
@@ -350,10 +354,10 @@ Current project snapshot from [CHANGELOG.md](CHANGELOG.md):
 
 | Metric | Value |
 | --- | --- |
-| Mean autonomy score | `3.35 / 6` |
-| Mean complexity | `7.39 / commit` |
-| Mean score per top-level bullet | `3.41 / 6` |
-| History covered | `62` commits across `12` subsystems |
+| Mean autonomy score | `3.34 / 6` |
+| Mean complexity | `7.35 / commit` |
+| Mean score per top-level bullet | `3.40 / 6` |
+| History covered | `63` commits across `12` subsystems |
 <!-- autonomy-golf-snapshot:end -->
 
 Refresh with:
