@@ -95,7 +95,7 @@ CUDA_TRACE_TARGETS: dict[str, LabTarget] = {
         description="MLP / activation / feed-forward path kernels",
         metric="time_share_pct",
         status="starter-ready",
-        notes="Starter-ready fixed workspace harness exists.",
+        notes="Starter-ready fixed workspace harness exists, with a first optional Triton pointwise squared-ReLU activation implementation.",
     ),
     "loss_prelude": LabTarget(
         key="loss_prelude",

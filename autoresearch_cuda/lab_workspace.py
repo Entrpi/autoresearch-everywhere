@@ -810,8 +810,9 @@ Autoresearch CUDA kernel lab workspace.
 Target: Fused MLP
 Mutable file: yes
 
-Replace `kernel_fn` with a faster Triton/CUDA implementation once the reference
-path is working.
+This starter target ships with an optional Triton pointwise squared-ReLU
+activation implementation and falls back to the reference path when Triton or
+CUDA is unavailable. The input and output matmuls still use the reference path.
 """
 
 from __future__ import annotations
@@ -819,13 +820,55 @@ from __future__ import annotations
 import torch
 import torch.nn.functional as F
 
+try:
+    import triton
+    import triton.language as tl
+except Exception:  # pragma: no cover - workspace fallback path
+    triton = None
+    tl = None
+
 
 KERNEL_TARGET = "fused_mlp"
+WORKSPACE_IMPL = "triton-optional"
+
+if triton is not None:
+
+    @triton.jit
+    def _squared_relu_kernel(
+        x_ptr,
+        output_ptr,
+        n_elements,
+        BLOCK_SIZE: tl.constexpr,
+    ):
+        pid = tl.program_id(axis=0)
+        offsets = pid * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+        mask = offsets < n_elements
+        x = tl.load(x_ptr + offsets, mask=mask, other=0.0).to(tl.float32)
+        y = tl.maximum(x, 0.0)
+        y = y * y
+        tl.store(output_ptr + offsets, y, mask=mask)
+
+
+def _squared_relu_triton(x: torch.Tensor) -> torch.Tensor:
+    x_contig = x.contiguous()
+    output = torch.empty_like(x_contig)
+    n_elements = x_contig.numel()
+    grid = lambda meta: (triton.cdiv(n_elements, meta["BLOCK_SIZE"]),)
+    _squared_relu_kernel[grid](
+        x_contig,
+        output,
+        n_elements,
+        BLOCK_SIZE=1024,
+    )
+    return output
 
 
 def kernel_fn(x: torch.Tensor, w1: torch.Tensor, w2: torch.Tensor) -> torch.Tensor:
     hidden = torch.matmul(x, w1)
-    hidden = F.relu(hidden).square()
+    if triton is not None and hidden.is_cuda and hidden.is_contiguous():
+        hidden = _squared_relu_triton(hidden)
+    else:
+        hidden = F.relu(hidden).square()
     return torch.matmul(hidden, w2)
 '''
 
@@ -1464,7 +1507,7 @@ def init_cuda_workspace(*, target: str, workspace: Path, profile_context: dict[s
             "metric": "throughput_gb_s",
             "workspace_impl": (
                 "triton-optional"
-                if target in {"launch_fusion", "norm", "loss_prelude", "logits_softcap", "value_embed_gate", "rope_qk_fused", "data_movement", "matmul_epilogue"}
+                if target in {"launch_fusion", "norm", "loss_prelude", "logits_softcap", "value_embed_gate", "rope_qk_fused", "fused_mlp", "data_movement", "matmul_epilogue"}
                 else "reference"
             ),
             "profile_context": profile_context or {},

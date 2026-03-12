@@ -29,16 +29,16 @@ On this hardware, the default canonical matched benchmark window for optimizatio
 
 ## Latest
 
-### New commit — lab: add Triton-backed CUDA loss prelude workspace — score `3` — complexity `5`
+### New commit — lab: add Triton-backed CUDA fused MLP workspace — score `3` — complexity `5`
 
 **AI-identified within brief, human-shaped (3)**
 
-- Promote `loss_prelude` from a reference-first CUDA target into a Triton-optional starter workspace.
-  - Meaning: `loss_prelude` no longer stops at the pure reference path. It now has a real optional Triton row-wise implementation for the softcapped cross-entropy-prelude path, while keeping the existing fixed starter harness.
-  - Motivation: after the narrower pointwise and RoPE-side Triton targets, the next practical step was a loss-side row kernel that is still trace-visible and benchmarkable without pretending the whole logits/loss stack is already fused.
-  - Purpose: keep extending Triton support incrementally with honest starter workspaces that match the real scope of what has been optimized so far.
-  - Extending `/Users/ent/Codex/autoresearch/autoresearch_cuda/lab_workspace.py` with an optional Triton row-wise cross-entropy-prelude kernel and marking `loss_prelude` as `triton-optional`.
-  - Updating `/Users/ent/Codex/autoresearch/autoresearch_cuda/lab_trace.py`, `README.md`, and `docs/kernel-lab.md` so the CUDA starter catalog now reports `loss_prelude` as part of the Triton-backed slice.
+- Promote `fused_mlp` from a reference-first CUDA target into a Triton-optional starter workspace.
+  - Meaning: `fused_mlp` no longer stops at the pure reference path. It now has a real optional Triton pointwise implementation for the squared-ReLU activation stage, while keeping the existing fixed starter harness and reference GEMM path.
+  - Motivation: after the pointwise, RoPE-side, and loss-side Triton slices, the next practical step was an MLP-side seam that is still repeated and trace-visible but does not pretend we already have a full Triton GEMM replacement story.
+  - Purpose: keep extending Triton support incrementally with honest starter workspaces that accelerate real repeated subpaths without overselling full fused-block coverage.
+  - Extending `/Users/ent/Codex/autoresearch/autoresearch_cuda/lab_workspace.py` with an optional Triton squared-ReLU activation kernel and marking `fused_mlp` as `triton-optional`.
+  - Updating `/Users/ent/Codex/autoresearch/autoresearch_cuda/lab_trace.py`, `README.md`, and `docs/kernel-lab.md` so the CUDA starter catalog now reports `fused_mlp` as part of the Triton-backed slice.
 
 **Grounding**
 
@@ -50,10 +50,10 @@ On this hardware, the default canonical matched benchmark window for optimizatio
   - `autoresearch_cuda/lab_workspace.py`
 - Validation:
   - `python3 -m py_compile autoresearch_cuda/lab_trace.py autoresearch_cuda/lab_workspace.py`
-  - `./.venv/bin/python kernel-lab.py --engine cuda init --target loss_prelude --workspace /tmp/cuda-triton-loss-prelude`
-  - `python3 -m py_compile /tmp/cuda-triton-loss-prelude/kernel.py`
-  - `./.venv/bin/python kernel-lab.py --engine cuda bench --workspace /tmp/cuda-triton-loss-prelude --quick`
-  - `./.venv/bin/python kernel-lab.py --engine cuda verify --workspace /tmp/cuda-triton-loss-prelude --quick`
+  - `./.venv/bin/python kernel-lab.py --engine cuda init --target fused_mlp --workspace /tmp/cuda-triton-fused-mlp`
+  - `python3 -m py_compile /tmp/cuda-triton-fused-mlp/kernel.py`
+  - `./.venv/bin/python kernel-lab.py --engine cuda bench --workspace /tmp/cuda-triton-fused-mlp --quick`
+  - `./.venv/bin/python kernel-lab.py --engine cuda verify --workspace /tmp/cuda-triton-fused-mlp --quick`
   - `python3 tools/changelog_scores.py --group-by entry --format csv --include-latest --verify`
 - Measurements:
   - On this Apple machine, the new Triton-optional starter workspace still degrades cleanly to `missing-runtime` because PyTorch/CUDA are unavailable.
