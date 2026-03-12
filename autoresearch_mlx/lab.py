@@ -79,6 +79,29 @@ def build_parser() -> argparse.ArgumentParser:
     integration_parser.add_argument("--benchmark-skip-eval", action="store_true")
     integration_parser.add_argument("--no-checkpoint", action="store_true")
 
+    integration_suite_parser = subparsers.add_parser(
+        "integration-suite",
+        help="Run repeated MLX integration A/Bs across the calibrated point and a stronger preset",
+    )
+    integration_suite_parser.add_argument("--workspace", required=True)
+    integration_suite_parser.add_argument(
+        "--preset",
+        help="Base preset for the suite. If omitted, use the calibrated platform default for this device.",
+    )
+    integration_suite_parser.add_argument(
+        "--presets",
+        help="Comma-separated explicit preset list. If omitted, use the base preset and the next stronger preset when available.",
+    )
+    integration_suite_parser.add_argument("--time-budget", type=float, default=20.0)
+    integration_suite_parser.add_argument(
+        "--repeats",
+        type=int,
+        default=2,
+        help="Number of balanced measured A/B rounds to run for each preset after warmup.",
+    )
+    integration_suite_parser.add_argument("--benchmark-skip-eval", action="store_true")
+    integration_suite_parser.add_argument("--no-checkpoint", action="store_true")
+
     capture_parser = subparsers.add_parser("capture", help="Capture a workspace run as a Metal trace artifact")
     capture_parser.add_argument("--workspace", required=True)
     capture_parser.add_argument("--output", required=True)
@@ -177,6 +200,22 @@ def main(argv: list[str] | None = None) -> None:
         result = lab.run_integration_ab(
             workspace=Path(args.workspace).expanduser(),
             preset=args.preset,
+            time_budget=args.time_budget,
+            repeats=args.repeats,
+            benchmark_skip_eval=args.benchmark_skip_eval,
+            no_checkpoint=args.no_checkpoint,
+        )
+        print(json.dumps(asdict(result), indent=2, sort_keys=True))
+        return
+
+    if args.command == "integration-suite":
+        preset_list = None
+        if args.presets:
+            preset_list = tuple(item.strip() for item in args.presets.split(",") if item.strip())
+        result = lab.run_integration_suite(
+            workspace=Path(args.workspace).expanduser(),
+            preset=args.preset,
+            presets=preset_list,
             time_budget=args.time_budget,
             repeats=args.repeats,
             benchmark_skip_eval=args.benchmark_skip_eval,

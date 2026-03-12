@@ -88,6 +88,14 @@ If `--preset` is omitted, the lab uses the calibrated platform default for the c
 
 `integration-ab` now uses repeated balanced measured rounds by default (`--repeats 2`) after warmup, so promotion is based on repeated end-to-end evidence rather than one encouraging run.
 
+When you want stronger evidence, use the suite form:
+
+```bash
+uv run kernel-lab.py --engine mlx integration-suite --workspace /tmp/mlx-lab/block-pipeline --time-budget 20 --benchmark-skip-eval --no-checkpoint
+```
+
+If `--preset` is omitted, `integration-suite` uses the calibrated platform default and the next stronger preset by default. This is the preferred promotion path once a target is past smoke checks, because it tests whether the signal survives beyond one operating point.
+
 For now the MLX lab is deliberately narrow, but it is no longer just `init + bench`:
 
 - starter-ready targets:
@@ -132,7 +140,7 @@ That upgrades the plan from "interesting candidate" to "trace-backed target" and
 
 If a target has already been both verified and captured, orchestration will reuse the last known workspace and upgrade the plan again to `promotion-ready`, which means the next recommended step is an end-to-end integration A/B rather than another blank workspace.
 
-For the current MLX lab, only a subset of targets has a direct trainer-side integration hook. Narrow path targets such as `logits_softcap`, `rotary_embedding`, `value_embed_gate`, `attention_prelude`, and `fused_mlp` can already run through `integration-ab`. Broader composed targets like `block_prelude` can still be profiled and traced, but they will surface as `needs-integration-adapter` until a direct training-path hook exists.
+For the current MLX lab, only a subset of targets has a direct trainer-side integration hook. Narrow path targets such as `logits_softcap`, `rotary_embedding`, `value_embed_gate`, `attention_prelude`, and `fused_mlp` can already run through `integration-ab` and `integration-suite`. Broader composed targets like `block_prelude` can still be profiled and traced, but they will surface as `needs-integration-adapter` until a direct training-path hook exists.
 
 You can ask for that decision directly:
 
@@ -146,7 +154,7 @@ Once `integration-ab` has run, the ledger can now distinguish:
 - `integration-regressed`
 - `integration-mixed`
 
-So promotion is no longer “trace-backed forever.” It can advance, stall, or back off based on repeated trainer-side A/B evidence with pair counts and relative effect sizes, not just one baseline/candidate pair.
+So promotion is no longer “trace-backed forever.” It can advance, stall, or back off based on repeated trainer-side A/B evidence with pair counts, cross-preset coverage, and relative effect sizes, not just one baseline/candidate pair.
 
 ## Heuristic Layer vs Trace Layer
 

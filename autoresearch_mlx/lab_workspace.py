@@ -22,6 +22,7 @@ from autoresearch_lab.labs import (
     LabEvidenceResult,
     LabExtractResult,
     LabIntegrationABResult,
+    LabIntegrationSuiteResult,
     LabOrchestrationPlan,
     LabPromotionCheck,
     LabProfileResult,
@@ -45,6 +46,7 @@ from tools.calibrate_eval_policy import parse_summary
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
+_INTEGRATION_PRESET_ORDER = ("m5-fast", "m5-balanced", "m5-large", "m5-xlarge", "upstream")
 
 
 @dataclass(frozen=True)
@@ -2156,14 +2158,42 @@ class MLXKernelLab:
             details=asdict(summary),
         )
 
+    @staticmethod
+    def _integration_suite_presets(base_preset: str, explicit_presets: tuple[str, ...] | None = None) -> tuple[str, ...]:
+        if explicit_presets:
+            normalized = tuple(dict.fromkeys(explicit_presets))
+            if not normalized:
+                raise ValueError("presets must not be empty")
+            return normalized
+        try:
+            index = _INTEGRATION_PRESET_ORDER.index(base_preset)
+        except ValueError:
+            return (base_preset,)
+        if index + 1 < len(_INTEGRATION_PRESET_ORDER):
+            return (base_preset, _INTEGRATION_PRESET_ORDER[index + 1])
+        return (base_preset,)
+
     def promotion_check(self, *, target: str, preset: str | None = None, workspace: Path | None = None) -> LabPromotionCheck:
         resolved_preset, preset_source, preset_context = self._resolve_runtime_preset(preset)
-        summary = summarize_lab_evidence(
+        preset_summary = summarize_lab_evidence(
             engine="mlx",
             backend_family="mlx",
             target=target,
             preset=resolved_preset,
         )
+        overall_summary = summarize_lab_evidence(
+            engine="mlx",
+            backend_family="mlx",
+            target=target,
+            preset=None,
+        )
+        summary = preset_summary
+        if (
+            preset_source != "manual"
+            and supports_direct_integration(target)
+            and int(overall_summary.details.get("integration_ab_preset_count", 0) or 0) >= 2
+        ):
+            summary = overall_summary
         chosen_workspace = workspace.expanduser() if workspace is not None else None
         if chosen_workspace is None and summary.last_workspace is not None:
             candidate_workspace = Path(summary.last_workspace).expanduser()
@@ -2185,13 +2215,13 @@ class MLXKernelLab:
             status = "integration-tested"
             commands = (
                 "# this target has end-to-end integration evidence, but not enough repeated signal to promote it yet",
-                "# rerun integration-ab with repeated balanced rounds or a stronger preset before promoting it",
+                "# rerun integration-suite so the target is tested on the calibrated point and a stronger preset before promoting it",
             )
         elif summary.promotion_status == "integration-mixed":
             status = "integration-mixed"
             commands = (
                 "# this target has mixed end-to-end integration A/B results",
-                "# rerun with repeated balanced rounds, a stronger preset, or a longer budget before promoting it into the trainer",
+                "# rerun integration-suite with repeated balanced rounds, a stronger preset, or a longer budget before promoting it into the trainer",
             )
         elif summary.promotion_status == "integration-regressed":
             status = "integration-regressed"
@@ -2201,7 +2231,7 @@ class MLXKernelLab:
             )
         elif summary.promotion_status == "ready-for-integration-test" and chosen_workspace is not None:
             status = "ready-for-integration-ab"
-            cmd = f"uv run kernel-lab.py --engine mlx integration-ab --workspace {chosen_workspace} --time-budget 20 --repeats 2 --benchmark-skip-eval --no-checkpoint"
+            cmd = f"uv run kernel-lab.py --engine mlx integration-suite --workspace {chosen_workspace} --time-budget 20 --repeats 2 --benchmark-skip-eval --no-checkpoint"
             if preset_source == "manual":
                 cmd += f" --preset {resolved_preset}"
             commands = (cmd,)
@@ -2229,6 +2259,8 @@ class MLXKernelLab:
                 "preset_source": preset_source,
                 "preset_context": preset_context,
                 "evidence_summary": asdict(summary),
+                "preset_evidence_summary": asdict(preset_summary),
+                "overall_evidence_summary": asdict(overall_summary),
                 "required_for_promotion": ["verify", "capture"],
             },
         )
@@ -2427,6 +2459,61 @@ class MLXKernelLab:
                 "preset_source": preset_source,
                 "preset_context": preset_context,
                 **details,
+            },
+        )
+
+    def run_integration_suite(
+        self,
+        *,
+        workspace: Path,
+        time_budget: float,
+        preset: str | None = None,
+        presets: tuple[str, ...] | None = None,
+        repeats: int = 2,
+        benchmark_skip_eval: bool = True,
+        no_checkpoint: bool = True,
+    ) -> LabIntegrationSuiteResult:
+        resolved_preset, preset_source, preset_context = self._resolve_runtime_preset(preset)
+        selected_presets = self._integration_suite_presets(resolved_preset, presets)
+        workspace = workspace.expanduser().resolve()
+        start = time.perf_counter()
+        runs = []
+        for suite_preset in selected_presets:
+            result = self.run_integration_ab(
+                workspace=workspace,
+                time_budget=time_budget,
+                preset=suite_preset,
+                repeats=repeats,
+                benchmark_skip_eval=benchmark_skip_eval,
+                no_checkpoint=no_checkpoint,
+            )
+            runs.append(result)
+        wall_seconds = time.perf_counter() - start
+        target = str(json.loads((workspace / "metadata.json").read_text(encoding="utf-8"))["target"])
+        overall_summary = summarize_lab_evidence(
+            engine="mlx",
+            backend_family="mlx",
+            target=target,
+            preset=None,
+        )
+        status = "ok" if all(result.status == "ok" for result in runs) else "error"
+        return LabIntegrationSuiteResult(
+            engine="mlx",
+            backend_family="mlx",
+            target=target,
+            presets=selected_presets,
+            workspace=str(workspace),
+            status=status,
+            wall_seconds=wall_seconds,
+            details={
+                "preset_source": preset_source,
+                "preset_context": preset_context,
+                "selected_presets": selected_presets,
+                "repeats": repeats,
+                "benchmark_skip_eval": benchmark_skip_eval,
+                "no_checkpoint": no_checkpoint,
+                "runs": [asdict(result) for result in runs],
+                "overall_evidence": asdict(overall_summary),
             },
         )
 

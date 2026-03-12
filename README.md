@@ -151,13 +151,14 @@ The lab also keeps a small evidence ledger at `results/kernel_lab/ledger.jsonl`.
 
 The extra commands make that visible:
 
-- `evidence` summarizes the current ledger state for one target/preset
-- `promotion-check` says whether a target is still gathering evidence, ready for an end-to-end integration A/B, mixed after repeated A/B runs, or already validated strongly enough to move toward a real trainer patch
-- if you omit `--preset`, `promotion-check` and `integration-ab` use the calibrated platform default for the current device; only smoke or deliberately targeted tests should usually pin a different preset by hand
+- `evidence` summarizes the current ledger state for one target/preset or across presets
+- `promotion-check` says whether a target is still gathering evidence, ready for an end-to-end integration suite, mixed after repeated A/B runs, or already validated strongly enough to move toward a real trainer patch
+- if you omit `--preset`, `promotion-check`, `integration-ab`, and `integration-suite` use the calibrated platform default for the current device; only smoke or deliberately targeted tests should usually pin a different preset by hand
 - `review-trace` lets a human or agent record whether a trace showed strong, weak, or negligible end-to-end relevance, so ranking can move down as well as up
 - `integration-ab` now runs repeated balanced trainer-side comparisons for the subset of targets that already have direct MLX integration hooks, and promotion stays conservative until the effect is repeated and directionally stable
+- `integration-suite` takes that one step further by testing the calibrated point and the next stronger preset by default, so trainer-side evidence can survive beyond one operating point
 
-Only part of the MLX target catalog is directly wired into the trainer today. Small path targets like `logits_softcap`, `rotary_embedding`, `value_embed_gate`, `attention_prelude`, and `fused_mlp` can already run end-to-end A/B through `integration-ab`. Broader composed targets like `block_prelude` can still be profiled, verified, and traced, but they will report `needs-integration-adapter` until there is a direct training-path hook for them.
+Only part of the MLX target catalog is directly wired into the trainer today. Small path targets like `logits_softcap`, `rotary_embedding`, `value_embed_gate`, `attention_prelude`, and `fused_mlp` can already run end-to-end A/B through `integration-ab` and `integration-suite`. Broader composed targets like `block_prelude` can still be profiled, verified, and traced, but they will report `needs-integration-adapter` until there is a direct training-path hook for them.
 
 That current lab exists to build the pattern, not to claim broad coverage yet. The current starter-ready MLX targets are:
 
@@ -280,7 +281,7 @@ Current project snapshot from [CHANGELOG.md](CHANGELOG.md):
 | Metric | Value |
 | --- | --- |
 | Mean autonomy score | `3.38 / 6` |
-| Mean complexity | `7.31 / commit` |
+| Mean complexity | `7.33 / commit` |
 | Mean score per top-level bullet | `3.44 / 6` |
 | History covered | `49` commits across `12` subsystems |
 <!-- autonomy-golf-snapshot:end -->

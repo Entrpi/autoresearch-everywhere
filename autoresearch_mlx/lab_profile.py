@@ -489,7 +489,7 @@ def orchestrate_from_profile(
                 f"# reuse {workspace} and inspect the latest integration A/B result for {target}",
                 *trace_commands,
                 f"uv run kernel-lab.py --engine mlx evidence --target {target} --preset {payload['preset']}",
-                f"uv run kernel-lab.py --engine mlx integration-ab --workspace {workspace} --preset {payload['preset']} --time-budget 20 --repeats 2 --benchmark-skip-eval --no-checkpoint",
+                f"uv run kernel-lab.py --engine mlx integration-suite --workspace {workspace} --preset {payload['preset']} --time-budget 20 --repeats 2 --benchmark-skip-eval --no-checkpoint",
                 "# decide whether to refine the kernel, rerun on a stronger preset, or drop the target",
             ]
         )
@@ -500,7 +500,7 @@ def orchestrate_from_profile(
                 f"# {target} has mixed end-to-end integration A/B results from {workspace}",
                 *trace_commands,
                 f"uv run kernel-lab.py --engine mlx evidence --target {target} --preset {payload['preset']}",
-                f"uv run kernel-lab.py --engine mlx integration-ab --workspace {workspace} --preset {payload['preset']} --time-budget 20 --repeats 2 --benchmark-skip-eval --no-checkpoint",
+                f"uv run kernel-lab.py --engine mlx integration-suite --workspace {workspace} --preset {payload['preset']} --time-budget 20 --repeats 2 --benchmark-skip-eval --no-checkpoint",
                 "# rerun integration A/B on a longer budget or a stronger preset before promoting the target",
             ]
         )
@@ -516,7 +516,7 @@ def orchestrate_from_profile(
                 *trace_commands,
                 f"uv run kernel-lab.py --engine mlx verify --workspace {workspace} --quick",
                 f"uv run kernel-lab.py --engine mlx bench --workspace {workspace}",
-                f"uv run kernel-lab.py --engine mlx integration-ab --workspace {workspace} --preset {payload['preset']} --time-budget 20 --repeats 2 --benchmark-skip-eval --no-checkpoint",
+                f"uv run kernel-lab.py --engine mlx integration-suite --workspace {workspace} --preset {payload['preset']} --time-budget 20 --repeats 2 --benchmark-skip-eval --no-checkpoint",
                 f"uv run kernel-lab.py --engine mlx capture --workspace {workspace} --output {workspace / (target + '.gputrace')} --quick",
             ]
         )

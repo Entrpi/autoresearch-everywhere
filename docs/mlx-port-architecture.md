@@ -408,6 +408,7 @@ The first shared outer loop is now present too:
 - `verify` reruns the fixed harness as the promotion gate above a quick bench
 - `capture` writes a real `.gputrace` and sidecar metadata artifact for a workspace run
 - `integration-ab` runs a real trainer-side baseline-vs-candidate A/B for targets that already have a direct MLX integration hook
+- `integration-suite` extends that check across the calibrated point and a stronger preset so integration evidence can survive beyond one operating point
 
 The important distinction is that the lab now has two evidence layers:
 
@@ -425,7 +426,7 @@ The important distinction is that the lab now has two evidence layers:
 
 So the lab is no longer just "one mutable file plus a microbench." It is now a split system where heuristics select candidates, a persistent ledger remembers which targets have already been verified or traced, trace reviews can raise or lower a target's importance, and trace artifacts validate whether a candidate matters in the real backend.
 
-That split now also feeds back into orchestration: once a workspace has real verify/capture evidence, the next plan can either treat the target as trace-backed or upgrade it to promotion-ready and reuse the last workspace instead of opening a fresh one. For directly integrated targets, `integration-ab` then closes the loop with repeated balanced trainer-side A/B runs instead of a single pair. When `--preset` is omitted, those integration checks default to the calibrated platform default for the current device rather than a hand-picked preset. The new `evidence` and `promotion-check` commands expose that state directly instead of making the user infer it from profile output.
+That split now also feeds back into orchestration: once a workspace has real verify/capture evidence, the next plan can either treat the target as trace-backed or upgrade it to promotion-ready and reuse the last workspace instead of opening a fresh one. For directly integrated targets, `integration-ab` closes the loop with repeated balanced trainer-side A/B runs, and `integration-suite` carries that evidence onto the calibrated point and a stronger preset. When `--preset` is omitted, those integration checks default to the calibrated platform default for the current device rather than a hand-picked preset. The new `evidence` and `promotion-check` commands expose both preset-local and cross-preset state directly instead of making the user infer it from profile output.
 
 The long-term reason this matters now is not that MLX kernel work is already broad. It is that the repo now has a place where future Triton/CUDA, ROCm, and ANE labs can plug into the same outer workflow instead of growing separate kernel-optimization trees.
 

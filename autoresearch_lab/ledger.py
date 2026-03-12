@@ -165,6 +165,14 @@ def summarize_lab_evidence(
     integration_ab_ok = [
         event for event in events if event.get("event_type") == "integration-ab" and event.get("status") == "ok"
     ]
+    integration_ab_presets = sorted(
+        {
+            str(event.get("preset"))
+            for event in integration_ab_ok
+            if event.get("preset")
+        }
+    )
+    integration_ab_preset_count = len(integration_ab_presets)
     last_trace_review = trace_review_ok[-1] if trace_review_ok else None
     trace_relevance = last_trace_review.get("details", {}).get("relevance") if last_trace_review else None
     last_integration_ab = integration_ab_ok[-1] if integration_ab_ok else None
@@ -276,6 +284,8 @@ def summarize_lab_evidence(
             "integration_ab_negative_count": negative_integration_count,
             "integration_ab_zero_count": zero_integration_count,
             "integration_ab_pair_count": integration_pair_count,
+            "integration_ab_preset_count": integration_ab_preset_count,
+            "integration_ab_presets": integration_ab_presets,
             "integration_ab_median_delta_steady_state_tok_per_sec": median_integration_delta,
             "integration_ab_median_delta_relative_pct_steady_state_tok_per_sec": median_integration_relative_delta,
             "integration_ab_strong_positive": strong_positive_integration,
@@ -287,6 +297,8 @@ def summarize_lab_evidence(
                 if promotion_status == "integration-validated"
                 else "stabilize-integration"
                 if promotion_status == "integration-mixed"
+                else "expand-cross-preset"
+                if promotion_status == "integration-tested" and integration_ab_preset_count < 2
                 else "strengthen-integration-evidence"
                 if promotion_status in {"integration-tested", "integration-regressed"}
                 else "integration-test"

@@ -124,6 +124,18 @@ class LabIntegrationABResult:
     details: dict[str, Any]
 
 
+@dataclass(frozen=True)
+class LabIntegrationSuiteResult:
+    engine: str
+    backend_family: str
+    target: str
+    presets: tuple[str, ...]
+    workspace: str
+    status: str
+    wall_seconds: float
+    details: dict[str, Any]
+
+
 class KernelLab(Protocol):
     """Shared boundary for backend-specific kernel labs."""
 
@@ -178,6 +190,19 @@ class KernelLab(Protocol):
         benchmark_skip_eval: bool = True,
         no_checkpoint: bool = True,
     ) -> LabIntegrationABResult:
+        ...
+
+    def run_integration_suite(
+        self,
+        *,
+        workspace: Path,
+        time_budget: float,
+        preset: str | None = None,
+        presets: tuple[str, ...] | None = None,
+        repeats: int = 2,
+        benchmark_skip_eval: bool = True,
+        no_checkpoint: bool = True,
+    ) -> LabIntegrationSuiteResult:
         ...
 
 

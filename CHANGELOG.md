@@ -29,17 +29,18 @@ On this hardware, the default canonical matched benchmark window for optimizatio
 
 ## Latest
 
-### New commit — lab: strengthen MLX integration evidence with repeated balanced A/Bs — score `3` — complexity `6`
+### New commit — lab: strengthen MLX integration evidence with repeated and cross-preset A/Bs — score `3` — complexity `7`
 
 **AI-identified within brief, human-shaped (3)**
 
-- Strengthened MLX kernel-lab integration evidence so promotion depends on repeated balanced trainer A/B runs and effect-size thresholds instead of treating a single encouraging run as nearly sufficient.
+- Strengthened MLX kernel-lab integration evidence so promotion depends on repeated balanced trainer A/B runs and cross-preset coverage instead of treating a single encouraging run as nearly sufficient.
   - Meaning: `integration-ab` now runs repeated measured rounds in alternating order after warmup, aggregates median trainer summaries, records pair count plus relative deltas, and only lets the ledger call a target `integration-validated` or `integration-regressed` when the evidence is both repeated and directionally consistent.
   - Motivation: the old trainer-side bridge closed the loop, but it still overfit to one-off runs. Kernel promotion needed stronger evidence than a single baseline/candidate pair because short local runs are noisy enough to flip sign.
-  - Purpose: make `promotion-check`, orchestration, and later trainer patch promotion depend on repeated end-to-end evidence that is harder to fool with compile noise or transient drift.
+  - Purpose: make `promotion-check`, orchestration, and later trainer patch promotion depend on repeated end-to-end evidence that is harder to fool with compile noise or transient drift, and push stronger candidates onto at least one heavier operating point before promotion.
   - Upgraded `integration-ab` to repeated balanced rounds and stored richer aggregate details, including relative throughput deltas and measured pair count.
   - Tightened ledger aggregation so `integration-validated` and `integration-regressed` require stronger repeated evidence, while weak or mixed results stay in `integration-tested` or `integration-mixed`.
-  - Updated orchestration and promotion messaging to point at repeated A/B reruns on the calibrated point rather than implying that one run is close to promotion.
+  - Added `integration-suite`, which defaults to the calibrated point plus the next stronger preset, and feeds that broader evidence back into `promotion-check`.
+  - Updated orchestration and promotion messaging to point at repeated A/B reruns on the calibrated point and a stronger preset rather than implying that one run is close to promotion.
 
 **Grounding**
 
@@ -56,17 +57,24 @@ On this hardware, the default canonical matched benchmark window for optimizatio
 - Validation:
   - `python3 -m py_compile autoresearch_lab/labs.py autoresearch_lab/ledger.py autoresearch_mlx/lab.py autoresearch_mlx/lab_profile.py autoresearch_mlx/lab_workspace.py`
   - `./.venv/bin/python kernel-lab.py --engine mlx integration-ab --workspace /tmp/mlx-logits-integration --time-budget 2 --benchmark-skip-eval --no-checkpoint`
+  - `./.venv/bin/python kernel-lab.py --engine mlx integration-suite --workspace /tmp/mlx-logits-integration --time-budget 1 --repeats 1 --benchmark-skip-eval --no-checkpoint`
   - `./.venv/bin/python kernel-lab.py --engine mlx evidence --target logits_softcap --preset m5-fast`
+  - `./.venv/bin/python kernel-lab.py --engine mlx evidence --target logits_softcap`
   - `./.venv/bin/python kernel-lab.py --engine mlx promotion-check --target logits_softcap --workspace /tmp/mlx-logits-integration`
   - `python3 tools/changelog_scores.py --group-by entry --format csv --include-latest --verify`
 - Measurements:
   - A repeated balanced `integration-ab` run on `logits_softcap` completed at the calibrated platform default (`m5-fast`) and added `integration_ab_pair_count=4`.
-  - The target remains `integration-mixed`, with:
+  - The new `integration-suite` run added a second operating point (`m5-balanced`), bringing the overall evidence to:
+    - `integration_ab_pair_count=8`
+    - `integration_ab_preset_count=2`
+    - `integration_ab_presets=["m5-balanced", "m5-fast"]`
+  - The target still remains `integration-mixed`, with:
     - `integration_ab_positive_count=2`
     - `integration_ab_negative_count=2`
-    - `integration_ab_median_delta_steady_state_tok_per_sec=-1914.5`
+    - preset-local `integration_ab_median_delta_steady_state_tok_per_sec=-3409.9` on `m5-fast`
+    - overall `integration_ab_median_delta_steady_state_tok_per_sec=-2836.5`
     - `integration_ab_median_delta_relative_pct_steady_state_tok_per_sec=null` because the older one-off events did not carry relative deltas, so the stricter ledger now refuses to infer a mixed absolute/relative aggregate.
-  - `promotion-check` now keeps mixed targets in the stabilization path instead of treating one positive run as enough for promotion.
+  - `promotion-check` now uses the broader cross-preset evidence by default when it exists and keeps mixed targets in the stabilization path instead of treating one positive run as enough for promotion.
 
 ## Committed History
 
