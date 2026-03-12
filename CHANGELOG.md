@@ -29,7 +29,55 @@ On this hardware, the default canonical matched benchmark window for optimizatio
 
 ## Latest
 
-### New commit — lab: broaden CUDA trainer-side integration seams — score `3` — complexity `7`
+### New commit — lab: add broader CUDA starter workspaces — score `3` — complexity `6`
+
+**AI-identified within brief, human-shaped (3)**
+
+- Promoted `attention_prelude` and `fused_mlp` from trace-only CUDA families into real starter workspaces with fixed harness support.
+  - Meaning: the CUDA starter-workspace layer now covers two broader training-path families beyond launch fusion, norms, loss prelude, data movement, and matmul epilogues. Targets that previously stopped at trace-backed prioritization can now move through `extract`, `bench`, and `verify` like the other starter-ready CUDA families.
+  - Motivation: after landing the first narrow trainer-hook seams, the next useful expansion was not another larger integration seam. It was giving the trace system broader starter-ready families so attention glue and MLP work can move into real workspaces without pretending they are already direct trainer hooks.
+  - Purpose: broaden the practical CUDA workspace catalog while keeping the direct trainer-hook set narrow and honest, so the trace-first CUDA lab can keep expanding without overclaiming promotion readiness.
+  - Added `attention_prelude` and `fused_mlp` starter templates plus fixed benchmark cases to `/Users/ent/Codex/autoresearch/autoresearch_cuda/lab_workspace.py`.
+  - Promoted both families to `starter-ready` in `/Users/ent/Codex/autoresearch/autoresearch_cuda/lab_trace.py`, so orchestration can emit real `extract` / `bench` / `verify` plans for them.
+  - Updated the public CUDA lab story so the starter-ready family list is broader, while the direct trainer-hook set remains `norm`, `loss_prelude`, and `matmul_epilogue`.
+
+**Grounding**
+
+- Files:
+  - `CHANGELOG.md`
+  - `README.md`
+  - `docs/kernel-lab.md`
+  - `autoresearch_cuda/lab_trace.py`
+  - `autoresearch_cuda/lab_workspace.py`
+- Validation:
+  - `python3 -m py_compile autoresearch_cuda/lab.py autoresearch_cuda/lab_trace.py autoresearch_cuda/lab_workspace.py`
+  - `./.venv/bin/python kernel-lab.py --engine cuda list-targets`
+  - `./.venv/bin/python kernel-lab.py --engine cuda init --target attention_prelude --workspace /tmp/cuda-attention-prelude-workspace`
+  - `./.venv/bin/python kernel-lab.py --engine cuda bench --workspace /tmp/cuda-attention-prelude-workspace --quick`
+  - `./.venv/bin/python kernel-lab.py --engine cuda verify --workspace /tmp/cuda-attention-prelude-workspace --quick`
+  - `./.venv/bin/python kernel-lab.py --engine cuda init --target fused_mlp --workspace /tmp/cuda-fused-mlp-workspace`
+  - `./.venv/bin/python kernel-lab.py --engine cuda bench --workspace /tmp/cuda-fused-mlp-workspace --quick`
+  - `./.venv/bin/python kernel-lab.py --engine cuda verify --workspace /tmp/cuda-fused-mlp-workspace --quick`
+  - `python3 tools/changelog_scores.py --group-by entry --format csv --include-latest --verify`
+- Measurements:
+  - On this machine `torch` is not installed, so the new `attention_prelude` and `fused_mlp` bench/verify commands degrade cleanly to `missing-runtime` instead of failing as opaque import errors.
+  - The CUDA starter-ready workspace set now includes:
+    - `launch_fusion`
+    - `norm`
+    - `loss_prelude`
+    - `data_movement`
+    - `matmul_epilogue`
+    - `attention_prelude`
+    - `fused_mlp`
+  - The direct CUDA trainer-hook set intentionally remains narrower:
+    - `norm`
+    - `loss_prelude`
+    - `matmul_epilogue`
+  - Broader CUDA trace families still remain outside the starter-workspace set until more fixed harnesses are added.
+
+## Committed History
+
+### March 12, 2026 — `2e4cc37` — lab: broaden CUDA trainer-side integration seams — score `3` — complexity `7`
 
 **AI-identified within brief, human-shaped (3)**
 
@@ -68,8 +116,6 @@ On this hardware, the default canonical matched benchmark window for optimizatio
     - `loss_prelude`
     - `matmul_epilogue`
   - Broader CUDA starter targets still stop at workspace-local evidence until more trainer seams are wired.
-
-## Committed History
 
 ### March 12, 2026 — `ff37e76` — lab: expand CUDA direct trainer hooks — score `3` — complexity `7`
 

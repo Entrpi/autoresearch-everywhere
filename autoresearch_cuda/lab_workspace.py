@@ -12,7 +12,15 @@ from autoresearch_lab.labs import LabBenchResult, LabExtractResult
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-CUDA_STARTER_TARGET_KEYS = ("launch_fusion", "norm", "loss_prelude", "data_movement", "matmul_epilogue")
+CUDA_STARTER_TARGET_KEYS = (
+    "launch_fusion",
+    "norm",
+    "loss_prelude",
+    "data_movement",
+    "matmul_epilogue",
+    "attention_prelude",
+    "fused_mlp",
+)
 
 
 LAUNCH_FUSION_TEMPLATE = '''"""
@@ -145,6 +153,72 @@ def kernel_fn(x: torch.Tensor, weight: torch.Tensor, bias: torch.Tensor) -> torc
 '''
 
 
+ATTENTION_PRELUDE_TEMPLATE = '''"""
+Autoresearch CUDA kernel lab workspace.
+
+Target: Attention prelude
+Mutable file: yes
+
+Replace `kernel_fn` with a faster Triton/CUDA implementation once the reference
+path is working.
+"""
+
+from __future__ import annotations
+
+import torch
+
+
+KERNEL_TARGET = "attention_prelude"
+
+
+def _norm_last_dim(x: torch.Tensor, eps: float = 1e-6) -> torch.Tensor:
+    x32 = x.float()
+    scale = torch.rsqrt(torch.mean(x32.square(), dim=-1, keepdim=True) + eps)
+    return (x32 * scale).to(dtype=x.dtype)
+
+
+def kernel_fn(
+    x: torch.Tensor,
+    wq: torch.Tensor,
+    wk: torch.Tensor,
+    wv: torch.Tensor,
+    n_head: int,
+    head_dim: int,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    bsz, seqlen, _ = x.shape
+    q = torch.matmul(x, wq).view(bsz, seqlen, n_head, head_dim)
+    k = torch.matmul(x, wk).view(bsz, seqlen, n_head, head_dim)
+    v = torch.matmul(x, wv).view(bsz, seqlen, n_head, head_dim)
+    return _norm_last_dim(q), _norm_last_dim(k), v
+'''
+
+
+FUSED_MLP_TEMPLATE = '''"""
+Autoresearch CUDA kernel lab workspace.
+
+Target: Fused MLP
+Mutable file: yes
+
+Replace `kernel_fn` with a faster Triton/CUDA implementation once the reference
+path is working.
+"""
+
+from __future__ import annotations
+
+import torch
+import torch.nn.functional as F
+
+
+KERNEL_TARGET = "fused_mlp"
+
+
+def kernel_fn(x: torch.Tensor, w1: torch.Tensor, w2: torch.Tensor) -> torch.Tensor:
+    hidden = torch.matmul(x, w1)
+    hidden = F.relu(hidden).square()
+    return torch.matmul(hidden, w2)
+'''
+
+
 @dataclass(frozen=True)
 class CudaLabCase:
     shape: tuple[int, ...]
@@ -238,6 +312,57 @@ def _matmul_epilogue_reference(torch: Any, x: Any, weight: Any, bias: Any) -> An
     return torch.matmul(x, weight) + bias
 
 
+def _attention_prelude_inputs(torch: Any, case: CudaLabCase, device: Any) -> tuple[Any, ...]:
+    b, t, c = case.shape
+    aux = case.aux or {}
+    n_head = int(aux.get("n_head", 8))
+    head_dim = c // n_head
+    dtype = _resolve_dtype(torch, case.dtype, device)
+    x = torch.randn((b, t, c), device=device, dtype=dtype)
+    wq = torch.randn((c, n_head * head_dim), device=device, dtype=dtype)
+    wk = torch.randn((c, n_head * head_dim), device=device, dtype=dtype)
+    wv = torch.randn((c, n_head * head_dim), device=device, dtype=dtype)
+    return x, wq, wk, wv, n_head, head_dim
+
+
+def _attention_prelude_reference(
+    torch: Any,
+    x: Any,
+    wq: Any,
+    wk: Any,
+    wv: Any,
+    n_head: int,
+    head_dim: int,
+    eps: float = 1e-6,
+) -> Any:
+    bsz, seqlen, _ = x.shape
+    q = torch.matmul(x, wq).view(bsz, seqlen, n_head, head_dim)
+    k = torch.matmul(x, wk).view(bsz, seqlen, n_head, head_dim)
+    v = torch.matmul(x, wv).view(bsz, seqlen, n_head, head_dim)
+    q32 = q.float()
+    k32 = k.float()
+    q = (q32 * torch.rsqrt(torch.mean(q32.square(), dim=-1, keepdim=True) + eps)).to(dtype=q.dtype)
+    k = (k32 * torch.rsqrt(torch.mean(k32.square(), dim=-1, keepdim=True) + eps)).to(dtype=k.dtype)
+    return q, k, v
+
+
+def _fused_mlp_inputs(torch: Any, case: CudaLabCase, device: Any) -> tuple[Any, ...]:
+    b, t, c = case.shape
+    aux = case.aux or {}
+    hidden = int(aux.get("hidden_dim", 4 * c))
+    dtype = _resolve_dtype(torch, case.dtype, device)
+    x = torch.randn((b, t, c), device=device, dtype=dtype)
+    w1 = torch.randn((c, hidden), device=device, dtype=dtype)
+    w2 = torch.randn((hidden, c), device=device, dtype=dtype)
+    return x, w1, w2
+
+
+def _fused_mlp_reference(torch: Any, x: Any, w1: Any, w2: Any) -> Any:
+    hidden = torch.matmul(x, w1)
+    hidden = torch.nn.functional.relu(hidden).square()
+    return torch.matmul(hidden, w2)
+
+
 CUDA_WORKSPACE_TARGET_SPECS: dict[str, CudaTargetSpec] = {
     "launch_fusion": CudaTargetSpec(
         target="launch_fusion",
@@ -313,6 +438,36 @@ CUDA_WORKSPACE_TARGET_SPECS: dict[str, CudaTargetSpec] = {
         ),
         make_inputs=_matmul_epilogue_inputs,
         reference=_matmul_epilogue_reference,
+    ),
+    "attention_prelude": CudaTargetSpec(
+        target="attention_prelude",
+        template=ATTENTION_PRELUDE_TEMPLATE,
+        tolerance=1e-5,
+        quick_cases=(
+            CudaLabCase(shape=(8, 256, 1024), dtype="float32", aux={"n_head": 8}),
+            CudaLabCase(shape=(4, 512, 2048), dtype="float32", aux={"n_head": 8}),
+        ),
+        full_cases=(
+            CudaLabCase(shape=(8, 512, 2048), dtype="float16", aux={"n_head": 8}),
+            CudaLabCase(shape=(4, 1024, 4096), dtype="float16", aux={"n_head": 8}),
+        ),
+        make_inputs=_attention_prelude_inputs,
+        reference=_attention_prelude_reference,
+    ),
+    "fused_mlp": CudaTargetSpec(
+        target="fused_mlp",
+        template=FUSED_MLP_TEMPLATE,
+        tolerance=1e-5,
+        quick_cases=(
+            CudaLabCase(shape=(8, 256, 1024), dtype="float32"),
+            CudaLabCase(shape=(4, 512, 2048), dtype="float32"),
+        ),
+        full_cases=(
+            CudaLabCase(shape=(8, 512, 2048), dtype="float16"),
+            CudaLabCase(shape=(4, 1024, 4096), dtype="float16"),
+        ),
+        make_inputs=_fused_mlp_inputs,
+        reference=_fused_mlp_reference,
     ),
 }
 

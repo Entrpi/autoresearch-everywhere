@@ -60,8 +60,8 @@ CUDA_TRACE_TARGETS: dict[str, LabTarget] = {
         key="attention_prelude",
         description="Attention setup, masking, softmax-adjacent, and Q/K/V staging work",
         metric="time_share_pct",
-        status="trace-ready",
-        notes="Good target family when attention glue outruns the core attention kernel.",
+        status="starter-ready",
+        notes="Starter-ready fixed workspace harness exists for Q/K/V staging and norm-prelude work.",
     ),
     "norm": LabTarget(
         key="norm",
@@ -74,7 +74,8 @@ CUDA_TRACE_TARGETS: dict[str, LabTarget] = {
         key="fused_mlp",
         description="MLP / activation / feed-forward path kernels",
         metric="time_share_pct",
-        status="trace-ready",
+        status="starter-ready",
+        notes="Starter-ready fixed workspace harness exists.",
     ),
     "loss_prelude": LabTarget(
         key="loss_prelude",
