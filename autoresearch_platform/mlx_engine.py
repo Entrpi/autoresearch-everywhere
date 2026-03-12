@@ -17,8 +17,8 @@ from .engines import EngineCapabilities, EnginePreset, HardwareFingerprint, Prob
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
-PRESET_ORDER = ("m5-fast", "m5-balanced", "m5-large", "m5-xlarge", "upstream")
-DEFAULT_PLATFORM_PRESETS = ("m5-fast", "m5-balanced", "m5-large", "m5-xlarge")
+PRESET_ORDER = ("m5-tiny", "m5-small", "m5-balanced", "m5-large", "m5-xlarge", "upstream")
+DEFAULT_PLATFORM_PRESETS = ("m5-tiny", "m5-small", "m5-balanced", "m5-large", "m5-xlarge")
 
 
 class MLXEngine:

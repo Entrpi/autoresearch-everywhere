@@ -23,6 +23,7 @@ from autoresearch_mlx.train import (
     EMBEDDING_LR,
     MATRIX_LR,
     PRESETS,
+    PRESET_CHOICES,
     SCALAR_LR,
     UNEMBEDDING_LR,
     WEIGHT_DECAY,
@@ -35,7 +36,7 @@ from autoresearch_mlx.train import (
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--preset", choices=tuple(PRESETS), default="m5-xlarge")
+    parser.add_argument("--preset", choices=PRESET_CHOICES, default="m5-xlarge")
     parser.add_argument("--steps", type=int, default=80, help="Measured optimizer steps after warmup.")
     parser.add_argument("--warmup-steps", type=int, default=5, help="Warmup optimizer steps to exclude from the summary.")
     parser.add_argument(

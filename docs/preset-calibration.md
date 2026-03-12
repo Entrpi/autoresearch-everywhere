@@ -64,14 +64,16 @@ It currently stores:
 
 The checked-in calibrations currently cover:
 
-- `m5-fast`
+- `m5-tiny`
+- `m5-small`
 - `m5-balanced`
-- `m5-large`
 - `m5-xlarge`
 
 all on the current reference machine:
 
 - `apple-m5-32gb-10gpu`
+
+`m5-large` is now a shipped bridge preset, but it does not yet have a checked-in eval ladder row. It therefore uses the normal explicit fallback path until it is calibrated.
 
 The runtime selector now consumes these values by default for shipped preset shapes when the user has not explicitly overridden canonical eval settings. Mutated preset shapes still fall back to the default canonical settings until they are calibrated, and exact-hardware matching is required before a checked-in row is trusted at runtime.
 The rows are now also interpreted against the current eval-semantics and runtime-shape signatures, so the selector can distinguish "new hardware" from "same hardware, but this code has changed enough to require revalidation."
@@ -196,9 +198,9 @@ The exact thresholds should come from checked-in measured policy data, not from 
 
 The current measurements already show materially different economics:
 
-- `m5-fast`: `reference` is a very plausible `5m` rung
-- `m5-balanced`: `reference` is the cleanest middle-rung case
-- `m5-large`: `reference` looks more like a long-run rung than a short-run default
+- `m5-tiny`: `reference` is a very plausible `5m` rung
+- `m5-small`: `reference` is the cleanest middle-rung case
+- `m5-balanced`: `reference` looks more like a long-run rung than a short-run default
 - `m5-xlarge`: same story, with even more expensive full upstream eval
 
 A single global eval selector would hide exactly the information the calibrations are supposed to expose.

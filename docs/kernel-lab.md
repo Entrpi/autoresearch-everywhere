@@ -1,6 +1,25 @@
 # Kernel Lab
 
-The kernel lab is the repo's place for backend-specific kernel work under one top-level workflow.
+Kernel-lab is the repo's workshop for trying low-level speedups safely.
+
+Modern training runs spend time in lots of small repeated operations: normalizing activations, reshaping tensors, applying rotary embeddings, preparing attention inputs, and reducing loss-side values. Some of those are good candidates for custom kernels, but dropping kernel experiments straight into the main trainer is risky. A candidate can be correct but irrelevant, fast in isolation but useless end to end, or only beneficial on one machine.
+
+Kernel-lab exists to separate:
+
+- "this looks like a promising low-level optimization"
+- "this is proven enough to earn a place in the real training path"
+
+So the workflow is deliberately staged:
+
+- profile likely targets
+- create a small mutable workspace for one target
+- benchmark and verify it in isolation
+- capture a real backend trace when needed
+- then test it against the real trainer before considering promotion
+
+That story is shared across backends even though the actual kernel substrate differs. Metal kernels on Apple GPUs, Triton/CUDA kernels on NVIDIA, HIP/ROCm kernels on AMD, and future accelerator-specific paths can all plug into the same outer workflow.
+
+If you already know tools like CUTLASS, Triton, CK, or rocWMMA, the easiest way to think about kernel-lab is: it is not another kernel library or compiler layer. It sits one layer above those systems. Those tools are how a backend-specific kernel gets implemented; kernel-lab is how the repo decides which kernel opportunities are worth pursuing, how they are benchmarked, how trace evidence is collected, and what it takes to promote them into the actual training engine.
 
 The current shape is intentionally modest:
 

@@ -33,7 +33,7 @@ from autoresearch_mlx.eval_policy import (
 from autoresearch_mlx.eval_telemetry import summarize_eval_telemetry
 from autoresearch_mlx.model import GPT, GPTConfig
 from autoresearch_mlx.optim import MuonAdamW
-from autoresearch_mlx.train import PRESETS
+from autoresearch_mlx.train import PRESETS, PRESET_CHOICES
 
 
 def parse_int_list(value: str) -> list[int]:
@@ -390,7 +390,7 @@ def build_parser() -> argparse.ArgumentParser:
     eval_batch.add_argument("--markdown-out")
 
     eval_rungs = subparsers.add_parser("eval-rungs", help="Measure cheap/reference/full eval rungs on a checkpoint.")
-    eval_rungs.add_argument("--preset", required=True, choices=tuple(PRESETS))
+    eval_rungs.add_argument("--preset", required=True, choices=PRESET_CHOICES)
     eval_rungs.add_argument("--checkpoint")
     eval_rungs.add_argument("--train-seconds", type=float, default=120.0)
     eval_rungs.add_argument("--force-retrain", action="store_true")
@@ -408,7 +408,7 @@ def build_parser() -> argparse.ArgumentParser:
         aliases=["train-batch"],
         help="Sweep short training operating points across constrained batch and shape axes.",
     )
-    train_grid.add_argument("--preset", required=True, choices=tuple(PRESETS))
+    train_grid.add_argument("--preset", required=True, choices=PRESET_CHOICES)
     train_grid.add_argument("--time-budget", type=float, default=5.0)
     train_grid.add_argument(
         "--device-batches",
@@ -442,7 +442,7 @@ def build_parser() -> argparse.ArgumentParser:
         "telemetry-summary",
         help="Summarize passive eval telemetry coverage for a preset/hardware/policy combination.",
     )
-    telemetry_summary.add_argument("--preset", required=True, choices=tuple(PRESETS))
+    telemetry_summary.add_argument("--preset", required=True, choices=PRESET_CHOICES)
     telemetry_summary.add_argument("--hardware-key", default=detect_current_hardware_key())
     telemetry_summary.add_argument("--policy-version", type=int, default=EVAL_POLICY_VERSION)
     telemetry_summary.add_argument("--json-out")

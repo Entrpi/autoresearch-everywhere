@@ -46,7 +46,7 @@ from tools.calibrate_eval_policy import parse_summary
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-_INTEGRATION_PRESET_ORDER = ("m5-fast", "m5-balanced", "m5-large", "m5-xlarge", "upstream")
+_INTEGRATION_PRESET_ORDER = ("m5-tiny", "m5-small", "m5-balanced", "m5-large", "m5-xlarge", "upstream")
 
 
 @dataclass(frozen=True)

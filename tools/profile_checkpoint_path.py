@@ -39,6 +39,7 @@ from autoresearch_mlx.train import (
     EMBEDDING_LR,
     MATRIX_LR,
     PRESETS,
+    PRESET_CHOICES,
     SCALAR_LR,
     UNEMBEDDING_LR,
     WEIGHT_DECAY,
@@ -51,7 +52,7 @@ from autoresearch_mlx.train import (
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--preset", choices=tuple(PRESETS), default="m5-large")
+    parser.add_argument("--preset", choices=PRESET_CHOICES, default="m5-balanced")
     parser.add_argument("--train-steps", type=int, default=5, help="Optimizer steps to run before profiling save/load.")
     parser.add_argument(
         "--checkpoint-mode",

@@ -321,7 +321,7 @@ def resolve_eval_settings(
             canonical_eval_slices=EVAL_SLICE_CAP,
             canonical_eval_reference_tokens=EVAL_TOKENS,
             canonical_eval_batch_size=default_canonical_eval_batch_size(config.canonical_eval_seq_len),
-            eval_calibration_status="hardware-unmatched",
+            eval_calibration_status="missing-calibration",
             eval_calibration_key=None,
             eval_calibration_confidence=None,
             eval_calibration_effective_confidence=None,
@@ -720,8 +720,8 @@ BENCHMARK_AUTO_MIN_REL_TOL = 0.03
 BENCHMARK_AUTO_MAD_MULTIPLIER = 3.0
 
 PRESETS = {
-    "m5-fast": RunPreset(
-        description="Fast local iteration on Apple Silicon.",
+    "m5-tiny": RunPreset(
+        description="Fastest cheap local iteration on Apple Silicon.",
         seq_len=256,
         eval_tokens=PROXY_EVAL_TOKENS,
         canonical_eval_seq_len=CANONICAL_EVAL_SEQ_LEN,
@@ -729,11 +729,11 @@ PRESETS = {
         canonical_eval_batch_size=default_canonical_eval_batch_size(CANONICAL_EVAL_SEQ_LEN),
         depth=2,
         window_pattern="L",
-        device_batch_size=2,
-        total_batch_size=512,
+        device_batch_size=4,
+        total_batch_size=12288,
     ),
-    "m5-balanced": RunPreset(
-        description="Default M5 baseline with materially better throughput than the upstream shape.",
+    "m5-small": RunPreset(
+        description="Best default starting point on the reference M5 laptop.",
         seq_len=512,
         eval_tokens=PROXY_EVAL_TOKENS,
         canonical_eval_seq_len=CANONICAL_EVAL_SEQ_LEN,
@@ -744,17 +744,29 @@ PRESETS = {
         device_batch_size=4,
         total_batch_size=12288,
     ),
-    "m5-large": RunPreset(
-        description="Larger M5 run when you want more model capacity and can accept slower updates.",
+    "m5-balanced": RunPreset(
+        description="Best current validation-centered target on the reference M5 laptop.",
         seq_len=1024,
         eval_tokens=PROXY_EVAL_TOKENS,
         canonical_eval_seq_len=CANONICAL_EVAL_SEQ_LEN,
         canonical_eval_tokens=CANONICAL_EVAL_TOKENS,
         canonical_eval_batch_size=default_canonical_eval_batch_size(CANONICAL_EVAL_SEQ_LEN),
         depth=6,
-        window_pattern="L",
-        device_batch_size=2,
-        total_batch_size=4096,
+        window_pattern="SSSSL",
+        device_batch_size=4,
+        total_batch_size=12288,
+    ),
+    "m5-large": RunPreset(
+        description="Upstream-leaning bridge preset without the full xlarge overhead.",
+        seq_len=512,
+        eval_tokens=PROXY_EVAL_TOKENS,
+        canonical_eval_seq_len=CANONICAL_EVAL_SEQ_LEN,
+        canonical_eval_tokens=CANONICAL_EVAL_TOKENS,
+        canonical_eval_batch_size=default_canonical_eval_batch_size(CANONICAL_EVAL_SEQ_LEN),
+        depth=8,
+        window_pattern="SSSSL",
+        device_batch_size=4,
+        total_batch_size=16384,
     ),
     "m5-xlarge": RunPreset(
         description="Upstream-scale model shape with an M5-sized batch and dense attention.",
@@ -765,8 +777,8 @@ PRESETS = {
         canonical_eval_batch_size=default_canonical_eval_batch_size(CANONICAL_EVAL_SEQ_LEN),
         depth=8,
         window_pattern="L",
-        device_batch_size=2,
-        total_batch_size=4096,
+        device_batch_size=4,
+        total_batch_size=16384,
     ),
     "upstream": RunPreset(
         description="Original upstream-shaped MLX port for reference, closest to the H100-oriented defaults.",
@@ -781,7 +793,8 @@ PRESETS = {
         total_batch_size=2**16,
     ),
 }
-DEFAULT_PRESET = "m5-balanced"
+PRESET_CHOICES = tuple(PRESETS.keys())
+DEFAULT_PRESET = "m5-small"
 
 
 def resolve_run_config(args: argparse.Namespace) -> RunConfig:
@@ -1003,8 +1016,8 @@ def parse_args() -> RunConfig:
     )
     parser.add_argument(
         "--preset",
-        choices=tuple(PRESETS),
-        help="Named runtime preset. Defaults to the M5-friendly balanced preset.",
+        choices=PRESET_CHOICES,
+        help="Named runtime preset. Defaults to the M5-friendly small preset.",
     )
     parser.add_argument("--time-budget", type=float, help="Training budget in seconds.")
     parser.add_argument(
@@ -1155,6 +1168,11 @@ def describe_eval_policy(args: RunConfig) -> str:
         if args.eval_calibration_status == "hardware-unmatched":
             return (
                 f"default canonical eval settings (no exact calibration row for hardware={args.eval_hardware_key})"
+            )
+        if args.eval_calibration_status == "missing-calibration":
+            return (
+                f"default canonical eval settings (preset {args.preset} has no checked-in calibration row "
+                f"for hardware={args.eval_hardware_key})"
             )
         if args.eval_calibration_status == "stale-age":
             return (

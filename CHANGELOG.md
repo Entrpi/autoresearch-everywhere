@@ -29,7 +29,58 @@ On this hardware, the default canonical matched benchmark window for optimizatio
 
 ## Latest
 
-### New commit — lab: strengthen MLX integration evidence with repeated and cross-preset A/Bs — score `3` — complexity `7`
+### New commit — train: rename the M5 preset ladder and retune shipped defaults — score `4` — complexity `9`
+
+**Human-directed, AI-shaped (4)**
+
+- Renamed the M5 preset ladder so the names scale around the current best validation-centered local target, then retuned the shipped defaults and refreshed the docs/table to match the measured operating points.
+  - Meaning: the ladder is now `m5-tiny`, `m5-small`, `m5-balanced`, `m5-large`, `m5-xlarge`, where `m5-balanced` names the current best validation-centered local target, `m5-small` stays the productive default start, and `m5-large` is the 50.3M upstream-leaning bridge preset.
+  - Motivation: the old names mixed together “best starting point,” “best validation target,” and “bigger model” in a way that no longer matched the measured M5 results. The README table also still had stale batch settings and missing last-loss values.
+  - Purpose: make the preset scale easier to reason about, keep the shipped runtime defaults aligned with the validated M5 operating points, and make the beginner-facing story line up with the real “M5 laptop ↔ H100-shaped upstream” spectrum that `calibrate.py` is meant to explain.
+  - Updated the MLX preset registry and platform preset ordering around the renamed ladder, removed the old preset-name shims from live code, and migrated the active checkpoint/default/telemetry/ledger artifacts in place so the runtime only sees canonical names.
+  - Restamped the seeded M5 eval-calibration rows onto the renamed ladder and kept the bridge preset on the explicit `missing-calibration` fallback path until it gets its own checked-in eval row.
+  - Refreshed the bring-up M5 reference table so platform calibration compares against the renamed ladder and newer batch/window defaults rather than stale lower-batch numbers.
+  - Reworked the README preset section and examples around the new ladder semantics and filled in the missing 5-minute last-loss values in the reference table.
+  - Updated the MLX agent supplement and preset-calibration docs so they describe the renamed ladder and the new seeded-vs-unseeded calibration coverage correctly.
+
+**Grounding**
+
+- Files:
+  - `CHANGELOG.md`
+  - `README.md`
+  - `docs/kernel-lab.md`
+  - `docs/preset-calibration.md`
+  - `docs/program-mlx.md`
+  - `autoresearch_mlx/eval_policy.py`
+  - `autoresearch_mlx/lab_workspace.py`
+  - `autoresearch_mlx/train.py`
+  - `autoresearch_platform/mlx_engine.py`
+  - `tools/calibrate_eval_policy.py`
+  - `tools/calibrate_platform.py`
+  - `tools/profile_loader_path.py`
+  - `tools/profile_checkpoint_path.py`
+  - `tools/profile_resume_convergence.py`
+  - `tools/profile_resume_ready.py`
+- Validation:
+  - `python3 tools/changelog_scores.py --group-by entry --format csv --include-latest --verify`
+  - `python3 tools/render_autonomy_badge.py`
+  - `python3 -m py_compile autoresearch_mlx/train.py autoresearch_mlx/eval_policy.py autoresearch_mlx/lab_workspace.py autoresearch_platform/mlx_engine.py tools/calibrate_eval_policy.py tools/calibrate_platform.py tools/profile_loader_path.py tools/profile_checkpoint_path.py tools/profile_resume_convergence.py tools/profile_resume_ready.py`
+  - `./.venv/bin/python train.py --engine mlx --preset m5-fast --time-budget 0.05 --no-checkpoint` (rejected old preset name as expected)
+  - `./.venv/bin/python train.py --engine mlx --preset m5-small --time-budget 0.05 --no-checkpoint`
+  - `./.venv/bin/python calibrate.py --engine mlx --mode fast --coarse-time-budget 0.2 --ranking-time-budget 0.2 --local-search-time-budget 0.2 --eval-train-seconds 0.2 --eval-rungs cheap,reference --output-dir /tmp/autoresearch_preset_rename_fast2 --force`
+  - `./.venv/bin/python kernel-lab.py --engine mlx promotion-check --target logits_softcap --workspace /tmp/mlx-logits-integration`
+- Measurements:
+  - Old preset names are no longer accepted in the live trainer path.
+  - A fresh `m5-small` run now resolves `eval_calibration_status=calibrated` again with matching current signatures.
+  - A fresh fast bring-up rewrote the cached MLX platform default to canonical names and current signatures:
+    - preset: `m5-tiny`
+    - `eval_semantics_signature=896401b41fddf1c4`
+    - `runtime_shape_signature=2706200255536d41`
+  - No-preset kernel-lab promotion checks now resolve directly from that refreshed calibrated platform default with no preset-translation layer.
+
+## Committed History
+
+### March 12, 2026 — `2a86f0d` — lab: strengthen MLX integration evidence with repeated and cross-preset A/Bs — score `3` — complexity `7`
 
 **AI-identified within brief, human-shaped (3)**
 
@@ -75,8 +126,6 @@ On this hardware, the default canonical matched benchmark window for optimizatio
     - overall `integration_ab_median_delta_steady_state_tok_per_sec=-2836.5`
     - `integration_ab_median_delta_relative_pct_steady_state_tok_per_sec=null` because the older one-off events did not carry relative deltas, so the stricter ledger now refuses to infer a mixed absolute/relative aggregate.
   - `promotion-check` now uses the broader cross-preset evidence by default when it exists and keeps mixed targets in the stabilization path instead of treating one positive run as enough for promotion.
-
-## Committed History
 
 ### March 12, 2026 — `335d608` — lab: default MLX integration checks to calibrated presets — score `4` — complexity `7`
 

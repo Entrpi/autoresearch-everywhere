@@ -27,7 +27,7 @@ from autoresearch_platform.engines import (  # noqa: E402
 )
 from autoresearch_platform.platform_defaults import write_platform_default_cache  # noqa: E402
 
-M5_REFERENCE_DEFAULT_PRESET = "m5-balanced"
+M5_REFERENCE_DEFAULT_PRESET = "m5-small"
 PLATFORM_CALIBRATION_SCHEMA_VERSION = 2
 
 MODE_FAST = "fast"
@@ -62,10 +62,11 @@ MODE_SPECS = {
 
 
 M5_TRAIN_REFERENCE = {
-    "m5-fast": {"steady_state_tok_per_sec": 70100.0, "peak_vram_mb": 174.5},
-    "m5-balanced": {"steady_state_tok_per_sec": 34500.0, "peak_vram_mb": 949.9},
-    "m5-large": {"steady_state_tok_per_sec": 14600.0, "peak_vram_mb": 1944.3},
-    "m5-xlarge": {"steady_state_tok_per_sec": 7800.0, "peak_vram_mb": 4294.2},
+    "m5-tiny": {"steady_state_tok_per_sec": 103022.3, "peak_vram_mb": 281.8},
+    "m5-small": {"steady_state_tok_per_sec": 46033.7, "peak_vram_mb": 1014.2},
+    "m5-balanced": {"steady_state_tok_per_sec": 18218.5, "peak_vram_mb": 2772.3},
+    "m5-large": {"steady_state_tok_per_sec": 13525.1, "peak_vram_mb": 2664.1},
+    "m5-xlarge": {"steady_state_tok_per_sec": 9022.3, "peak_vram_mb": 7440.6},
 }
 
 
@@ -178,12 +179,11 @@ def default_output_dir(*, engine_name: str, hardware_key: str) -> Path:
 def select_presets(engine: TrainingEngine, requested: list[str]) -> list[str]:
     if not requested:
         return list(engine.default_platform_presets())
-    allowed = list(engine.preset_order())
     selected = [preset for preset in requested if preset in engine.preset_catalog()]
     missing = [preset for preset in requested if preset not in engine.preset_catalog()]
     if missing:
         raise ValueError(f"Unknown presets: {missing}")
-    return selected
+    return list(dict.fromkeys(selected))
 
 
 def preset_index(engine: TrainingEngine, preset: str) -> int:

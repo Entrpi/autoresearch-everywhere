@@ -28,10 +28,12 @@ Each experiment runs on Apple Silicon using MLX. The default loop uses a fixed 5
 uv run train.py --engine mlx
 ```
 
-The default preset in `autoresearch_mlx/train.py` is `m5-balanced`. Useful alternatives through the generic top-level entrypoint are:
+The default preset in `autoresearch_mlx/train.py` is `m5-small`. Useful alternatives through the generic top-level entrypoint are:
 
 ```bash
-uv run train.py --engine mlx --preset m5-fast
+uv run train.py --engine mlx --preset m5-tiny
+uv run train.py --engine mlx --preset m5-small
+uv run train.py --engine mlx --preset m5-balanced
 uv run train.py --engine mlx --preset m5-large
 uv run train.py --engine mlx --preset m5-xlarge
 uv run train.py --engine mlx --preset upstream
@@ -50,7 +52,7 @@ Do not treat the code-signature checks as the main trigger for rerunning platfor
 
 Treat signatures as the tripwire that prevents silent over-trust when judgment or process misses something, not as a substitute for proactive recalibration after important findings.
 
-`uv run prepare.py --engine mlx` now builds the shipped prepacked row caches by default so `m5-fast`, `m5-balanced`, `m5-large`, and `m5-xlarge` all have a prepared fast path. Use `uv run prepare.py --engine mlx --skip-prepacked-cache` only when you intentionally want the live packing fallback.
+`uv run prepare.py --engine mlx` now builds the shipped prepacked row caches by default so `m5-tiny`, `m5-small`, `m5-balanced`, `m5-large`, and `m5-xlarge` all have a prepared fast path. Use `uv run prepare.py --engine mlx --skip-prepacked-cache` only when you intentionally want the live packing fallback.
 
 For runs above 5 minutes, `autoresearch_mlx/train.py` now enables exact full-state checkpoints by default using the repo's conservative checkpoint-frequency selector. Use `--checkpoint-path` to choose the checkpoint directory while keeping that selector, `--checkpoint-interval` to pin the cadence, or `--no-checkpoint` to disable it. Exact sync remains the default checkpoint path. `weights_only` remains in-tree only as a failed approximate-resume experiment for historical comparison and targeted ablations. `--checkpoint-save-mode async` is available for exact background writes when wall-clock deadline behavior matters, but it is still an optional experimental variant rather than the default path.
 

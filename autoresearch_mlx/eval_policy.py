@@ -26,8 +26,8 @@ DEFAULT_EVAL_HARDWARE_KEY = "apple-m5-32gb-10gpu"
 REFERENCE_EVAL_TOKENS = 3 * 524288
 EVAL_CALIBRATION_AGING_DAYS = 30
 EVAL_CALIBRATION_STALE_DAYS = 90
-REFERENCE_EVAL_SEMANTICS_SIGNATURE = "7524a6d303c964de"
-REFERENCE_RUNTIME_SHAPE_SIGNATURE = "b87187acb32f420d"
+REFERENCE_EVAL_SEMANTICS_SIGNATURE = "896401b41fddf1c4"
+REFERENCE_RUNTIME_SHAPE_SIGNATURE = "2706200255536d41"
 
 
 @dataclass(frozen=True)
@@ -280,13 +280,13 @@ def _measurement(
 
 DEFAULT_EVAL_CALIBRATIONS = (
     EvalCalibration(
-        key="m5-fast_apple-m5-32gb-10gpu",
-        label="m5-fast eval ladder on Apple M5 32GB / 10 GPU cores",
+        key="m5-tiny_apple-m5-32gb-10gpu",
+        label="m5-tiny eval ladder on Apple M5 32GB / 10 GPU cores",
         hardware_key=DEFAULT_EVAL_HARDWARE_KEY,
-        preset="m5-fast",
+        preset="m5-tiny",
         seq_len=CANONICAL_EVAL_SEQ_LEN,
         batch_size=default_eval_batch_size(CANONICAL_EVAL_SEQ_LEN),
-        source="Measured from a 120s m5-fast checkpoint on the reference M5 machine.",
+        source="Measured from a 120s m5-tiny checkpoint on the reference M5 machine.",
         policy_version=EVAL_POLICY_VERSION,
         confidence="seed-single-checkpoint",
         measured_train_seconds=120.0,
@@ -315,13 +315,13 @@ DEFAULT_EVAL_CALIBRATIONS = (
         ),
     ),
     EvalCalibration(
-        key="m5-balanced_apple-m5-32gb-10gpu",
-        label="m5-balanced eval ladder on Apple M5 32GB / 10 GPU cores",
+        key="m5-small_apple-m5-32gb-10gpu",
+        label="m5-small eval ladder on Apple M5 32GB / 10 GPU cores",
         hardware_key=DEFAULT_EVAL_HARDWARE_KEY,
-        preset="m5-balanced",
+        preset="m5-small",
         seq_len=CANONICAL_EVAL_SEQ_LEN,
         batch_size=default_eval_batch_size(CANONICAL_EVAL_SEQ_LEN),
-        source="Measured from a 120s m5-balanced checkpoint on the reference M5 machine.",
+        source="Measured from a 120s m5-small checkpoint on the reference M5 machine.",
         policy_version=EVAL_POLICY_VERSION,
         confidence="seed-single-checkpoint",
         measured_train_seconds=120.0,
@@ -350,13 +350,13 @@ DEFAULT_EVAL_CALIBRATIONS = (
         ),
     ),
     EvalCalibration(
-        key="m5-large_apple-m5-32gb-10gpu",
-        label="m5-large eval ladder on Apple M5 32GB / 10 GPU cores",
+        key="m5-balanced_apple-m5-32gb-10gpu",
+        label="m5-balanced eval ladder on Apple M5 32GB / 10 GPU cores",
         hardware_key=DEFAULT_EVAL_HARDWARE_KEY,
-        preset="m5-large",
+        preset="m5-balanced",
         seq_len=CANONICAL_EVAL_SEQ_LEN,
         batch_size=default_eval_batch_size(CANONICAL_EVAL_SEQ_LEN),
-        source="Measured from a 120s m5-large checkpoint on the reference M5 machine.",
+        source="Measured from a 120s m5-balanced checkpoint on the reference M5 machine.",
         policy_version=EVAL_POLICY_VERSION,
         confidence="seed-single-checkpoint",
         measured_train_seconds=120.0,

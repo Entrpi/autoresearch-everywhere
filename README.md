@@ -15,9 +15,9 @@ By policy, this branch is reserved for AI-shaped or AI-authored code changes; fu
 
 ## Start Here
 
-Because this project targets broad platform support, the first step is to calibrate the training shape to the machine. The best setup for a $40K datacenter GPU is not the best setup for a laptop, so the repo is designed to find a good starting point for your hardware before it starts the usual autonomous agent research loop.
+Because this project targets broad platform support, the first step is to find the fastest path to being productive on the machine you actually have. The best setup for a recent ML-focused professional laptop is not the best setup for a recent $40K datacenter GPU, so the repo is designed to calibrate model shape, batch shape, and evaluation cost to your hardware before it starts the usual autonomous agent research loop.
 
-Initial development was validated against an M5 MacBook Pro, so there are ready-to-use M5 presets you can jump into immediately. More presets should follow with broader adoption and further testing. If this is a new machine, do bring-up first. If this is an M5 machine close to the current reference setup, you can skip straight to training.
+Initial development was validated against an M5 MacBook Pro, so there are ready-to-use M5 presets you can jump into immediately. More presets should follow with broader adoption and further testing. If this is a new machine, do bring-up first. If this is a base M4 or M5 machine, you can usually skip straight to training.
 
 **Default path requirements:** Apple Silicon, macOS, Python 3.10+, and [uv](https://docs.astral.sh/uv/). That is the full MLX bring-up path described below. CUDA is also supported behind `--engine cuda`, but with a different hardware/runtime envelope.
 
@@ -44,11 +44,12 @@ The report includes:
 
 - a candidate default for that hardware
 - lower / recommended / upper / reference zones
+- a comparison between your machine, what works best on an M5 laptop, and the H100-oriented starting point Karpathy hand-shaped in the upstream project
 - machine-readable artifacts for later promotion or re-checking
 
 It also writes the candidate default into the local platform-default cache for that engine and hardware key. After that, real kernel-lab integration tests can use the calibrated point for the current device automatically instead of requiring a manual preset every time.
 
-By default, the bring-up sweep only considers the practical MLX preset families (`m5-fast` through `m5-xlarge`). Add `--presets ...,upstream` only when you explicitly want the slower upstream-style reference included in the same run.
+By default, the bring-up sweep only considers the practical MLX preset families (`m5-tiny`, `m5-small`, `m5-balanced`, `m5-large`, and `m5-xlarge`). Add `--presets ...,upstream` only when you explicitly want the slower upstream-style reference included in the same run.
 On Apple Silicon, `prepare.py`, `train.py`, and `calibrate.py` default to the MLX engine automatically. `--engine cuda` is available too. CUDA already exceeds the original upstream path in structure and runtime-awareness here, but MLX is still the only engine with the full evaluation-calibration and default-promotion flow today.
 
 For the actual implementation details, see [docs/platform-calibration.md](docs/platform-calibration.md).
@@ -115,11 +116,26 @@ If you want more detail about the calibration logic beneath those defaults, see 
 
 The repo now also has a top-level `kernel-lab.py` entrypoint for backend-specific kernel work.
 
-The idea is the same one that makes the rest of the repo manageable:
+Kernel-lab is the workshop for trying low-level speedups safely.
 
-- keep a generic front door at the top level
-- keep backend-specific implementation details under `autoresearch_*`
-- make room for more than one backend without growing separate one-off workflows
+Training spends time in lots of small repeated operations: norms, reshapes, rotary embedding, attention setup, loss-side reductions, and related path glue. Some of those are good candidates for custom kernels, but dropping kernel experiments straight into the main trainer is risky. A candidate can be correct but irrelevant, fast in isolation but useless end to end, or only beneficial on one machine.
+
+Kernel-lab exists to separate:
+
+- "this looks like a promising low-level optimization"
+- "this is proven enough to earn a place in the real training path"
+
+So the flow is deliberately staged:
+
+- profile likely targets
+- create a small mutable workspace for one target
+- benchmark and verify it in isolation
+- capture a real backend trace when needed
+- then test it against the real trainer before considering promotion
+
+That workflow is meant to generalize across backends even though the kernel substrate changes. Metal kernels on Apple GPUs, Triton/CUDA kernels on NVIDIA, HIP/ROCm kernels on AMD, and future accelerator-specific paths can all plug into the same outer loop.
+
+If you already know tools like CUTLASS or Triton, the easiest framing is: those are implementation substrates; kernel-lab is the workflow layer above them that decides which kernel opportunities are worth pursuing, how they are benchmarked, how trace evidence is collected, and what it takes to promote them into the actual training engine.
 
 Today the lab is intentionally narrow and MLX-first:
 
@@ -192,33 +208,49 @@ For the current design and scope, see [docs/kernel-lab.md](docs/kernel-lab.md).
 
 ## Presets
 
-The MLX training path supports named presets so the default shape is reasonable for Apple Silicon instead of mirroring an H100-oriented baseline.
+The preset system exists to give you a clear scale reference between what works best on a ~$2,000 Apple M5 laptop vs a ~$20,000 H100 datacenter GPU. `calibrate.py` then shows you where your machine fits on that spectrum.
 
-| Preset | Seq len | Depth / d_model / heads | Params | Batch (device / total tokens) | Window | Approx. tok/sec | Approx. peak memory | 5-min `val_bpb` | 5-min last loss |
-| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| `m5-fast` | `256` | `2 / 128 / 1` | `3.5M` | `2 / 512` | `L` | `75k-90k` | `~213 MB` | `1.929023` | `5.331471` |
-| `m5-balanced` | `512` | `4 / 256 / 2` | `11.5M` | `4 / 2048` | `L` | `35k-37k` | `~1.0 GB` | `1.575952` | `4.234088` |
-| `m5-large` | `1024` | `6 / 384 / 3` | `26.3M` | `2 / 4096` | `L` | `14k-15k` | `~2.46 GB` | `1.601354` | `4.136220` |
-| `m5-xlarge` | `2048` | `8 / 512 / 4` | `50.3M` | `2 / 4096` | `L` | `7.4k-8.0k` | `~4.19 GB` | `1.765520` | `4.688538` |
-| `upstream` | `2048` | `8 / 512 / 4` | `50.3M` | `8 / 65536` | `SSSL` | not recommended on this machine | not recommended on this machine | `n/a` | `n/a` |
+If you are on a base M4 or M5 Mac and want to start quickly, use:
+
+- `m5-small` if you want the best default starting point
+- `m5-tiny` if you want the fastest cheap experiment loop
+- `m5-balanced` if you want the best current validation-centered local run
+- `m5-large` if you want something closer to the upstream model shape without jumping all the way to xlarge
+- `m5-xlarge` if you want the largest practical local model on this class of machine
+
+If you are on an M4 Pro, M4 Max, M5 Pro, M5 Max, or anything outside that reference class, run `calibrate.py` first. The bring-up report is the better answer for both productivity and comparison; the table below is just rough orientation.
+
+`upstream` is not a normal starting preset. It is the literal upstream-shaped reference: the H100-oriented starting point Karpathy hand-shaped in the original project. Keep it around for comparison, not as the usual first thing to run locally.
+
+### Preset Reference (metrics are results from an M5 Mac)
+
+| Preset          | Best first use              | Seq len  | Depth / d_model / heads | Params    | Batch (device / total tokens) | Window   | Approx. tok/sec | 5-min steps | Approx. peak memory | 5-min `val_bpb` | 5-min last loss |
+| --------------- | --------------------------- | -------- | ----------------------- | --------- | ----------------------------- | -------- | ---------------- | ------------ | ------------------- | ---------------- | --------------- |
+| `m5-tiny`       | Fast iteration              | `256`    | `2 / 128 / 1`           | `3.5M`    | `4 / 12288`                  | `L`      | `~103k`          | `2516`       | `~282 MB`           | `1.715180`       | `4.134272`      |
+| `m5-small`      | Default starting point      | `512`    | `4 / 256 / 2`           | `11.5M`   | `4 / 12288`                  | `L`      | `~46k`           | `1066`       | `~1.01 GB`          | `1.441619`       | `3.939787`      |
+| `m5-balanced`   | Best validation target      | `1024`   | `6 / 384 / 3`           | `26.3M`   | `4 / 12288`                  | `SSSSL`  | `~18.2k`         | `444`        | `~2.77 GB`          | `1.428708`       | `4.162026`      |
+| `m5-large`      | Upstream-leaning bridge run | `512`    | `8 / 512 / 4`           | `50.3M`   | `4 / 16384`                  | `SSSSL`  | `~13.5k`         | `250`        | `~2.66 GB`          | `1.606594`       | `4.521518`      |
+| `m5-xlarge`     | Largest practical local run | `2048`   | `8 / 512 / 4`           | `50.3M`   | `4 / 16384`                  | `L`      | `~8.8k`          | `162`        | `~7.44 GB`          | `1.748045`       | `4.933070`      |
+| `upstream`      | Too heavy for laptops, abysmally slow | `2048`   | `8 / 512 / 4`           | `50.3M`   | `8 / 65536`                  | `SSSL`   | `n/a`            | `n/a`        | `n/a`               | `n/a`            | `n/a`           |
 
 Window legend: `L` = full causal attention at that layer; `S` = local sliding-window attention; patterns such as `SSSL` repeat across layers with the last layer forced to `L`.
 
 Examples:
 
 ```bash
-uv run train.py --preset m5-fast
+uv run train.py --preset m5-tiny
+uv run train.py --preset m5-small
 uv run train.py --preset m5-balanced
 uv run train.py --preset m5-large
 uv run train.py --preset m5-xlarge
 uv run train.py --preset upstream
 ```
 
-These presets may be revised after profiling on newly released M5 Pro and M5 Max systems.
+These presets may be revised after profiling on newer Apple Silicon systems and on non-Apple hardware as the broader calibration flow gets more adoption.
 
-The throughput figures above are approximate steady-state numbers from local runs on the tested 32 GB / 10-core-GPU M5 MacBook Pro with token caches enabled. The batch column is `device_batch_size / total_batch_size`, where `total_batch_size` is tokens per optimizer step after gradient accumulation. The `5-min val_bpb` column is the canonical comparison metric from a full fixed-budget run, and `5-min last loss` is the final debiased smoothed training loss printed at the end of that run.
+The throughput figures above are approximate session-average numbers from fresh 5-minute local runs on the tested 32 GB / 10-core-GPU M5 MacBook Pro with token caches enabled. The batch column is `device_batch_size / total_batch_size`, where `total_batch_size` is tokens per optimizer step after gradient accumulation. The `5-min steps` column is the total optimizer-step count completed in that fixed budget. The `5-min val_bpb` column is the canonical comparison metric from the final evaluation, and `5-min last loss` is the final debiased smoothed training loss printed at the end of the run. `m5-xlarge` and `m5-large` use `16384` total tokens because `12288` is not divisible by `4 × 2048`, and the new `m5-balanced` row uses `SSSSL` because that long-context local-window mix beat dense `L` on both `val_bpb` and throughput in matched 5-minute reruns. `m5-large` is intentionally shipped before it has a checked-in eval ladder row, so it currently uses the explicit canonical fallback path until that calibration is added. The names now describe where a preset sits relative to the current best validation-centered local target, not just raw parameter count.
 
-`m5-xlarge` is the practical way to test the upstream-scale `50.3M` / `2048` model on this machine. `upstream` is kept as the literal reference port, including its H100-shaped batch and `SSSL` attention pattern.
+`m5-xlarge` is the practical way to test the upstream-scale `50.3M` / `2048` model on this machine. `upstream` is kept as the literal reference port, including the H100-shaped batch and `SSSL` attention pattern Karpathy chose upstream, so it is useful for comparison but usually not the right first thing to run.
 
 ## Optional Local Tooling
 
@@ -280,10 +312,10 @@ Current project snapshot from [CHANGELOG.md](CHANGELOG.md):
 
 | Metric | Value |
 | --- | --- |
-| Mean autonomy score | `3.38 / 6` |
-| Mean complexity | `7.33 / commit` |
-| Mean score per top-level bullet | `3.44 / 6` |
-| History covered | `49` commits across `12` subsystems |
+| Mean autonomy score | `3.39 / 6` |
+| Mean complexity | `7.36 / commit` |
+| Mean score per top-level bullet | `3.45 / 6` |
+| History covered | `50` commits across `12` subsystems |
 <!-- autonomy-golf-snapshot:end -->
 
 Refresh with:
