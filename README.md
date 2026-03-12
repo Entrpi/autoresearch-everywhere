@@ -151,7 +151,7 @@ Today the lab is still MLX-deep first, but CUDA now has the first trace-first au
 - `uv run kernel-lab.py --engine mlx review-trace --workspace /tmp/mlx-rmsnorm-lab --metadata /tmp/mlx-rmsnorm-lab.metadata.json --relevance high`
 - `uv run kernel-lab.py --engine mlx integration-ab --workspace /tmp/mlx-rmsnorm-lab --time-budget 20 --benchmark-skip-eval --no-checkpoint`
 
-CUDA now has the first trace-first automation path too:
+CUDA now has the first trace-first automation path too, and a small first starter-workspace layer on top of it:
 
 - `uv run kernel-lab.py --engine cuda list-targets`
 - `uv run kernel-lab.py --engine cuda capture --preset upstream --time-budget 20 --output /tmp/cuda-upstream-trace`
@@ -160,6 +160,9 @@ CUDA now has the first trace-first automation path too:
 - `uv run kernel-lab.py --engine cuda evidence --target launch_fusion --preset upstream`
 - `uv run kernel-lab.py --engine cuda orchestrate --trace-profile /tmp/cuda-upstream-trace.profile.json --workspace-root /tmp/cuda-lab`
 - `uv run kernel-lab.py --engine cuda promotion-check --target launch_fusion --preset upstream`
+- `uv run kernel-lab.py --engine cuda extract --profile /tmp/cuda-upstream-trace.profile.json --workspace /tmp/cuda-lab/launch_fusion --rank 1`
+- `uv run kernel-lab.py --engine cuda bench --workspace /tmp/cuda-lab/launch_fusion --device cuda --quick`
+- `uv run kernel-lab.py --engine cuda verify --workspace /tmp/cuda-lab/launch_fusion --device cuda --quick`
 
 The lab now has two layers on purpose:
 
@@ -178,8 +181,12 @@ For CUDA, the split is similar but the trace side is more automatable:
 - `capture` wraps the real trainer under Nsight Systems and writes a `.nsys-rep` plus a metadata sidecar
 - `trace-profile` turns the exported Nsight reports into ranked kernel target families
 - `auto-review` classifies the run as launch-bound, sync-bound, copy-bound, kernel-dominated, or mixed
-- `evidence` and `promotion-check` expose whether a target is still just trace-ranked, already trace-backed, or deprioritized by the automated review
-- `orchestrate` now consumes the trace profile plus accumulated evidence to pick the next CUDA target family to pursue, even though backend-specific workspaces are still deferred
+- `evidence` and `promotion-check` expose whether a target is still just trace-ranked, already trace-backed, ready for a starter workspace, or deprioritized by the automated review
+- `orchestrate` now consumes the trace profile plus accumulated evidence to pick the next CUDA target family to pursue, and for starter-ready families it emits real `extract` / `bench` / `verify` commands instead of just placeholder notes
+- starter CUDA workspaces currently exist for:
+  - `launch_fusion`
+  - `norm`
+  - `loss_prelude`
 - the long-term goal is that CUDA trace review becomes automated-by-default, with GUI inspection as the escalation path rather than the first step
 
 The lab also keeps a small evidence ledger at `results/kernel_lab/ledger.jsonl`. That lets later profiles and plans see whether a target is still unexplored, only verified, trace-backed, or ready for an integration A/B instead of treating every target as a fresh idea.
@@ -331,10 +338,10 @@ Current project snapshot from [CHANGELOG.md](CHANGELOG.md):
 
 | Metric | Value |
 | --- | --- |
-| Mean autonomy score | `3.41 / 6` |
-| Mean complexity | `7.41 / commit` |
-| Mean score per top-level bullet | `3.46 / 6` |
-| History covered | `51` commits across `12` subsystems |
+| Mean autonomy score | `3.42 / 6` |
+| Mean complexity | `7.44 / commit` |
+| Mean score per top-level bullet | `3.47 / 6` |
+| History covered | `52` commits across `12` subsystems |
 <!-- autonomy-golf-snapshot:end -->
 
 Refresh with:

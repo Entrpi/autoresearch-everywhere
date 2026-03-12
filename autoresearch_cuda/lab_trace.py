@@ -14,6 +14,13 @@ from pathlib import Path
 from typing import Any
 
 from autoresearch_cuda.config import CUDA_PRESETS
+from autoresearch_cuda.lab_workspace import (
+    CUDA_STARTER_TARGET_KEYS,
+    bench_cuda_workspace,
+    extract_cuda_workspace_from_profile,
+    init_cuda_workspace,
+    verify_cuda_workspace,
+)
 from autoresearch_cuda.runtime import detect_cuda_runtime_profile, query_nvidia_driver_version
 from autoresearch_lab.ledger import append_lab_event
 from autoresearch_lab.labs import (
@@ -51,7 +58,8 @@ CUDA_TRACE_TARGETS: dict[str, LabTarget] = {
         key="norm",
         description="RMSNorm / LayerNorm family kernels",
         metric="time_share_pct",
-        status="trace-ready",
+        status="starter-ready",
+        notes="Starter-ready fixed workspace harness exists.",
     ),
     "fused_mlp": LabTarget(
         key="fused_mlp",
@@ -63,7 +71,8 @@ CUDA_TRACE_TARGETS: dict[str, LabTarget] = {
         key="loss_prelude",
         description="Softmax / logits / cross-entropy-side kernels",
         metric="time_share_pct",
-        status="trace-ready",
+        status="starter-ready",
+        notes="Starter-ready fixed workspace harness exists.",
     ),
     "optimizer_update": LabTarget(
         key="optimizer_update",
@@ -87,8 +96,8 @@ CUDA_TRACE_TARGETS: dict[str, LabTarget] = {
         key="launch_fusion",
         description="Launch-bound regions where fusion or batching may matter more than a single kernel rewrite",
         metric="time_share_pct",
-        status="trace-ready",
-        notes="This is a workflow target family, not one kernel workspace.",
+        status="starter-ready",
+        notes="Starter-ready fused pointwise workspace exists; use traces to validate that launch pressure is real.",
     ),
 }
 
@@ -752,34 +761,40 @@ class CudaKernelLab:
     name = "cuda"
     backend_family = "cuda"
     capabilities = LabCapabilities(
-        supports_workspace_init=False,
-        supports_fixed_bench=False,
+        supports_workspace_init=True,
+        supports_fixed_bench=True,
         supports_profile=False,
-        supports_extract=False,
+        supports_extract=True,
         supports_orchestrate=True,
-        supports_verify=False,
+        supports_verify=True,
         supports_capture=True,
         supports_trace_profile=True,
         supports_auto_trace_review=True,
     )
 
     def target_catalog(self) -> dict[str, LabTarget]:
-        return CUDA_TRACE_TARGETS
+        return {
+            key: replace(
+                target,
+                status="starter-ready" if key in CUDA_STARTER_TARGET_KEYS else target.status,
+            )
+            for key, target in CUDA_TRACE_TARGETS.items()
+        }
 
     def init_workspace(self, *, target: str, workspace: Path) -> Path:
-        raise NotImplementedError("CUDA kernel workspaces are not implemented yet; use capture/trace-profile/auto-review first.")
+        return init_cuda_workspace(target=target, workspace=workspace)
 
-    def bench_workspace(self, *, workspace: Path, quick: bool = False):
-        raise NotImplementedError("CUDA fixed bench workspaces are not implemented yet.")
+    def bench_workspace(self, *, workspace: Path, quick: bool = False, device: str = "auto"):
+        return bench_cuda_workspace(workspace=workspace, quick=quick, device=device)
 
-    def verify_workspace(self, *, workspace: Path, quick: bool = False):
-        raise NotImplementedError("CUDA fixed bench workspaces are not implemented yet.")
+    def verify_workspace(self, *, workspace: Path, quick: bool = False, device: str = "auto"):
+        return verify_cuda_workspace(workspace=workspace, quick=quick, device=device)
 
     def profile_targets(self, *, preset: str, top_k: int = 10):
         raise NotImplementedError("CUDA heuristic target profiling is not implemented yet; start from a real trace.")
 
     def extract_from_profile(self, *, profile_path: Path, workspace: Path, rank: int = 1):
-        raise NotImplementedError("CUDA workspace extraction is not implemented yet.")
+        return extract_cuda_workspace_from_profile(profile_path=profile_path, workspace=workspace, rank=rank)
 
     def orchestrate_from_profile(
         self,
@@ -827,12 +842,21 @@ class CudaKernelLab:
             status = "trace-deprioritized"
             commands.append("# this target currently looks low-value; prioritize a different CUDA target first")
         else:
-            commands.extend(
-                [
-                    "# this target is trace-backed and is a good candidate for future CUDA/Triton workspace work",
-                    "# once CUDA workspaces exist, start from this target family before chasing lower-ranked kernels",
-                ]
-            )
+            if target in CUDA_STARTER_TARGET_KEYS:
+                commands.extend(
+                    [
+                        f"uv run kernel-lab.py --engine cuda extract --profile {profile_path.expanduser()} --workspace {(workspace_root.expanduser() / target)} --rank {rank}",
+                        f"uv run kernel-lab.py --engine cuda bench --workspace {(workspace_root.expanduser() / target)} --device cuda --quick",
+                        f"uv run kernel-lab.py --engine cuda verify --workspace {(workspace_root.expanduser() / target)} --device cuda --quick",
+                    ]
+                )
+            else:
+                commands.extend(
+                    [
+                        "# this target is trace-backed, but no starter workspace exists yet",
+                        "# use it to decide the next CUDA/Triton workspace family to add",
+                    ]
+                )
         return LabOrchestrationPlan(
             engine="cuda",
             target=target,
@@ -847,7 +871,9 @@ class CudaKernelLab:
                 "trace_profile_path": str(profile_path.expanduser()),
                 "trace_metadata_path": str(trace_metadata_path.expanduser()) if trace_metadata_path else None,
                 "evidence_summary": asdict(summary),
-                "notes": "CUDA orchestration is trace-first today; no fixed workspace implementation exists yet.",
+                "notes": (
+                    "CUDA orchestration stays trace-first. Starter workspaces currently exist for a narrow set of families."
+                ),
             },
         )
 
@@ -889,12 +915,25 @@ class CudaKernelLab:
                 "# this target is currently deprioritized by automated CUDA trace evidence",
                 "# capture a new trace on a different preset only if you believe the current trace is unrepresentative",
             )
-        elif summary.auto_review_ok_count > 0 or summary.trace_profile_ok_count > 0:
-            status = "ready-for-cuda-workspace"
+        elif target in CUDA_STARTER_TARGET_KEYS and summary.verify_ok_count > 0:
+            status = "ready-for-cuda-integration"
             commands = (
-                "# this target is trace-backed and is the right place to start once CUDA/Triton workspaces are added",
-                "# until then, keep collecting traces and use `evidence` to confirm that it stays important",
+                "# this starter workspace has both trace-backed relevance and a passing fixed-harness verify run",
+                "# the next step is a real CUDA trainer integration path for this target family",
             )
+        elif summary.auto_review_ok_count > 0 or summary.trace_profile_ok_count > 0:
+            if target in CUDA_STARTER_TARGET_KEYS:
+                status = "ready-for-cuda-workspace"
+                commands = (
+                    "# this target is trace-backed and has a starter CUDA workspace available now",
+                    "# start with `extract`, then `bench`, then `verify` before attempting trainer integration",
+                )
+            else:
+                status = "ready-for-cuda-workspace-family"
+                commands = (
+                    "# this target is trace-backed and is the right place to start for a future CUDA/Triton workspace family",
+                    "# keep collecting traces and use `evidence` to confirm that it stays important",
+                )
         elif summary.capture_ok_count > 0:
             status = "needs-trace-profile"
             commands = (
@@ -917,7 +956,9 @@ class CudaKernelLab:
             commands=commands,
             details={
                 "evidence_summary": asdict(summary),
-                "notes": "CUDA promotion currently stops at trace-backed prioritization because Triton/CUDA workspaces are not implemented yet.",
+                "notes": (
+                    "CUDA promotion is currently split: starter targets can move into fixed workspaces now, while broader families remain trace-backed planning targets."
+                ),
             },
         )
 

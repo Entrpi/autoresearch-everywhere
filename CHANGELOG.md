@@ -29,7 +29,53 @@ On this hardware, the default canonical matched benchmark window for optimizatio
 
 ## Latest
 
-### New commit — lab: add CUDA trace automation and orchestration foundation — score `4` — complexity `10`
+### New commit — lab: add CUDA starter workspaces and fixed harnesses — score `4` — complexity `9`
+
+**Human-directed, AI-shaped (4)**
+
+- Added the first narrow CUDA workspace layer on top of the trace-first lab, covering starter-ready `launch_fusion`, `norm`, and `loss_prelude` families with `init`, `bench`, `verify`, and `extract`.
+  - Meaning: CUDA kernel-lab is no longer only “capture, classify, and plan.” For a few well-chosen families, the repo can now open a mutable workspace, run a fixed harness, and record workspace-local evidence under the same shared lab boundary.
+  - Motivation: the trace-first path was the right first move on NVIDIA, but it still stopped at “this looks important.” The next useful proof is that a trace-backed CUDA target can turn into a real workspace loop without forcing the whole backend to wait for a full Triton integration story.
+  - Purpose: connect automated CUDA trace review to actual workspace work, while keeping scope narrow enough that the first CUDA workspace layer is trustworthy and easy to extend.
+  - Added `/Users/ent/Codex/autoresearch/autoresearch_cuda/lab_workspace.py` with starter templates, fixed benchmark cases, and correctness harnesses for the first three CUDA target families.
+  - Updated the CUDA lab capabilities and CLI so `kernel-lab.py --engine cuda` now supports `init`, `bench`, `verify`, and `extract` in addition to the existing trace-first commands.
+  - Made CUDA orchestration emit real `extract` / `bench` / `verify` commands for starter-ready targets, while keeping broader families trace-backed planning targets.
+  - Tightened CUDA promotion states so starter-ready families and broader future workspace families are no longer described the same way.
+  - Updated the docs to explain the new CUDA split: trace-first by default, with a small starter-workspace layer where the target family is narrow enough to benchmark honestly.
+
+**Grounding**
+
+- Files:
+  - `CHANGELOG.md`
+  - `README.md`
+  - `program.md`
+  - `docs/kernel-lab.md`
+  - `docs/mlx-port-architecture.md`
+  - `autoresearch_cuda/lab.py`
+  - `autoresearch_cuda/lab_trace.py`
+  - `autoresearch_cuda/lab_workspace.py`
+- Validation:
+  - `python3 -m py_compile autoresearch_cuda/lab.py autoresearch_cuda/lab_trace.py autoresearch_cuda/lab_workspace.py autoresearch_lab/labs.py autoresearch_lab/entrypoints.py`
+  - `./.venv/bin/python kernel-lab.py --engine cuda list-targets`
+  - `./.venv/bin/python kernel-lab.py --engine cuda init --target launch_fusion --workspace /tmp/cuda-launch-fusion-workspace`
+  - `./.venv/bin/python kernel-lab.py --engine cuda bench --workspace /tmp/cuda-launch-fusion-workspace --quick`
+  - `./.venv/bin/python kernel-lab.py --engine cuda verify --workspace /tmp/cuda-launch-fusion-workspace --quick`
+  - `./.venv/bin/python kernel-lab.py --engine cuda extract --profile /tmp/cuda-trace-sim.profile.json --workspace /tmp/cuda-loss-workspace --rank 2`
+  - `./.venv/bin/python kernel-lab.py --engine cuda orchestrate --trace-profile /tmp/cuda-trace-sim.profile.json --workspace-root /tmp/cuda-kernel-orch2 --rank 1`
+  - `./.venv/bin/python kernel-lab.py --engine cuda evidence --target launch_fusion --preset upstream`
+  - `./.venv/bin/python kernel-lab.py --engine cuda promotion-check --target launch_fusion --preset upstream`
+  - `python3 tools/changelog_scores.py --group-by entry --format csv --include-latest --verify`
+- Measurements:
+  - On this machine `torch` is not installed, so CUDA `bench` and `verify` now degrade cleanly to `missing-runtime` instead of failing as opaque import errors.
+  - The synthetic launch-bound trace-profile fixture still drives the trace-first half:
+    - `orchestrate -> trace-prioritized`
+    - `evidence -> trace-backed`
+  - For starter-ready families, `promotion-check` now reports `ready-for-cuda-workspace`.
+  - For broader families like `data_movement`, `promotion-check` now reports `ready-for-cuda-workspace-family`, making the distinction between “workspace exists” and “workspace family should be added” explicit.
+
+## Committed History
+
+### March 12, 2026 — `a3b806e` — lab: add CUDA trace evidence and orchestration — score `4` — complexity `10`
 
 **Human-directed, AI-shaped (4)**
 
@@ -79,8 +125,6 @@ On this hardware, the default canonical matched benchmark window for optimizatio
     - `evidence -> trace-backed`
     - `promotion-check -> ready-for-cuda-workspace`
   - The top-level engine list now includes both `mlx` and `cuda`.
-
-## Committed History
 
 ### March 12, 2026 — `4be493b` — train: rename the M5 preset ladder and retune shipped defaults — score `4` — complexity `9`
 

@@ -178,7 +178,7 @@ So promotion is no longer “trace-backed forever.” It can advance, stall, or 
 
 ## CUDA Trace Automation
 
-CUDA now has the first trace-first kernel-lab path, even though it does not yet have Triton workspaces.
+CUDA now has the first trace-first kernel-lab path, plus a narrow first starter-workspace layer for the most traceable target families.
 
 The point of this first CUDA slice is different from the MLX slice:
 
@@ -195,6 +195,9 @@ uv run kernel-lab.py --engine cuda auto-review --trace-profile /tmp/cuda-upstrea
 uv run kernel-lab.py --engine cuda evidence --target launch_fusion --preset upstream
 uv run kernel-lab.py --engine cuda orchestrate --trace-profile /tmp/cuda-upstream-trace.profile.json --workspace-root /tmp/cuda-lab
 uv run kernel-lab.py --engine cuda promotion-check --target launch_fusion --preset upstream
+uv run kernel-lab.py --engine cuda extract --profile /tmp/cuda-upstream-trace.profile.json --workspace /tmp/cuda-lab/launch_fusion --rank 1
+uv run kernel-lab.py --engine cuda bench --workspace /tmp/cuda-lab/launch_fusion --device cuda --quick
+uv run kernel-lab.py --engine cuda verify --workspace /tmp/cuda-lab/launch_fusion --device cuda --quick
 ```
 
 That flow currently does seven things:
@@ -212,12 +215,25 @@ That flow currently does seven things:
   - records that judgment into the shared ledger as machine-generated evidence
 - `evidence`
   - summarizes what the ledger currently knows about one CUDA target on one preset
-  - exposes whether trace review is still thin, already trace-backed, or currently deprioritized
+  - exposes whether trace review is still thin, already trace-backed, ready for a starter workspace, or currently deprioritized
 - `orchestrate`
   - consumes a trace-profile artifact plus accumulated evidence
-  - picks the next CUDA target family to pursue, even though backend-specific workspaces do not exist yet
+  - picks the next CUDA target family to pursue
+  - for starter-ready families, emits real `extract` / `bench` / `verify` commands
+  - for broader families, still acts as a planning layer for future CUDA/Triton workspace work
+- `extract`
+  - instantiates a starter CUDA workspace from a ranked trace-profile result when the family has a fixed harness
+- `bench` / `verify`
+  - run the fixed starter harness for that workspace
+  - default to CUDA on NVIDIA machines, but degrade cleanly if `torch` or CUDA is missing
 - `promotion-check`
-  - tells you whether a target still needs capture, needs structured trace review, is trace-backed enough to justify future CUDA/Triton workspace work, or is currently deprioritized
+  - tells you whether a target still needs capture, needs structured trace review, is ready for a starter workspace, is ready for a future workspace family, or is currently deprioritized
+
+Starter CUDA workspaces currently exist for:
+
+- `launch_fusion`
+- `norm`
+- `loss_prelude`
 
 If Nsight is not installed, the CUDA commands still emit structured metadata and explicit fallback statuses (`missing-tool`, `capture-unavailable`, `insufficient-trace-data`) instead of failing as an opaque shell error. That makes it possible to keep the outer workflow stable across developer machines that do not yet have NVIDIA tooling installed.
 
@@ -226,7 +242,7 @@ This is the inverse of the MLX constraint:
 - on MLX, capture is scriptable but serious review is still mostly manual
 - on CUDA, the long-term goal is for capture and first-pass review to be scriptable by default, with Nsight GUI inspection as the escalation path
 
-That is why the current CUDA lab starts from traceability rather than from Triton workspaces. The first thing worth proving on NVIDIA is that the repo can discover and classify real kernel opportunities automatically before it starts minting backend-specific workspaces.
+That is why the current CUDA lab starts from traceability rather than from Triton workspaces. The first thing worth proving on NVIDIA is that the repo can discover and classify real kernel opportunities automatically before it starts minting backend-specific workspaces. The starter workspaces now exist to turn that trace-backed prioritization into a concrete next step for a few narrow families, not to replace the trace-first logic.
 
 ## Heuristic Layer vs Trace Layer
 

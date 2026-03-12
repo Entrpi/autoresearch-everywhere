@@ -512,6 +512,6 @@ The simplest correct way to think about the current repo is:
 - `eval_telemetry.py` lets ordinary runs strengthen or age that trust
 - `calibrate.py` is the one-button path that turns an unfamiliar machine into a measured default for the rest of the system
 - `kernel-lab.py` is the top-level experimental front door for backend-specific kernel work under a shared outer workflow
-- MLX is the deepest current lab path, but CUDA now has the first automated trace-review and trace-backed orchestration path via Nsight capture, machine-readable trace profiling, auto-review, and ledger-aware promotion checks
+- MLX is the deepest current lab path, but CUDA now has the first automated trace-review and trace-backed orchestration path via Nsight capture, machine-readable trace profiling, auto-review, ledger-aware promotion checks, and a narrow starter-workspace layer for launch-fusion, norm, and loss-prelude families
 
 That is the current architecture. The port is no longer just an MLX training path. It is an MLX research platform with explicit machine bring-up.

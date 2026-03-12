@@ -16,6 +16,28 @@ def build_parser() -> argparse.ArgumentParser:
 
     subparsers.add_parser("list-targets", help="List available CUDA trace-target families")
 
+    init_parser = subparsers.add_parser("init", help="Create a CUDA starter workspace for one target family")
+    init_parser.add_argument("--target", required=True)
+    init_parser.add_argument("--workspace", required=True)
+
+    bench_parser = subparsers.add_parser("bench", help="Run the fixed CUDA workspace bench harness")
+    bench_parser.add_argument("--workspace", required=True)
+    bench_parser.add_argument("--quick", action="store_true")
+    bench_parser.add_argument("--device", choices=("auto", "cpu", "cuda"), default="auto")
+
+    verify_parser = subparsers.add_parser("verify", help="Re-run the fixed CUDA workspace harness as verification")
+    verify_parser.add_argument("--workspace", required=True)
+    verify_parser.add_argument("--quick", action="store_true")
+    verify_parser.add_argument("--device", choices=("auto", "cpu", "cuda"), default="auto")
+
+    extract_parser = subparsers.add_parser(
+        "extract",
+        help="Instantiate a CUDA starter workspace from a trace-profile artifact",
+    )
+    extract_parser.add_argument("--profile", required=True)
+    extract_parser.add_argument("--workspace", required=True)
+    extract_parser.add_argument("--rank", type=int, default=1)
+
     capture_parser = subparsers.add_parser("capture", help="Capture a CUDA trainer run under Nsight Systems")
     capture_parser.add_argument("--preset", choices=tuple(CUDA_PRESETS.keys()), default="upstream")
     capture_parser.add_argument("--time-budget", type=float, default=20.0)
@@ -71,6 +93,34 @@ def main(argv: list[str] | None = None) -> None:
         for target in lab.target_catalog().values():
             note = f" -- {target.notes}" if target.notes else ""
             print(f"{target.key}\t{target.status}\t{target.metric}\t{target.description}{note}")
+        return
+
+    if args.command == "init":
+        workspace = lab.init_workspace(target=args.target, workspace=Path(args.workspace).expanduser())
+        print(workspace)
+        return
+
+    if args.command == "bench":
+        result = lab.bench_workspace(workspace=Path(args.workspace).expanduser(), quick=args.quick, device=args.device)
+        print(json.dumps(asdict(result), indent=2, sort_keys=True))
+        return
+
+    if args.command == "verify":
+        result = lab.verify_workspace(
+            workspace=Path(args.workspace).expanduser(),
+            quick=args.quick,
+            device=args.device,
+        )
+        print(json.dumps(asdict(result), indent=2, sort_keys=True))
+        return
+
+    if args.command == "extract":
+        result = lab.extract_from_profile(
+            profile_path=Path(args.profile).expanduser(),
+            workspace=Path(args.workspace).expanduser(),
+            rank=args.rank,
+        )
+        print(json.dumps(asdict(result), indent=2, sort_keys=True))
         return
 
     if args.command == "capture":
