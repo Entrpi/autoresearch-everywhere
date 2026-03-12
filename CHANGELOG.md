@@ -29,7 +29,47 @@ On this hardware, the default canonical matched benchmark window for optimizatio
 
 ## Latest
 
-### New commit — lab: add more CUDA starter workspace families — score `3` — complexity `6`
+### New commit — lab: add first CUDA trainer hook and integration evidence — score `3` — complexity `7`
+
+**AI-identified within brief, human-shaped (3)**
+
+- Added the first direct CUDA trainer hook and trainer-side integration evidence path for a starter workspace target.
+  - Meaning: CUDA kernel-lab now has the first path that can move a target from workspace-local evidence into real trainer-side A/B evidence, instead of stopping at trace-backed workspace work. The first hooked target is `norm`.
+  - Motivation: once the CUDA lab had trace-first orchestration plus starter workspaces, the next missing step was the same one MLX had to solve earlier: a way to prove that a narrow starter kernel still matters in the live trainer rather than only in its fixed harness.
+  - Purpose: start the CUDA trainer-integration layer one narrow target at a time, keep the path conservative, and let the lab record structured `missing-runtime` outcomes on non-CUDA machines instead of pretending the integration story is usable everywhere already.
+  - Added `/Users/ent/Codex/autoresearch/autoresearch_cuda/lab_integration.py` with a first direct integration target set and environment wiring for trainer-side A/B runs.
+  - Wired `/Users/ent/Codex/autoresearch/autoresearch_cuda/train.py` so the shared `norm(...)` path can call a lab workspace implementation when the CUDA lab integration environment is active.
+  - Added `integration-ab` and `integration-suite` to `/Users/ent/Codex/autoresearch/autoresearch_cuda/lab.py`, with orchestration, promotion, and evidence flowing through `/Users/ent/Codex/autoresearch/autoresearch_cuda/lab_trace.py`.
+  - Kept the path narrow and honest: only `norm` is directly integrable today, and non-CUDA machines receive structured `missing-runtime` results instead of fake promotion progress.
+
+**Grounding**
+
+- Files:
+  - `CHANGELOG.md`
+  - `README.md`
+  - `docs/kernel-lab.md`
+  - `program.md`
+  - `autoresearch_cuda/lab.py`
+  - `autoresearch_cuda/lab_integration.py`
+  - `autoresearch_cuda/lab_trace.py`
+  - `autoresearch_cuda/train.py`
+- Validation:
+  - `python3 -m py_compile autoresearch_cuda/lab.py autoresearch_cuda/lab_trace.py autoresearch_cuda/lab_workspace.py autoresearch_cuda/lab_integration.py autoresearch_cuda/train.py autoresearch_lab/labs.py autoresearch_lab/entrypoints.py`
+  - `./.venv/bin/python kernel-lab.py --engine cuda init --target norm --workspace /tmp/cuda-norm-integration-workspace`
+  - `./.venv/bin/python kernel-lab.py --engine cuda integration-ab --workspace /tmp/cuda-norm-integration-workspace --preset upstream --time-budget 2 --repeats 2 --benchmark-skip-eval --no-checkpoint`
+  - `./.venv/bin/python kernel-lab.py --engine cuda integration-suite --workspace /tmp/cuda-norm-integration-workspace --preset upstream --time-budget 2 --repeats 2 --benchmark-skip-eval --no-checkpoint`
+  - `./.venv/bin/python kernel-lab.py --engine cuda promotion-check --target norm --preset upstream`
+  - `python3 tools/changelog_scores.py --group-by entry --format csv --include-latest --verify`
+- Measurements:
+  - On this machine `torch` is not installed, so both `integration-ab` and `integration-suite` degrade cleanly to `missing-runtime` instead of failing as opaque import errors.
+  - The first direct CUDA trainer hook is intentionally narrow:
+    - `norm` is directly integrable
+    - broader CUDA starter targets still stop at workspace-local evidence
+  - `promotion-check` for `norm` remains conservative and still reports `needs-capture` until trace-backed evidence exists.
+
+## Committed History
+
+### March 12, 2026 — `e68136a` — lab: add more CUDA starter workspace families — score `3` — complexity `6`
 
 **AI-identified within brief, human-shaped (3)**
 
@@ -65,8 +105,6 @@ On this hardware, the default canonical matched benchmark window for optimizatio
   - On this machine `torch` is not installed, so `data_movement` and `matmul_epilogue` bench/verify degrade cleanly to `missing-runtime` instead of failing as opaque import errors.
   - The synthetic trace profile now lets `extract --rank 2` instantiate a real `data_movement` workspace instead of returning `starter-unavailable`.
   - `promotion-check` for `data_movement` now reports `ready-for-cuda-workspace` instead of `ready-for-cuda-workspace-family`.
-
-## Committed History
 
 ### March 12, 2026 — `59c4136` — lab: add CUDA starter workspaces and fixed harnesses — score `4` — complexity `9`
 

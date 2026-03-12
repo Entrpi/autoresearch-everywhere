@@ -163,6 +163,8 @@ CUDA now has the first trace-first automation path too, and a small first starte
 - `uv run kernel-lab.py --engine cuda extract --profile /tmp/cuda-upstream-trace.profile.json --workspace /tmp/cuda-lab/launch_fusion --rank 1`
 - `uv run kernel-lab.py --engine cuda bench --workspace /tmp/cuda-lab/launch_fusion --device cuda --quick`
 - `uv run kernel-lab.py --engine cuda verify --workspace /tmp/cuda-lab/launch_fusion --device cuda --quick`
+- `uv run kernel-lab.py --engine cuda integration-ab --workspace /tmp/cuda-lab/norm --preset upstream --time-budget 20 --benchmark-skip-eval --no-checkpoint`
+- `uv run kernel-lab.py --engine cuda integration-suite --workspace /tmp/cuda-lab/norm --preset upstream --time-budget 20 --repeats 2 --benchmark-skip-eval --no-checkpoint`
 
 The lab now has two layers on purpose:
 
@@ -189,6 +191,8 @@ For CUDA, the split is similar but the trace side is more automatable:
   - `loss_prelude`
   - `data_movement`
   - `matmul_epilogue`
+- `norm` is currently the first and only CUDA starter target with a direct trainer-side hook, so it is the only one that can collect CUDA `integration-ab` / `integration-suite` evidence today
+- on non-CUDA machines or machines without PyTorch/CUDA installed, those CUDA integration commands return structured `missing-runtime` results instead of pretending the target is promotable
 - the long-term goal is that CUDA trace review becomes automated-by-default, with GUI inspection as the escalation path rather than the first step
 
 The lab also keeps a small evidence ledger at `results/kernel_lab/ledger.jsonl`. That lets later profiles and plans see whether a target is still unexplored, only verified, trace-backed, or ready for an integration A/B instead of treating every target as a fresh idea.
@@ -340,10 +344,10 @@ Current project snapshot from [CHANGELOG.md](CHANGELOG.md):
 
 | Metric | Value |
 | --- | --- |
-| Mean autonomy score | `3.41 / 6` |
-| Mean complexity | `7.42 / commit` |
-| Mean score per top-level bullet | `3.46 / 6` |
-| History covered | `53` commits across `12` subsystems |
+| Mean autonomy score | `3.40 / 6` |
+| Mean complexity | `7.41 / commit` |
+| Mean score per top-level bullet | `3.45 / 6` |
+| History covered | `54` commits across `12` subsystems |
 <!-- autonomy-golf-snapshot:end -->
 
 Refresh with:

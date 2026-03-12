@@ -10,10 +10,16 @@ import subprocess
 import sys
 import time
 from dataclasses import asdict, replace
+from importlib.util import find_spec
 from pathlib import Path
 from typing import Any
 
 from autoresearch_cuda.config import CUDA_PRESETS
+from autoresearch_cuda.lab_integration import (
+    integration_environment,
+    integration_supported_targets,
+    supports_direct_integration,
+)
 from autoresearch_cuda.lab_workspace import (
     CUDA_STARTER_TARGET_KEYS,
     bench_cuda_workspace,
@@ -27,6 +33,8 @@ from autoresearch_lab.labs import (
     LabEvidenceResult,
     LabAutoTraceReviewResult,
     LabCapabilities,
+    LabIntegrationABResult,
+    LabIntegrationSuiteResult,
     LabOrchestrationPlan,
     LabPromotionCheck,
     LabTarget,
@@ -35,6 +43,7 @@ from autoresearch_lab.labs import (
     LabTraceResult,
 )
 from autoresearch_lab.ledger import summarize_lab_evidence
+from tools.calibrate_eval_policy import parse_summary
 
 
 TRACE_SCHEMA_VERSION = 1
@@ -290,6 +299,18 @@ def _default_capture_command(
     if device_batch_size is not None:
         command.extend(["--device-batch-size", str(device_batch_size)])
     return command
+
+
+def _cuda_runtime_ready() -> tuple[bool, str | None]:
+    if find_spec("torch") is None:
+        return False, "PyTorch is not installed in this environment."
+    try:
+        import torch  # type: ignore
+    except Exception as exc:
+        return False, f"Unable to import torch: {exc}"
+    if not torch.cuda.is_available():
+        return False, "CUDA is not available in this environment."
+    return True, None
 
 
 def _write_json(path: Path, payload: dict[str, Any]) -> None:
@@ -917,11 +938,12 @@ class CudaKernelLab:
                 "# this target is currently deprioritized by automated CUDA trace evidence",
                 "# capture a new trace on a different preset only if you believe the current trace is unrepresentative",
             )
-        elif target in CUDA_STARTER_TARGET_KEYS and summary.verify_ok_count > 0:
+        elif target in CUDA_STARTER_TARGET_KEYS and supports_direct_integration(target) and summary.verify_ok_count > 0:
             status = "ready-for-cuda-integration"
             commands = (
                 "# this starter workspace has both trace-backed relevance and a passing fixed-harness verify run",
                 "# the next step is a real CUDA trainer integration path for this target family",
+                f"uv run kernel-lab.py --engine cuda integration-suite --workspace <workspace> --preset {preset or 'upstream'} --time-budget 20 --repeats 2 --benchmark-skip-eval --no-checkpoint",
             )
         elif summary.auto_review_ok_count > 0 or summary.trace_profile_ok_count > 0:
             if target in CUDA_STARTER_TARGET_KEYS:
@@ -964,8 +986,331 @@ class CudaKernelLab:
             },
         )
 
-    def run_integration_ab(self, *, workspace: Path, time_budget: float, preset: str | None = None, repeats: int = 2, benchmark_skip_eval: bool = True, no_checkpoint: bool = True):
-        raise NotImplementedError("CUDA lab integration A/B is not implemented yet.")
+    def run_integration_ab(
+        self,
+        *,
+        workspace: Path,
+        time_budget: float,
+        preset: str | None = None,
+        repeats: int = 2,
+        benchmark_skip_eval: bool = True,
+        no_checkpoint: bool = True,
+    ) -> LabIntegrationABResult:
+        if repeats < 1:
+            raise ValueError("repeats must be >= 1")
+        workspace = workspace.expanduser().resolve()
+        metadata = json.loads((workspace / "metadata.json").read_text(encoding="utf-8"))
+        target = str(metadata["target"])
+        resolved_preset = preset or "upstream"
+        if not supports_direct_integration(target):
+            return LabIntegrationABResult(
+                engine="cuda",
+                backend_family="cuda",
+                target=target,
+                preset=resolved_preset,
+                workspace=str(workspace),
+                status="unsupported-target",
+                wall_seconds=0.0,
+                details={
+                    "failure_reason": f"Target {target!r} does not yet support direct CUDA trainer integration.",
+                    "supported_targets": integration_supported_targets(),
+                },
+            )
+        runtime_ok, failure_reason = _cuda_runtime_ready()
+        if not runtime_ok:
+            append_lab_event(
+                engine="cuda",
+                backend_family="cuda",
+                target=target,
+                workspace=workspace,
+                event_type="integration-ab",
+                status="missing-runtime",
+                metric_name="steady_state_tok_per_sec_delta",
+                metric_value=None,
+                preset=resolved_preset,
+                details={
+                    "preset": resolved_preset,
+                    "time_budget": time_budget,
+                    "repeats": repeats,
+                    "failure_reason": failure_reason,
+                },
+            )
+            return LabIntegrationABResult(
+                engine="cuda",
+                backend_family="cuda",
+                target=target,
+                preset=resolved_preset,
+                workspace=str(workspace),
+                status="missing-runtime",
+                wall_seconds=0.0,
+                details={
+                    "failure_reason": failure_reason,
+                    "repeats": repeats,
+                    "benchmark_skip_eval": benchmark_skip_eval,
+                    "no_checkpoint": no_checkpoint,
+                },
+            )
 
-    def run_integration_suite(self, *, workspace: Path, time_budget: float, preset: str | None = None, presets: tuple[str, ...] | None = None, repeats: int = 2, benchmark_skip_eval: bool = True, no_checkpoint: bool = True):
-        raise NotImplementedError("CUDA lab integration A/B is not implemented yet.")
+        run_root = workspace / "integration-ab" / time.strftime("%Y%m%d-%H%M%S")
+        run_root.mkdir(parents=True, exist_ok=True)
+        warmup_budget = min(2.0, time_budget)
+
+        def build_cmd(run_time_budget: float) -> list[str]:
+            cmd = [
+                sys.executable,
+                str(REPO_ROOT / "train.py"),
+                "--engine",
+                "cuda",
+                "--preset",
+                resolved_preset,
+                "--time-budget",
+                str(run_time_budget),
+            ]
+            if benchmark_skip_eval:
+                cmd.append("--benchmark-skip-eval")
+            return cmd
+
+        warmup_cmd = build_cmd(warmup_budget)
+        measured_cmd = build_cmd(time_budget)
+        baseline_env = os.environ.copy()
+        candidate_env = os.environ.copy()
+        candidate_env.update(integration_environment(workspace=workspace))
+
+        start = time.perf_counter()
+        baseline_warmup = self._run_train_command(
+            warmup_cmd,
+            run_root / "baseline-warmup.stdout.log",
+            run_root / "baseline-warmup.stderr.log",
+            env=baseline_env,
+        )
+        candidate_warmup = self._run_train_command(
+            warmup_cmd,
+            run_root / "candidate-warmup.stdout.log",
+            run_root / "candidate-warmup.stderr.log",
+            env=candidate_env,
+        )
+        measured_runs: list[dict[str, object]] = []
+        baseline_results: list[subprocess.CompletedProcess[str]] = []
+        candidate_results: list[subprocess.CompletedProcess[str]] = []
+        for repeat_index in range(repeats):
+            order = ("baseline", "candidate") if repeat_index % 2 == 0 else ("candidate", "baseline")
+            for leg in order:
+                stdout_path = run_root / f"round-{repeat_index + 1:02d}-{leg}.stdout.log"
+                stderr_path = run_root / f"round-{repeat_index + 1:02d}-{leg}.stderr.log"
+                env = baseline_env if leg == "baseline" else candidate_env
+                completed = self._run_train_command(
+                    measured_cmd,
+                    stdout_path,
+                    stderr_path,
+                    env=env,
+                )
+                summary = parse_summary(completed.stdout) if completed.returncode == 0 else {}
+                measured_runs.append(
+                    {
+                        "round": repeat_index + 1,
+                        "leg": leg,
+                        "stdout": str(stdout_path),
+                        "stderr": str(stderr_path),
+                        "returncode": completed.returncode,
+                        "summary": summary,
+                    }
+                )
+                if leg == "baseline":
+                    baseline_results.append(completed)
+                else:
+                    candidate_results.append(completed)
+        wall_seconds = time.perf_counter() - start
+
+        baseline_warmup_summary = parse_summary(baseline_warmup.stdout) if baseline_warmup.returncode == 0 else {}
+        candidate_warmup_summary = parse_summary(candidate_warmup.stdout) if candidate_warmup.returncode == 0 else {}
+        baseline_summaries = [parse_summary(result.stdout) for result in baseline_results if result.returncode == 0]
+        candidate_summaries = [parse_summary(result.stdout) for result in candidate_results if result.returncode == 0]
+        baseline_summary = self._aggregate_summaries(baseline_summaries)
+        candidate_summary = self._aggregate_summaries(candidate_summaries)
+        status = (
+            "ok"
+            if all(
+                result.returncode == 0
+                for result in (baseline_warmup, candidate_warmup, *baseline_results, *candidate_results)
+            )
+            else "error"
+        )
+        delta = self._summary_delta(baseline_summary, candidate_summary)
+        delta_relative_pct = self._summary_delta_relative_pct(baseline_summary, candidate_summary)
+        details = {
+            "warmup_budget": warmup_budget,
+            "repeats": repeats,
+            "measured_pair_count": repeats * 2,
+            "warmup": {
+                "baseline_returncode": baseline_warmup.returncode,
+                "candidate_returncode": candidate_warmup.returncode,
+                "baseline": baseline_warmup_summary,
+                "candidate": candidate_warmup_summary,
+            },
+            "benchmark_skip_eval": benchmark_skip_eval,
+            "no_checkpoint": no_checkpoint,
+            "measured_runs": measured_runs,
+            "measured_order": [f"{entry['round']}:{entry['leg']}" for entry in measured_runs],
+            "baseline_run_returncodes": [result.returncode for result in baseline_results],
+            "candidate_run_returncodes": [result.returncode for result in candidate_results],
+            "baseline": baseline_summary,
+            "candidate": candidate_summary,
+            "baseline_runs": baseline_summaries,
+            "candidate_runs": candidate_summaries,
+            "delta": delta,
+            "delta_relative_pct": delta_relative_pct,
+        }
+        append_lab_event(
+            engine="cuda",
+            backend_family="cuda",
+            target=target,
+            workspace=workspace,
+            event_type="integration-ab",
+            status=status,
+            metric_name="steady_state_tok_per_sec_delta",
+            metric_value=delta.get("steady_state_tok_per_sec"),
+            preset=resolved_preset,
+            details={
+                "preset": resolved_preset,
+                "time_budget": time_budget,
+                "warmup_budget": warmup_budget,
+                "repeats": repeats,
+                "measured_pair_count": repeats * 2,
+                "benchmark_skip_eval": benchmark_skip_eval,
+                "no_checkpoint": no_checkpoint,
+                "measured_order": details["measured_order"],
+                "baseline_run_returncodes": details["baseline_run_returncodes"],
+                "candidate_run_returncodes": details["candidate_run_returncodes"],
+                "warmup_baseline_returncode": baseline_warmup.returncode,
+                "warmup_candidate_returncode": candidate_warmup.returncode,
+                "delta": delta,
+                "delta_relative_pct": delta_relative_pct,
+            },
+        )
+        return LabIntegrationABResult(
+            engine="cuda",
+            backend_family="cuda",
+            target=target,
+            preset=resolved_preset,
+            workspace=str(workspace),
+            status=status,
+            wall_seconds=wall_seconds,
+            details=details,
+        )
+
+    def run_integration_suite(
+        self,
+        *,
+        workspace: Path,
+        time_budget: float,
+        preset: str | None = None,
+        presets: tuple[str, ...] | None = None,
+        repeats: int = 2,
+        benchmark_skip_eval: bool = True,
+        no_checkpoint: bool = True,
+    ) -> LabIntegrationSuiteResult:
+        workspace = workspace.expanduser().resolve()
+        resolved_preset = preset or "upstream"
+        selected_presets = tuple(dict.fromkeys(presets or (resolved_preset,)))
+        start = time.perf_counter()
+        runs = []
+        for suite_preset in selected_presets:
+            result = self.run_integration_ab(
+                workspace=workspace,
+                time_budget=time_budget,
+                preset=suite_preset,
+                repeats=repeats,
+                benchmark_skip_eval=benchmark_skip_eval,
+                no_checkpoint=no_checkpoint,
+            )
+            runs.append(result)
+        wall_seconds = time.perf_counter() - start
+        target = str(json.loads((workspace / "metadata.json").read_text(encoding="utf-8"))["target"])
+        overall_summary = summarize_lab_evidence(
+            engine="cuda",
+            backend_family="cuda",
+            target=target,
+            preset=None,
+        )
+        status = "ok" if all(result.status == "ok" for result in runs) else (runs[-1].status if runs else "error")
+        return LabIntegrationSuiteResult(
+            engine="cuda",
+            backend_family="cuda",
+            target=target,
+            presets=selected_presets,
+            workspace=str(workspace),
+            status=status,
+            wall_seconds=wall_seconds,
+            details={
+                "selected_presets": selected_presets,
+                "repeats": repeats,
+                "benchmark_skip_eval": benchmark_skip_eval,
+                "no_checkpoint": no_checkpoint,
+                "runs": [asdict(result) for result in runs],
+                "overall_evidence": asdict(overall_summary),
+            },
+        )
+
+    def _run_train_command(
+        self,
+        cmd: list[str],
+        stdout_path: Path,
+        stderr_path: Path,
+        *,
+        env: dict[str, str],
+    ) -> subprocess.CompletedProcess[str]:
+        completed = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            env=env,
+            cwd=REPO_ROOT,
+        )
+        stdout_path.write_text(completed.stdout, encoding="utf-8")
+        stderr_path.write_text(completed.stderr, encoding="utf-8")
+        return completed
+
+    def _summary_delta(
+        self,
+        baseline_summary: dict[str, str | float | int],
+        candidate_summary: dict[str, str | float | int],
+    ) -> dict[str, float]:
+        deltas: dict[str, float] = {}
+        for key in ("steady_state_tok_per_sec", "peak_vram_mb", "val_bpb"):
+            baseline = baseline_summary.get(key)
+            candidate = candidate_summary.get(key)
+            if isinstance(baseline, (int, float)) and isinstance(candidate, (int, float)):
+                deltas[key] = float(candidate) - float(baseline)
+        return deltas
+
+    def _summary_delta_relative_pct(
+        self,
+        baseline_summary: dict[str, str | float | int],
+        candidate_summary: dict[str, str | float | int],
+    ) -> dict[str, float]:
+        deltas: dict[str, float] = {}
+        for key in ("steady_state_tok_per_sec", "peak_vram_mb", "val_bpb"):
+            baseline = baseline_summary.get(key)
+            candidate = candidate_summary.get(key)
+            if isinstance(baseline, (int, float)) and isinstance(candidate, (int, float)) and float(baseline) != 0.0:
+                deltas[key] = ((float(candidate) - float(baseline)) / float(baseline)) * 100.0
+        return deltas
+
+    def _aggregate_summaries(
+        self,
+        summaries: list[dict[str, str | float | int]],
+    ) -> dict[str, str | float]:
+        if not summaries:
+            return {}
+        aggregated: dict[str, str | float] = {}
+        keys = set().union(*(summary.keys() for summary in summaries))
+        for key in sorted(keys):
+            values = [summary.get(key) for summary in summaries]
+            numeric_values = [float(value) for value in values if isinstance(value, (int, float))]
+            if len(numeric_values) == len(values) and numeric_values:
+                aggregated[key] = float(statistics.median(numeric_values))
+                continue
+            first = values[0]
+            if all(value == first for value in values):
+                aggregated[key] = first  # type: ignore[assignment]
+        return aggregated

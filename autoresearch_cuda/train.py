@@ -50,6 +50,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from autoresearch_cuda.lab_integration import maybe_call_integration_target
 from autoresearch_cuda.runtime import detect_cuda_runtime_profile
 from kernels import get_kernel
 from autoresearch_cuda.prepare import Tokenizer, make_dataloader, evaluate_bpb
@@ -74,6 +75,9 @@ class GPTConfig:
 
 
 def norm(x):
+    overridden = maybe_call_integration_target("norm", x)
+    if overridden is not None:
+        return overridden
     return F.rms_norm(x, (x.size(-1),))
 
 

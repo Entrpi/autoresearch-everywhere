@@ -237,6 +237,17 @@ Starter CUDA workspaces currently exist for:
 - `data_movement`
 - `matmul_epilogue`
 
+Only `norm` currently has a direct CUDA trainer-side hook. That makes it the first CUDA target that can move past workspace-local evidence into real `integration-ab` and `integration-suite` runs. The other starter CUDA targets are still workspace- and trace-backed only.
+
+The intended first CUDA trainer-side loop is:
+
+```bash
+uv run kernel-lab.py --engine cuda integration-ab --workspace /tmp/cuda-lab/norm --preset upstream --time-budget 20 --benchmark-skip-eval --no-checkpoint
+uv run kernel-lab.py --engine cuda integration-suite --workspace /tmp/cuda-lab/norm --preset upstream --time-budget 20 --repeats 2 --benchmark-skip-eval --no-checkpoint
+```
+
+If PyTorch or CUDA is not installed on the current machine, those commands return structured `missing-runtime` results instead of failing as opaque shell errors. That keeps the outer CUDA lab workflow stable even on development machines that cannot execute the full trainer-side path yet.
+
 If Nsight is not installed, the CUDA commands still emit structured metadata and explicit fallback statuses (`missing-tool`, `capture-unavailable`, `insufficient-trace-data`) instead of failing as an opaque shell error. That makes it possible to keep the outer workflow stable across developer machines that do not yet have NVIDIA tooling installed.
 
 This is the inverse of the MLX constraint:

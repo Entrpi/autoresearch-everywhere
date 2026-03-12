@@ -75,6 +75,32 @@ def build_parser() -> argparse.ArgumentParser:
     promotion_parser.add_argument("--target", required=True)
     promotion_parser.add_argument("--preset")
 
+    integration_ab_parser = subparsers.add_parser(
+        "integration-ab",
+        help="Run repeated CUDA trainer A/B using a directly integrated starter workspace target",
+    )
+    integration_ab_parser.add_argument("--workspace", required=True)
+    integration_ab_parser.add_argument("--time-budget", type=float, default=20.0)
+    integration_ab_parser.add_argument("--preset", choices=tuple(CUDA_PRESETS.keys()))
+    integration_ab_parser.add_argument("--repeats", type=int, default=2)
+    integration_ab_parser.add_argument("--benchmark-skip-eval", action="store_true")
+    integration_ab_parser.add_argument("--no-checkpoint", action="store_true")
+
+    integration_suite_parser = subparsers.add_parser(
+        "integration-suite",
+        help="Run CUDA trainer integration A/B across one or more presets",
+    )
+    integration_suite_parser.add_argument("--workspace", required=True)
+    integration_suite_parser.add_argument("--time-budget", type=float, default=20.0)
+    integration_suite_parser.add_argument("--preset", choices=tuple(CUDA_PRESETS.keys()))
+    integration_suite_parser.add_argument(
+        "--presets",
+        help="Comma-separated preset list. Defaults to the chosen preset or upstream.",
+    )
+    integration_suite_parser.add_argument("--repeats", type=int, default=2)
+    integration_suite_parser.add_argument("--benchmark-skip-eval", action="store_true")
+    integration_suite_parser.add_argument("--no-checkpoint", action="store_true")
+
     auto_review_parser = subparsers.add_parser(
         "auto-review",
         help="Classify a summarized CUDA trace and record machine-generated review evidence",
@@ -165,6 +191,34 @@ def main(argv: list[str] | None = None) -> None:
 
     if args.command == "promotion-check":
         result = lab.promotion_check(target=args.target, preset=args.preset)
+        print(json.dumps(asdict(result), indent=2, sort_keys=True))
+        return
+
+    if args.command == "integration-ab":
+        result = lab.run_integration_ab(
+            workspace=Path(args.workspace).expanduser(),
+            time_budget=args.time_budget,
+            preset=args.preset,
+            repeats=args.repeats,
+            benchmark_skip_eval=args.benchmark_skip_eval,
+            no_checkpoint=args.no_checkpoint,
+        )
+        print(json.dumps(asdict(result), indent=2, sort_keys=True))
+        return
+
+    if args.command == "integration-suite":
+        presets = None
+        if args.presets:
+            presets = tuple(item.strip() for item in args.presets.split(",") if item.strip())
+        result = lab.run_integration_suite(
+            workspace=Path(args.workspace).expanduser(),
+            time_budget=args.time_budget,
+            preset=args.preset,
+            presets=presets,
+            repeats=args.repeats,
+            benchmark_skip_eval=args.benchmark_skip_eval,
+            no_checkpoint=args.no_checkpoint,
+        )
         print(json.dumps(asdict(result), indent=2, sort_keys=True))
         return
 
