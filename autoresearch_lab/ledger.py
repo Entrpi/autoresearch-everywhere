@@ -192,6 +192,24 @@ def summarize_lab_evidence(
     last_auto_review = auto_review_ok[-1] if auto_review_ok else None
     last_deep_profile = deep_profile_ok[-1] if deep_profile_ok else None
     last_trace_review = trace_review_ok[-1] if trace_review_ok else None
+    last_deep_profile_diagnosis = (
+        last_deep_profile.get("details", {}).get("diagnosis") if last_deep_profile else None
+    )
+    last_deep_profile_confidence = (
+        last_deep_profile.get("details", {}).get("confidence") if last_deep_profile else None
+    )
+    strong_deep_profile = bool(
+        last_deep_profile_diagnosis in {"compute-bound", "bandwidth-bound", "under-occupied"}
+        and last_deep_profile_confidence is not None
+        and last_deep_profile_confidence >= 0.65
+    )
+    weak_deep_profile = bool(
+        last_deep_profile_diagnosis == "mixed"
+        or (
+            last_deep_profile_confidence is not None
+            and last_deep_profile_confidence < 0.5
+        )
+    )
     trace_relevance = (
         last_trace_review.get("details", {}).get("relevance")
         if last_trace_review
@@ -262,10 +280,15 @@ def summarize_lab_evidence(
             evidence_bonus = 0.9
     elif verify_ok and capture_ok:
         promotion_status = "ready-for-integration-test"
-        evidence_bonus = 1.2 if trace_relevance == "high" else 1.0
+        evidence_bonus = 1.3 if strong_deep_profile else 1.2 if trace_relevance == "high" else 1.0
     elif deep_profile_ok:
         promotion_status = "trace-backed"
-        evidence_bonus = 0.95 if trace_relevance == "high" else 0.8 if trace_relevance == "medium" else 0.65
+        if strong_deep_profile:
+            evidence_bonus = 1.0 if trace_relevance == "high" else 0.85
+        elif weak_deep_profile:
+            evidence_bonus = 0.4 if trace_relevance == "high" else 0.25
+        else:
+            evidence_bonus = 0.95 if trace_relevance == "high" else 0.8 if trace_relevance == "medium" else 0.65
     elif auto_review_ok or trace_profile_ok:
         promotion_status = "trace-backed"
         evidence_bonus = 0.8 if trace_relevance == "high" else 0.6 if trace_relevance == "medium" else 0.45
@@ -319,11 +342,13 @@ def summarize_lab_evidence(
                 last_auto_review.get("details", {}).get("confidence") if last_auto_review else None
             ),
             "last_deep_profile_diagnosis": (
-                last_deep_profile.get("details", {}).get("diagnosis") if last_deep_profile else None
+                last_deep_profile_diagnosis
             ),
             "last_deep_profile_confidence": (
-                last_deep_profile.get("details", {}).get("confidence") if last_deep_profile else None
+                last_deep_profile_confidence
             ),
+            "last_deep_profile_is_strong": strong_deep_profile,
+            "last_deep_profile_is_weak": weak_deep_profile,
             "last_integration_delta_steady_state_tok_per_sec": integration_delta,
             "last_integration_delta_relative_pct_steady_state_tok_per_sec": integration_relative_delta,
             "integration_ab_positive_count": positive_integration_count,

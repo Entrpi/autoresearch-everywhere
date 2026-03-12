@@ -29,7 +29,41 @@ On this hardware, the default canonical matched benchmark window for optimizatio
 
 ## Latest
 
-### New commit — lab: add CUDA deeper kernel diagnosis — score `3` — complexity `8`
+### New commit — lab: make CUDA deeper diagnosis shape ranking and promotion — score `3` — complexity `6`
+
+**AI-identified within brief, human-shaped (3)**
+
+- Tightened the CUDA evidence loop so `deep-profile` changes ranking and promotion behavior instead of only adding another artifact to the ledger.
+  - Meaning: a strong deeper diagnosis now raises confidence for starter-ready CUDA targets, while a weak or mixed diagnosis can block promotion and force manual CUDA review. The lab no longer treats all deep-profile results as equally helpful.
+  - Motivation: once `deep-profile` existed, it was not enough to record the result and leave the rest of the workflow unchanged. A `compute-bound` or `bandwidth-bound` diagnosis should push a target forward more confidently than a weak `mixed` result, and a weak result should not quietly drift into promotion on timing share alone.
+  - Purpose: make the CUDA trace-first workflow more trustworthy by ensuring deeper diagnosis has real consequences for orchestration and promotion instead of acting like optional decoration.
+  - Updated `/Users/ent/Codex/autoresearch/autoresearch_lab/ledger.py` so strong deeper diagnoses increase evidence strength while weak or mixed ones reduce it.
+  - Updated `/Users/ent/Codex/autoresearch/autoresearch_cuda/lab_trace.py` so `promotion-check` can now return `needs-manual-cuda-review` when a target has weak deeper diagnosis despite passing starter verification, and so starter-ready CUDA targets require `deep-profile` before moving toward trainer integration.
+  - Updated the user-facing CUDA lab guidance to say explicitly that strong deeper diagnoses raise confidence while weak ones block promotion pending manual review.
+
+**Grounding**
+
+- Files:
+  - `CHANGELOG.md`
+  - `README.md`
+  - `docs/kernel-lab.md`
+  - `program.md`
+  - `autoresearch_lab/ledger.py`
+  - `autoresearch_cuda/lab_trace.py`
+- Validation:
+  - `python3 -m py_compile autoresearch_lab/ledger.py autoresearch_cuda/lab_trace.py`
+  - `./.venv/bin/python - <<'PY'`
+    `... synthetic ledger and deeper-diagnosis summary check ...`
+    `PY`
+  - `python3 tools/changelog_scores.py --group-by entry --format csv --include-latest --verify`
+  - `python3 tools/render_autonomy_badge.py`
+- Measurements:
+  - Strong deeper diagnoses now contribute more evidence bonus than generic trace-backed timing alone.
+  - Weak or mixed deeper diagnoses now block starter-ready CUDA targets from drifting into trainer integration without manual review.
+
+## Committed History
+
+### March 12, 2026 — `f8779c0` — lab: add CUDA deeper kernel diagnosis — score `3` — complexity `8`
 
 **AI-identified within brief, human-shaped (3)**
 
@@ -68,8 +102,6 @@ On this hardware, the default canonical matched benchmark window for optimizatio
     - it uses three initial Nsight Compute metrics
     - it classifies `compute-bound`, `bandwidth-bound`, `under-occupied`, or `mixed`
     - and it records that result as structured evidence rather than treating it as a side note outside the lab loop.
-
-## Committed History
 
 ### March 12, 2026 — `ba578ad` — lab: add CUDA RoPE and Q/K-normalization trainer hook — score `3` — complexity `8`
 

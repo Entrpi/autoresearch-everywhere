@@ -217,6 +217,7 @@ That flow currently does seven things:
   - optionally reruns the top trace-ranked family under Nsight Compute
   - records a deeper diagnosis such as `compute-bound`, `bandwidth-bound`, or `under-occupied`
   - is the next step when a starter-ready family looks important enough that Nsight Systems timing alone is no longer enough
+  - strong diagnoses now boost later ranking/promotion confidence, while weak or mixed ones block promotion pending manual CUDA review
 - `evidence`
   - summarizes what the ledger currently knows about one CUDA target on one preset
   - exposes whether trace review is still thin, already trace-backed, ready for a starter workspace, or currently deprioritized

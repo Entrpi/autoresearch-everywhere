@@ -185,6 +185,7 @@ For CUDA, the split is similar but the trace side is more automatable:
 - `trace-profile` turns the exported Nsight reports into ranked kernel target families
 - `auto-review` classifies the run as launch-bound, sync-bound, copy-bound, kernel-dominated, or mixed
 - `deep-profile` optionally reruns the top trace-ranked family under Nsight Compute so the lab can record a more specific diagnosis such as compute-bound, bandwidth-bound, or under-occupied
+- a strong deeper diagnosis now increases rank/promotion confidence, while a weak or mixed one keeps the target in review instead of letting it drift toward promotion on timing share alone
 - `evidence` and `promotion-check` expose whether a target is still just trace-ranked, already trace-backed, ready for a starter workspace, or deprioritized by the automated review
 - `orchestrate` now consumes the trace profile plus accumulated evidence to pick the next CUDA target family to pursue, and for starter-ready families it emits real `extract` / `bench` / `verify` commands instead of just placeholder notes
 - starter CUDA workspaces currently exist for:
@@ -349,10 +350,10 @@ Current project snapshot from [CHANGELOG.md](CHANGELOG.md):
 
 | Metric | Value |
 | --- | --- |
-| Mean autonomy score | `3.36 / 6` |
-| Mean complexity | `7.41 / commit` |
+| Mean autonomy score | `3.35 / 6` |
+| Mean complexity | `7.39 / commit` |
 | Mean score per top-level bullet | `3.41 / 6` |
-| History covered | `61` commits across `12` subsystems |
+| History covered | `62` commits across `12` subsystems |
 <!-- autonomy-golf-snapshot:end -->
 
 Refresh with:

@@ -1196,18 +1196,24 @@ class CudaKernelLab:
                 "# this target is currently deprioritized by automated CUDA trace evidence",
                 "# capture a new trace on a different preset only if you believe the current trace is unrepresentative",
             )
+        elif target in CUDA_STARTER_TARGET_KEYS and summary.deep_profile_ok_count == 0 and summary.auto_review_ok_count > 0:
+            status = "needs-deep-profile"
+            commands = (
+                "# this target is trace-backed, but deeper kernel diagnosis has not been recorded yet",
+                "# run `uv run kernel-lab.py --engine cuda deep-profile --trace-profile <profile.json> --rank <n>` before promoting it further",
+            )
+        elif target in CUDA_STARTER_TARGET_KEYS and bool(summary.details.get("last_deep_profile_is_weak")) and summary.verify_ok_count > 0:
+            status = "needs-manual-cuda-review"
+            commands = (
+                "# the deeper CUDA diagnosis for this target is still weak or mixed",
+                "# inspect the Nsight Systems / Nsight Compute artifacts manually before promoting it toward trainer integration",
+            )
         elif target in CUDA_STARTER_TARGET_KEYS and supports_direct_integration(target) and summary.verify_ok_count > 0:
             status = "ready-for-cuda-integration"
             commands = (
                 "# this starter workspace has both trace-backed relevance and a passing fixed-harness verify run",
                 "# the next step is a real CUDA trainer integration path for this target family",
                 f"uv run kernel-lab.py --engine cuda integration-suite --workspace <workspace> --preset {preset or 'upstream'} --time-budget 20 --repeats 2 --benchmark-skip-eval --no-checkpoint",
-            )
-        elif target in CUDA_STARTER_TARGET_KEYS and summary.deep_profile_ok_count == 0 and summary.auto_review_ok_count > 0:
-            status = "needs-deep-profile"
-            commands = (
-                "# this target is trace-backed, but deeper kernel diagnosis has not been recorded yet",
-                "# run `uv run kernel-lab.py --engine cuda deep-profile --trace-profile <profile.json> --rank <n>` before promoting it further",
             )
         elif summary.auto_review_ok_count > 0 or summary.trace_profile_ok_count > 0:
             if target in CUDA_STARTER_TARGET_KEYS:
