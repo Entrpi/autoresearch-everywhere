@@ -29,7 +29,56 @@ On this hardware, the default canonical matched benchmark window for optimizatio
 
 ## Latest
 
-### New commit — lab: add residual-add and reshape CUDA trainer hooks — score `3` — complexity `8`
+### New commit — lab: add CUDA RoPE and Q/K-normalization trainer hook — score `3` — complexity `8`
+
+**AI-identified within brief, human-shaped (3)**
+
+- Broadened the direct CUDA trainer-hook layer again by wiring the fused RoPE + Q/K normalization seam into both the starter workspace catalog and the real attention path.
+  - Meaning: the CUDA lab can now exercise one more honest trainer seam immediately around the attention core:
+    - RoPE application and Q/K RMSNorm via `rope_qk_fused`
+    That fills the gap between `attention_prelude` and the attention kernel itself, so the CUDA starter-ready set now spans the practical narrow seams on both sides of the core attention op.
+  - Motivation: after `attention_prelude`, the next natural narrow seam was the rotary-plus-Q/K-normalization path. It already exists as a repeated attention-side boundary in the trainer, is trace-visible, and is still much simpler than trying to hook the full attention core or FlashAttention path directly.
+  - Purpose: complete the current narrow CUDA attention-side hook set before shifting the focus back toward stronger trace-backed evidence and broader promotion logic.
+  - Added a `rope_qk_fused` starter workspace in `/Users/ent/Codex/autoresearch/autoresearch_cuda/lab_workspace.py` with fixed quick/full harness cases and a fused reference path.
+  - Extended `/Users/ent/Codex/autoresearch/autoresearch_cuda/lab_integration.py` so `rope_qk_fused` runs through the shared environment-driven workspace injection path.
+  - Wired `/Users/ent/Codex/autoresearch/autoresearch_cuda/train.py` so the real Q/K rotary + normalization seam can call a `rope_qk_fused` workspace implementation before falling back to the existing separate rotary and norm path.
+  - Updated `/Users/ent/Codex/autoresearch/autoresearch_cuda/lab_trace.py` so trace profiling can rank `rope_qk_fused` as its own starter-ready family instead of hiding that work under the broader `attention_prelude` bucket.
+  - Updated the public CUDA lab story so all current starter-ready CUDA targets and direct trainer-side hooks now include `rope_qk_fused`.
+
+**Grounding**
+
+- Files:
+  - `CHANGELOG.md`
+  - `README.md`
+  - `docs/kernel-lab.md`
+  - `program.md`
+  - `autoresearch_cuda/lab_integration.py`
+  - `autoresearch_cuda/lab_trace.py`
+  - `autoresearch_cuda/lab_workspace.py`
+  - `autoresearch_cuda/train.py`
+- Validation:
+  - `python3 -m py_compile autoresearch_cuda/lab_integration.py autoresearch_cuda/lab_trace.py autoresearch_cuda/lab_workspace.py autoresearch_cuda/train.py`
+  - `./.venv/bin/python kernel-lab.py --engine cuda init --target rope_qk_fused --workspace /tmp/cuda-rope-qk-workspace`
+  - `./.venv/bin/python kernel-lab.py --engine cuda bench --workspace /tmp/cuda-rope-qk-workspace --quick`
+  - `./.venv/bin/python kernel-lab.py --engine cuda integration-ab --workspace /tmp/cuda-rope-qk-workspace --preset upstream --time-budget 2 --repeats 2 --benchmark-skip-eval --no-checkpoint`
+  - `./.venv/bin/python kernel-lab.py --engine cuda integration-suite --workspace /tmp/cuda-rope-qk-workspace --preset upstream --time-budget 2 --repeats 2 --benchmark-skip-eval --no-checkpoint`
+  - `python3 tools/changelog_scores.py --group-by entry --format csv --include-latest --verify`
+- Measurements:
+  - On this machine `torch` is not installed, so the new `rope_qk_fused` integration commands degrade cleanly to `missing-runtime` instead of failing as opaque import errors.
+  - The current starter-ready CUDA target set is now:
+    - `launch_fusion`
+    - `norm`
+    - `loss_prelude`
+    - `data_movement`
+    - `matmul_epilogue`
+    - `attention_prelude`
+    - `rope_qk_fused`
+    - `fused_mlp`
+  - The current direct CUDA trainer-hook set is now identical to that starter-ready set, so every narrow CUDA starter target has a real trainer-side seam even though full validation still requires a CUDA-capable machine.
+
+## Committed History
+
+### March 12, 2026 — `0f29146` — lab: add residual-add and reshape CUDA trainer hooks — score `3` — complexity `8`
 
 **AI-identified within brief, human-shaped (3)**
 
@@ -75,8 +124,6 @@ On this hardware, the default canonical matched benchmark window for optimizatio
     - `fused_mlp`
     - `attention_prelude`
   - That means every current starter-ready CUDA target now has a direct trainer-side seam, even though real trainer-side validation still requires a CUDA-capable machine.
-
-## Committed History
 
 ### March 12, 2026 — `7d8699c` — lab: add broader CUDA block-path trainer hooks — score `3` — complexity `8`
 

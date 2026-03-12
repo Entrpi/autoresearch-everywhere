@@ -21,6 +21,7 @@ SUPPORTED_INTEGRATION_TARGETS = frozenset(
         "loss_prelude",
         "matmul_epilogue",
         "norm",
+        "rope_qk_fused",
     }
 )
 _NORM_WEIGHT_CACHE: dict[tuple[str, int | None, str, int], object] = {}
@@ -155,6 +156,13 @@ def maybe_call_integration_target(target: str, *args):
             ve_gate_weight,
             ve_gate_channels,
         )
+    if target == "rope_qk_fused":
+        q = args[0]
+        k = args[1]
+        cos = args[2]
+        sin = args[3]
+        eps = args[4] if len(args) > 4 else 1e-6
+        return workspace.kernel_module.kernel_fn(q, k, cos, sin, eps)
     if target == "fused_mlp":
         x = args[0]
         w1 = args[1]

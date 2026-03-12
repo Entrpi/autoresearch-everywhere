@@ -142,8 +142,12 @@ class CausalSelfAttention(nn.Module):
                 v = v + gate.unsqueeze(-1) * ve
 
         cos, sin = cos_sin
-        q, k = apply_rotary_emb(q, cos, sin), apply_rotary_emb(k, cos, sin)
-        q, k = norm(q), norm(k)
+        overridden_qk = maybe_call_integration_target("rope_qk_fused", q, k, cos, sin)
+        if overridden_qk is not None:
+            q, k = overridden_qk
+        else:
+            q, k = apply_rotary_emb(q, cos, sin), apply_rotary_emb(k, cos, sin)
+            q, k = norm(q), norm(k)
 
         y = fa3.flash_attn_func(q, k, v, causal=True, window_size=window_size)
         overridden_y = maybe_call_integration_target("data_movement", y)

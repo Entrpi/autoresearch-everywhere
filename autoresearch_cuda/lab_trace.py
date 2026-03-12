@@ -63,6 +63,13 @@ CUDA_TRACE_TARGETS: dict[str, LabTarget] = {
         status="starter-ready",
         notes="Starter-ready fixed workspace harness exists for Q/K/V staging and norm-prelude work.",
     ),
+    "rope_qk_fused": LabTarget(
+        key="rope_qk_fused",
+        description="RoPE application and Q/K normalization work between attention staging and the attention core",
+        metric="time_share_pct",
+        status="starter-ready",
+        notes="Starter-ready fixed workspace harness exists for fused RoPE + Q/K RMSNorm.",
+    ),
     "norm": LabTarget(
         key="norm",
         description="RMSNorm / LayerNorm family kernels",
@@ -128,15 +135,23 @@ _TARGET_PATTERNS: tuple[tuple[str, tuple[re.Pattern[str], ...]], ...] = (
         ),
     ),
     (
+        "rope_qk_fused",
+        tuple(
+            re.compile(pattern, re.IGNORECASE)
+            for pattern in (
+                r"rotary",
+                r"\brope\b",
+                r"\bqk\b",
+            )
+        ),
+    ),
+    (
         "attention_prelude",
         tuple(
             re.compile(pattern, re.IGNORECASE)
             for pattern in (
                 r"softmax",
                 r"mask",
-                r"rotary",
-                r"\brope\b",
-                r"\bqk\b",
                 r"transpose",
                 r"permute",
                 r"attention",
@@ -595,7 +610,7 @@ def _build_trace_candidates(metadata: dict[str, Any]) -> tuple[list[LabTraceProf
             priority_score += 15.0
         if dominant_issue == "copy-bound" and family == "data_movement":
             priority_score += 10.0
-        if dominant_issue == "kernel-dominated" and family in {"flash_attention", "fused_mlp", "matmul_epilogue", "norm"}:
+        if dominant_issue == "kernel-dominated" and family in {"flash_attention", "fused_mlp", "matmul_epilogue", "norm", "rope_qk_fused"}:
             priority_score += 8.0
         if family == "matmul_epilogue" and (time_share_pct or 0.0) < 15.0:
             priority_score -= 5.0

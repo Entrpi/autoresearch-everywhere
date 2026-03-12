@@ -19,6 +19,7 @@ CUDA_STARTER_TARGET_KEYS = (
     "data_movement",
     "matmul_epilogue",
     "attention_prelude",
+    "rope_qk_fused",
     "fused_mlp",
 )
 
@@ -192,6 +193,52 @@ def kernel_fn(
 '''
 
 
+ROPE_QK_FUSED_TEMPLATE = '''"""
+Autoresearch CUDA kernel lab workspace.
+
+Target: RoPE + Q/K RMSNorm
+Mutable file: yes
+
+Replace `kernel_fn` with a faster Triton/CUDA implementation once the reference
+path is working.
+"""
+
+from __future__ import annotations
+
+import torch
+
+
+KERNEL_TARGET = "rope_qk_fused"
+
+
+def _apply_rotary(x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor) -> torch.Tensor:
+    d = x.shape[-1] // 2
+    x1 = x[..., :d]
+    x2 = x[..., d:]
+    y1 = x1 * cos + x2 * sin
+    y2 = x1 * (-sin) + x2 * cos
+    return torch.cat([y1, y2], dim=-1)
+
+
+def _rms_norm(x: torch.Tensor, eps: float = 1e-6) -> torch.Tensor:
+    x32 = x.float()
+    scale = torch.rsqrt(torch.mean(x32.square(), dim=-1, keepdim=True) + eps)
+    return (x32 * scale).to(dtype=x.dtype)
+
+
+def kernel_fn(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    cos: torch.Tensor,
+    sin: torch.Tensor,
+    eps: float = 1e-6,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    q = _apply_rotary(q, cos, sin)
+    k = _apply_rotary(k, cos, sin)
+    return _rms_norm(q, eps=eps), _rms_norm(k, eps=eps)
+'''
+
+
 FUSED_MLP_TEMPLATE = '''"""
 Autoresearch CUDA kernel lab workspace.
 
@@ -350,6 +397,40 @@ def _attention_prelude_reference(
     return q, k, v
 
 
+def _rope_qk_fused_inputs(torch: Any, case: CudaLabCase, device: Any) -> tuple[Any, ...]:
+    b, t, h, d = case.shape
+    dtype = _resolve_dtype(torch, case.dtype, device)
+    q = torch.randn((b, t, h, d), device=device, dtype=dtype)
+    k = torch.randn((b, t, h, d), device=device, dtype=dtype)
+    cos = torch.randn((1, t, 1, d // 2), device=device, dtype=dtype)
+    sin = torch.randn((1, t, 1, d // 2), device=device, dtype=dtype)
+    return q, k, cos, sin
+
+
+def _rope_qk_fused_reference(
+    torch: Any,
+    q: Any,
+    k: Any,
+    cos: Any,
+    sin: Any,
+    eps: float = 1e-6,
+) -> Any:
+    def _apply_rotary(x: Any) -> Any:
+        d = x.shape[-1] // 2
+        x1 = x[..., :d]
+        x2 = x[..., d:]
+        y1 = x1 * cos + x2 * sin
+        y2 = x1 * (-sin) + x2 * cos
+        return torch.cat([y1, y2], dim=-1)
+
+    def _rms_norm(x: Any) -> Any:
+        x32 = x.float()
+        scale = torch.rsqrt(torch.mean(x32.square(), dim=-1, keepdim=True) + eps)
+        return (x32 * scale).to(dtype=x.dtype)
+
+    return _rms_norm(_apply_rotary(q)), _rms_norm(_apply_rotary(k))
+
+
 def _fused_mlp_inputs(torch: Any, case: CudaLabCase, device: Any) -> tuple[Any, ...]:
     b, t, c = case.shape
     aux = case.aux or {}
@@ -457,6 +538,21 @@ CUDA_WORKSPACE_TARGET_SPECS: dict[str, CudaTargetSpec] = {
         ),
         make_inputs=_attention_prelude_inputs,
         reference=_attention_prelude_reference,
+    ),
+    "rope_qk_fused": CudaTargetSpec(
+        target="rope_qk_fused",
+        template=ROPE_QK_FUSED_TEMPLATE,
+        tolerance=1e-5,
+        quick_cases=(
+            CudaLabCase(shape=(8, 256, 8, 128), dtype="float32"),
+            CudaLabCase(shape=(4, 512, 8, 128), dtype="float32"),
+        ),
+        full_cases=(
+            CudaLabCase(shape=(8, 512, 8, 128), dtype="float16"),
+            CudaLabCase(shape=(4, 1024, 16, 128), dtype="float16"),
+        ),
+        make_inputs=_rope_qk_fused_inputs,
+        reference=_rope_qk_fused_reference,
     ),
     "fused_mlp": CudaTargetSpec(
         target="fused_mlp",
