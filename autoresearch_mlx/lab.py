@@ -70,6 +70,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="Override the preset to test. If omitted, use the calibrated platform default for this device.",
     )
     integration_parser.add_argument("--time-budget", type=float, default=20.0)
+    integration_parser.add_argument(
+        "--repeats",
+        type=int,
+        default=2,
+        help="Number of balanced measured A/B rounds to run after warmup.",
+    )
     integration_parser.add_argument("--benchmark-skip-eval", action="store_true")
     integration_parser.add_argument("--no-checkpoint", action="store_true")
 
@@ -172,6 +178,7 @@ def main(argv: list[str] | None = None) -> None:
             workspace=Path(args.workspace).expanduser(),
             preset=args.preset,
             time_budget=args.time_budget,
+            repeats=args.repeats,
             benchmark_skip_eval=args.benchmark_skip_eval,
             no_checkpoint=args.no_checkpoint,
         )

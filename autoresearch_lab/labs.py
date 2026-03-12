@@ -174,6 +174,7 @@ class KernelLab(Protocol):
         workspace: Path,
         time_budget: float,
         preset: str | None = None,
+        repeats: int = 2,
         benchmark_skip_eval: bool = True,
         no_checkpoint: bool = True,
     ) -> LabIntegrationABResult:

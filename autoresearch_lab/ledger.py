@@ -173,6 +173,15 @@ def summarize_lab_evidence(
         for event in integration_ab_ok
         if event.get("details", {}).get("delta", {}).get("steady_state_tok_per_sec") is not None
     ]
+    integration_relative_deltas = [
+        event.get("details", {}).get("delta_relative_pct", {}).get("steady_state_tok_per_sec")
+        for event in integration_ab_ok
+        if event.get("details", {}).get("delta_relative_pct", {}).get("steady_state_tok_per_sec") is not None
+    ]
+    integration_pair_count = sum(
+        int(event.get("details", {}).get("measured_pair_count", 0) or 0)
+        for event in integration_ab_ok
+    )
     positive_integration_count = sum(1 for value in integration_deltas if value > 0)
     negative_integration_count = sum(1 for value in integration_deltas if value < 0)
     zero_integration_count = sum(1 for value in integration_deltas if value == 0)
@@ -181,6 +190,25 @@ def summarize_lab_evidence(
         float(statistics.median(integration_deltas))
         if integration_deltas
         else None
+    )
+    have_complete_relative_coverage = bool(integration_deltas) and len(integration_relative_deltas) == len(integration_deltas)
+    integration_relative_delta = integration_relative_deltas[-1] if have_complete_relative_coverage else None
+    median_integration_relative_delta = (
+        float(statistics.median(integration_relative_deltas))
+        if have_complete_relative_coverage
+        else None
+    )
+    strong_positive_integration = (
+        integration_pair_count >= 4
+        and len(integration_ab_ok) >= 2
+        and positive_integration_count == len(integration_deltas)
+        and bool(median_integration_relative_delta is not None and median_integration_relative_delta >= 1.0)
+    )
+    strong_negative_integration = (
+        integration_pair_count >= 4
+        and len(integration_ab_ok) >= 2
+        and negative_integration_count == len(integration_deltas)
+        and bool(median_integration_relative_delta is not None and median_integration_relative_delta <= -1.0)
     )
 
     if trace_relevance == "none":
@@ -193,15 +221,15 @@ def summarize_lab_evidence(
         if positive_integration_count and negative_integration_count:
             promotion_status = "integration-mixed"
             evidence_bonus = 0.2
-        elif integration_delta is not None and integration_delta > 0:
+        elif strong_positive_integration:
             promotion_status = "integration-validated"
             evidence_bonus = 1.5
-        elif integration_delta is not None and integration_delta < 0:
+        elif strong_negative_integration:
             promotion_status = "integration-regressed"
             evidence_bonus = -0.5
         else:
             promotion_status = "integration-tested"
-            evidence_bonus = 1.1
+            evidence_bonus = 0.9
     elif verify_ok and capture_ok:
         promotion_status = "ready-for-integration-test"
         evidence_bonus = 1.2 if trace_relevance == "high" else 1.0
@@ -243,10 +271,15 @@ def summarize_lab_evidence(
             "last_metric_value": events[-1].get("metric_value") if events else None,
             "last_trace_relevance": trace_relevance,
             "last_integration_delta_steady_state_tok_per_sec": integration_delta,
+            "last_integration_delta_relative_pct_steady_state_tok_per_sec": integration_relative_delta,
             "integration_ab_positive_count": positive_integration_count,
             "integration_ab_negative_count": negative_integration_count,
             "integration_ab_zero_count": zero_integration_count,
+            "integration_ab_pair_count": integration_pair_count,
             "integration_ab_median_delta_steady_state_tok_per_sec": median_integration_delta,
+            "integration_ab_median_delta_relative_pct_steady_state_tok_per_sec": median_integration_relative_delta,
+            "integration_ab_strong_positive": strong_positive_integration,
+            "integration_ab_strong_negative": strong_negative_integration,
             "recommended_next_step": (
                 "reprioritize"
                 if promotion_status == "trace-deprioritized"
@@ -254,7 +287,7 @@ def summarize_lab_evidence(
                 if promotion_status == "integration-validated"
                 else "stabilize-integration"
                 if promotion_status == "integration-mixed"
-                else "review-integration"
+                else "strengthen-integration-evidence"
                 if promotion_status in {"integration-tested", "integration-regressed"}
                 else "integration-test"
                 if promotion_status == "ready-for-integration-test"

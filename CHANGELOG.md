@@ -29,7 +29,48 @@ On this hardware, the default canonical matched benchmark window for optimizatio
 
 ## Latest
 
-### New commit — lab: default MLX integration tests to the calibrated platform point — score `4` — complexity `7`
+### New commit — lab: strengthen MLX integration evidence with repeated balanced A/Bs — score `3` — complexity `6`
+
+**AI-identified within brief, human-shaped (3)**
+
+- Strengthened MLX kernel-lab integration evidence so promotion depends on repeated balanced trainer A/B runs and effect-size thresholds instead of treating a single encouraging run as nearly sufficient.
+  - Meaning: `integration-ab` now runs repeated measured rounds in alternating order after warmup, aggregates median trainer summaries, records pair count plus relative deltas, and only lets the ledger call a target `integration-validated` or `integration-regressed` when the evidence is both repeated and directionally consistent.
+  - Motivation: the old trainer-side bridge closed the loop, but it still overfit to one-off runs. Kernel promotion needed stronger evidence than a single baseline/candidate pair because short local runs are noisy enough to flip sign.
+  - Purpose: make `promotion-check`, orchestration, and later trainer patch promotion depend on repeated end-to-end evidence that is harder to fool with compile noise or transient drift.
+  - Upgraded `integration-ab` to repeated balanced rounds and stored richer aggregate details, including relative throughput deltas and measured pair count.
+  - Tightened ledger aggregation so `integration-validated` and `integration-regressed` require stronger repeated evidence, while weak or mixed results stay in `integration-tested` or `integration-mixed`.
+  - Updated orchestration and promotion messaging to point at repeated A/B reruns on the calibrated point rather than implying that one run is close to promotion.
+
+**Grounding**
+
+- Files:
+  - `CHANGELOG.md`
+  - `README.md`
+  - `program.md`
+  - `docs/kernel-lab.md`
+  - `autoresearch_lab/labs.py`
+  - `autoresearch_lab/ledger.py`
+  - `autoresearch_mlx/lab.py`
+  - `autoresearch_mlx/lab_profile.py`
+  - `autoresearch_mlx/lab_workspace.py`
+- Validation:
+  - `python3 -m py_compile autoresearch_lab/labs.py autoresearch_lab/ledger.py autoresearch_mlx/lab.py autoresearch_mlx/lab_profile.py autoresearch_mlx/lab_workspace.py`
+  - `./.venv/bin/python kernel-lab.py --engine mlx integration-ab --workspace /tmp/mlx-logits-integration --time-budget 2 --benchmark-skip-eval --no-checkpoint`
+  - `./.venv/bin/python kernel-lab.py --engine mlx evidence --target logits_softcap --preset m5-fast`
+  - `./.venv/bin/python kernel-lab.py --engine mlx promotion-check --target logits_softcap --workspace /tmp/mlx-logits-integration`
+  - `python3 tools/changelog_scores.py --group-by entry --format csv --include-latest --verify`
+- Measurements:
+  - A repeated balanced `integration-ab` run on `logits_softcap` completed at the calibrated platform default (`m5-fast`) and added `integration_ab_pair_count=4`.
+  - The target remains `integration-mixed`, with:
+    - `integration_ab_positive_count=2`
+    - `integration_ab_negative_count=2`
+    - `integration_ab_median_delta_steady_state_tok_per_sec=-1914.5`
+    - `integration_ab_median_delta_relative_pct_steady_state_tok_per_sec=null` because the older one-off events did not carry relative deltas, so the stricter ledger now refuses to infer a mixed absolute/relative aggregate.
+  - `promotion-check` now keeps mixed targets in the stabilization path instead of treating one positive run as enough for promotion.
+
+## Committed History
+
+### March 12, 2026 — `335d608` — lab: default MLX integration checks to calibrated presets — score `4` — complexity `7`
 
 **Human-directed, AI-shaped (4)**
 
@@ -66,8 +107,6 @@ On this hardware, the default canonical matched benchmark window for optimizatio
   - A fresh MLX bring-up now writes `/Users/ent/.cache/autoresearch/platform_defaults/mlx/apple-m5-32gb-10gpu.json`.
   - With no `--preset`, `promotion-check` resolved `preset=m5-fast` with `preset_source=calibrated-platform-default`.
   - A no-preset `integration-ab` run against `logits_softcap` was recorded against the calibrated point and kept the target in `integration-mixed`, which is the intended conservative behavior.
-
-## Committed History
 
 ### March 12, 2026 — `89df91f` — lab: Add MLX trainer integration A/B workflow — score `4` — complexity `8`
 

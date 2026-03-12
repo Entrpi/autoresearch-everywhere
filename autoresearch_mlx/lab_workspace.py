@@ -2184,24 +2184,24 @@ class MLXKernelLab:
         elif summary.promotion_status == "integration-tested":
             status = "integration-tested"
             commands = (
-                "# this target has completed an end-to-end integration A/B run",
-                "# inspect the measured delta and decide whether to promote, refine, or rerun on a stronger preset",
+                "# this target has end-to-end integration evidence, but not enough repeated signal to promote it yet",
+                "# rerun integration-ab with repeated balanced rounds or a stronger preset before promoting it",
             )
         elif summary.promotion_status == "integration-mixed":
             status = "integration-mixed"
             commands = (
                 "# this target has mixed end-to-end integration A/B results",
-                "# rerun on a stronger preset or a longer budget before promoting it into the trainer",
+                "# rerun with repeated balanced rounds, a stronger preset, or a longer budget before promoting it into the trainer",
             )
         elif summary.promotion_status == "integration-regressed":
             status = "integration-regressed"
             commands = (
-                "# this target regressed in end-to-end integration A/B",
+                "# this target shows repeated end-to-end regression under the current evidence policy",
                 "# inspect the integration logs before spending more lab time on it",
             )
         elif summary.promotion_status == "ready-for-integration-test" and chosen_workspace is not None:
             status = "ready-for-integration-ab"
-            cmd = f"uv run kernel-lab.py --engine mlx integration-ab --workspace {chosen_workspace} --time-budget 20 --benchmark-skip-eval --no-checkpoint"
+            cmd = f"uv run kernel-lab.py --engine mlx integration-ab --workspace {chosen_workspace} --time-budget 20 --repeats 2 --benchmark-skip-eval --no-checkpoint"
             if preset_source == "manual":
                 cmd += f" --preset {resolved_preset}"
             commands = (cmd,)
@@ -2239,9 +2239,12 @@ class MLXKernelLab:
         workspace: Path,
         time_budget: float,
         preset: str | None = None,
+        repeats: int = 2,
         benchmark_skip_eval: bool = True,
         no_checkpoint: bool = True,
     ) -> LabIntegrationABResult:
+        if repeats < 1:
+            raise ValueError("repeats must be >= 1")
         resolved_preset, preset_source, preset_context = self._resolve_runtime_preset(preset)
         workspace = workspace.expanduser().resolve()
         metadata = json.loads((workspace / "metadata.json").read_text(encoding="utf-8"))
@@ -2279,10 +2282,6 @@ class MLXKernelLab:
         baseline_warmup_stderr = run_root / "baseline-warmup.stderr.log"
         candidate_warmup_stdout = run_root / "candidate-warmup.stdout.log"
         candidate_warmup_stderr = run_root / "candidate-warmup.stderr.log"
-        baseline_stdout = run_root / "baseline.stdout.log"
-        baseline_stderr = run_root / "baseline.stderr.log"
-        candidate_stdout = run_root / "candidate.stdout.log"
-        candidate_stderr = run_root / "candidate.stderr.log"
 
         baseline_env = os.environ.copy()
         candidate_env = os.environ.copy()
@@ -2301,35 +2300,67 @@ class MLXKernelLab:
             candidate_warmup_stderr,
             env=candidate_env,
         )
-        baseline = self._run_train_command(
-            measured_cmd,
-            baseline_stdout,
-            baseline_stderr,
-            env=baseline_env,
-        )
-        candidate = self._run_train_command(
-            measured_cmd,
-            candidate_stdout,
-            candidate_stderr,
-            env=candidate_env,
-        )
+        measured_runs: list[dict[str, object]] = []
+        baseline_results: list[subprocess.CompletedProcess[str]] = []
+        candidate_results: list[subprocess.CompletedProcess[str]] = []
+        for repeat_index in range(repeats):
+            order = ("baseline", "candidate") if repeat_index % 2 == 0 else ("candidate", "baseline")
+            for leg in order:
+                stdout_path = run_root / f"round-{repeat_index + 1:02d}-{leg}.stdout.log"
+                stderr_path = run_root / f"round-{repeat_index + 1:02d}-{leg}.stderr.log"
+                env = baseline_env if leg == "baseline" else candidate_env
+                completed = self._run_train_command(
+                    measured_cmd,
+                    stdout_path,
+                    stderr_path,
+                    env=env,
+                )
+                summary = parse_summary(completed.stdout) if completed.returncode == 0 else {}
+                measured_runs.append(
+                    {
+                        "round": repeat_index + 1,
+                        "leg": leg,
+                        "stdout": str(stdout_path),
+                        "stderr": str(stderr_path),
+                        "returncode": completed.returncode,
+                        "summary": summary,
+                    }
+                )
+                if leg == "baseline":
+                    baseline_results.append(completed)
+                else:
+                    candidate_results.append(completed)
         wall_seconds = time.perf_counter() - start
 
         baseline_warmup_summary = parse_summary(baseline_warmup.stdout) if baseline_warmup.returncode == 0 else {}
         candidate_warmup_summary = parse_summary(candidate_warmup.stdout) if candidate_warmup.returncode == 0 else {}
-        baseline_summary = parse_summary(baseline.stdout) if baseline.returncode == 0 else {}
-        candidate_summary = parse_summary(candidate.stdout) if candidate.returncode == 0 else {}
+        baseline_summaries = [
+            parse_summary(result.stdout)
+            for result in baseline_results
+            if result.returncode == 0
+        ]
+        candidate_summaries = [
+            parse_summary(result.stdout)
+            for result in candidate_results
+            if result.returncode == 0
+        ]
+        baseline_summary = self._aggregate_summaries(baseline_summaries)
+        candidate_summary = self._aggregate_summaries(candidate_summaries)
 
         status = (
             "ok"
             if all(
                 result.returncode == 0
-                for result in (baseline_warmup, candidate_warmup, baseline, candidate)
+                for result in (baseline_warmup, candidate_warmup, *baseline_results, *candidate_results)
             )
             else "error"
         )
+        delta = self._summary_delta(baseline_summary, candidate_summary)
+        delta_relative_pct = self._summary_delta_relative_pct(baseline_summary, candidate_summary)
         details = {
             "warmup_budget": warmup_budget,
+            "repeats": repeats,
+            "measured_pair_count": repeats * 2,
             "warmup": {
                 "baseline_stdout": str(baseline_warmup_stdout),
                 "baseline_stderr": str(baseline_warmup_stderr),
@@ -2340,17 +2371,18 @@ class MLXKernelLab:
                 "baseline": baseline_warmup_summary,
                 "candidate": candidate_warmup_summary,
             },
-            "baseline_stdout": str(baseline_stdout),
-            "baseline_stderr": str(baseline_stderr),
-            "candidate_stdout": str(candidate_stdout),
-            "candidate_stderr": str(candidate_stderr),
-            "baseline_returncode": baseline.returncode,
-            "candidate_returncode": candidate.returncode,
             "benchmark_skip_eval": benchmark_skip_eval,
             "no_checkpoint": no_checkpoint,
+            "measured_runs": measured_runs,
+            "measured_order": [f"{entry['round']}:{entry['leg']}" for entry in measured_runs],
+            "baseline_run_returncodes": [result.returncode for result in baseline_results],
+            "candidate_run_returncodes": [result.returncode for result in candidate_results],
             "baseline": baseline_summary,
             "candidate": candidate_summary,
-            "delta": self._summary_delta(baseline_summary, candidate_summary),
+            "baseline_runs": baseline_summaries,
+            "candidate_runs": candidate_summaries,
+            "delta": delta,
+            "delta_relative_pct": delta_relative_pct,
         }
 
         append_lab_event(
@@ -2362,22 +2394,24 @@ class MLXKernelLab:
             status=status,
             preset=resolved_preset,
             metric_name="steady_state_tok_per_sec_delta",
-            metric_value=details["delta"].get("steady_state_tok_per_sec"),
+            metric_value=delta.get("steady_state_tok_per_sec"),
             details={
                 "preset": resolved_preset,
                 "preset_source": preset_source,
                 "preset_context": preset_context,
                 "time_budget": time_budget,
                 "warmup_budget": warmup_budget,
+                "repeats": repeats,
+                "measured_pair_count": repeats * 2,
                 "benchmark_skip_eval": benchmark_skip_eval,
                 "no_checkpoint": no_checkpoint,
-                "baseline_stdout": str(baseline_stdout),
-                "candidate_stdout": str(candidate_stdout),
-                "baseline_returncode": baseline.returncode,
-                "candidate_returncode": candidate.returncode,
+                "measured_order": details["measured_order"],
+                "baseline_run_returncodes": details["baseline_run_returncodes"],
+                "candidate_run_returncodes": details["candidate_run_returncodes"],
                 "warmup_baseline_returncode": baseline_warmup.returncode,
                 "warmup_candidate_returncode": candidate_warmup.returncode,
-                "delta": details["delta"],
+                "delta": delta,
+                "delta_relative_pct": delta_relative_pct,
             },
         )
 
@@ -2453,3 +2487,35 @@ class MLXKernelLab:
             if isinstance(baseline, (int, float)) and isinstance(candidate, (int, float)):
                 deltas[key] = float(candidate) - float(baseline)
         return deltas
+
+    def _summary_delta_relative_pct(
+        self,
+        baseline_summary: dict[str, str | float | int],
+        candidate_summary: dict[str, str | float | int],
+    ) -> dict[str, float]:
+        deltas: dict[str, float] = {}
+        for key in ("steady_state_tok_per_sec", "peak_vram_mb", "val_bpb", "proxy_val_bpb"):
+            baseline = baseline_summary.get(key)
+            candidate = candidate_summary.get(key)
+            if isinstance(baseline, (int, float)) and isinstance(candidate, (int, float)) and float(baseline) != 0.0:
+                deltas[key] = ((float(candidate) - float(baseline)) / float(baseline)) * 100.0
+        return deltas
+
+    def _aggregate_summaries(
+        self,
+        summaries: list[dict[str, str | float | int]],
+    ) -> dict[str, str | float]:
+        if not summaries:
+            return {}
+        aggregated: dict[str, str | float] = {}
+        keys = set().union(*(summary.keys() for summary in summaries))
+        for key in sorted(keys):
+            values = [summary.get(key) for summary in summaries]
+            numeric_values = [float(value) for value in values if isinstance(value, (int, float))]
+            if len(numeric_values) == len(values) and numeric_values:
+                aggregated[key] = float(statistics.median(numeric_values))
+                continue
+            first = values[0]
+            if all(value == first for value in values):
+                aggregated[key] = first  # type: ignore[assignment]
+        return aggregated

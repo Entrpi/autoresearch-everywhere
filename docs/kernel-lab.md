@@ -86,6 +86,8 @@ uv run kernel-lab.py --engine mlx integration-ab --workspace /tmp/mlx-lab/block-
 
 If `--preset` is omitted, the lab uses the calibrated platform default for the current device. That is the normal path once `calibrate.py` has been run on the machine. Pass `--preset` explicitly only when you are doing a smoke check or intentionally targeting a non-default operating point.
 
+`integration-ab` now uses repeated balanced measured rounds by default (`--repeats 2`) after warmup, so promotion is based on repeated end-to-end evidence rather than one encouraging run.
+
 For now the MLX lab is deliberately narrow, but it is no longer just `init + bench`:
 
 - starter-ready targets:
@@ -144,7 +146,7 @@ Once `integration-ab` has run, the ledger can now distinguish:
 - `integration-regressed`
 - `integration-mixed`
 
-So promotion is no longer “trace-backed forever.” It can advance, stall, or back off based on actual trainer-side A/B evidence.
+So promotion is no longer “trace-backed forever.” It can advance, stall, or back off based on repeated trainer-side A/B evidence with pair counts and relative effect sizes, not just one baseline/candidate pair.
 
 ## Heuristic Layer vs Trace Layer
 
