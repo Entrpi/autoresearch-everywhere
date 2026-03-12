@@ -19,6 +19,7 @@ SUPPORTED_INTEGRATION_TARGETS = frozenset(
         "fused_mlp",
         "launch_fusion",
         "loss_prelude",
+        "logits_softcap",
         "matmul_epilogue",
         "norm",
         "rope_qk_fused",
@@ -123,6 +124,10 @@ def maybe_call_integration_target(target: str, *args):
         if token_bytes is None:
             token_bytes = torch.ones_like(targets, dtype=torch.int32)
         return workspace.kernel_module.kernel_fn(logits, targets, token_bytes, softcap)
+    if target == "logits_softcap":
+        logits = args[0]
+        softcap = args[1] if len(args) > 1 else 15.0
+        return workspace.kernel_module.kernel_fn(logits, softcap)
     if target == "matmul_epilogue":
         x = args[0]
         weight = args[1]

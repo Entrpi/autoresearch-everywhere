@@ -357,6 +357,9 @@ class GPT(nn.Module):
         else:
             logits = self.lm_head(x)
         logits = logits.float()
+        overridden_softcap = maybe_call_integration_target("logits_softcap", logits, softcap)
+        if overridden_softcap is not None:
+            logits = overridden_softcap
 
         if targets is not None:
             flat_targets = targets.view(-1)
@@ -372,7 +375,8 @@ class GPT(nn.Module):
             )
             if overridden is not None:
                 weighted, weighted_sum, token_count = overridden
-                logits = softcap * torch.tanh(logits / softcap)
+                if overridden_softcap is None:
+                    logits = softcap * torch.tanh(logits / softcap)
                 if reduction == 'none':
                     loss = weighted.view_as(targets)
                 elif reduction == 'sum':
@@ -380,11 +384,13 @@ class GPT(nn.Module):
                 else:
                     loss = weighted_sum / token_count.clamp_min(1).float()
             else:
-                logits = softcap * torch.tanh(logits / softcap)
+                if overridden_softcap is None:
+                    logits = softcap * torch.tanh(logits / softcap)
                 loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1),
                                        ignore_index=-1, reduction=reduction)
             return loss
-        logits = softcap * torch.tanh(logits / softcap)
+        if overridden_softcap is None:
+            logits = softcap * torch.tanh(logits / softcap)
         return logits
 
 # ---------------------------------------------------------------------------

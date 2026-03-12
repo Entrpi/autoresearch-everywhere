@@ -29,7 +29,42 @@ On this hardware, the default canonical matched benchmark window for optimizatio
 
 ## Latest
 
-### New commit — lab: mark Triton-backed CUDA starter metadata consistently — score `2`
+### New commit — lab: add Triton-backed CUDA logits softcap hook — score `3` — complexity `6`
+
+**AI-identified within brief, human-shaped (3)**
+
+- Add the next narrow CUDA trainer seam by wiring logits softcap into both the starter workspace catalog and the real trainer path.
+  - Meaning: the CUDA lab can now exercise one more honest end-to-end seam after the output projection but before loss handling. `logits_softcap` is now a starter-ready CUDA workspace family, has a direct trainer-side hook, and ships with an optional Triton pointwise implementation rather than only a reference path.
+  - Motivation: after the first Triton-backed CUDA starter families and their trainer hooks were in place, the next practical addition was a narrow logits-side pointwise seam that is easier to benchmark and promote than deeper attention-core work.
+  - Purpose: broaden the real Triton-backed CUDA direct-hook set incrementally, so the CUDA lab keeps gaining trainer-relevant targets without jumping straight to much heavier kernels.
+  - Extending `/Users/ent/Codex/autoresearch/autoresearch_cuda/lab_workspace.py` with a starter-ready `logits_softcap` target and optional Triton implementation.
+  - Wiring `/Users/ent/Codex/autoresearch/autoresearch_cuda/train.py` and `/Users/ent/Codex/autoresearch/autoresearch_cuda/lab_integration.py` so `logits_softcap` can run through the real trainer path.
+  - Updating the CUDA target catalog/docs so the Triton-backed starter set and direct-hook set both include `logits_softcap`.
+
+**Grounding**
+
+- Files:
+  - `CHANGELOG.md`
+  - `README.md`
+  - `docs/kernel-lab.md`
+  - `autoresearch_cuda/lab_integration.py`
+  - `autoresearch_cuda/lab_trace.py`
+  - `autoresearch_cuda/lab_workspace.py`
+  - `autoresearch_cuda/train.py`
+- Validation:
+  - `python3 -m py_compile autoresearch_cuda/lab_integration.py autoresearch_cuda/lab_trace.py autoresearch_cuda/lab_workspace.py autoresearch_cuda/train.py`
+  - `./.venv/bin/python kernel-lab.py --engine cuda init --target logits_softcap --workspace /tmp/cuda-triton-logits-softcap`
+  - `python3 -m py_compile /tmp/cuda-triton-logits-softcap/kernel.py`
+  - `./.venv/bin/python kernel-lab.py --engine cuda bench --workspace /tmp/cuda-triton-logits-softcap --quick`
+  - `./.venv/bin/python kernel-lab.py --engine cuda verify --workspace /tmp/cuda-triton-logits-softcap --quick`
+  - `./.venv/bin/python kernel-lab.py --engine cuda integration-ab --workspace /tmp/cuda-triton-logits-softcap --preset upstream --time-budget 2 --benchmark-skip-eval --no-checkpoint`
+  - `python3 tools/changelog_scores.py --group-by entry --format csv --include-latest --verify`
+- Measurements:
+  - On this Apple machine, the new starter workspace and trainer hook still degrade cleanly to `missing-runtime` because PyTorch/CUDA are unavailable.
+
+## Committed History
+
+### March 12, 2026 — `22f29c8` — lab: mark Triton-backed CUDA starter metadata consistently — score `2`
 
 **AI-identified within brief, human-approved (2)**
 
@@ -53,8 +88,6 @@ On this hardware, the default canonical matched benchmark window for optimizatio
   - `python3 tools/changelog_scores.py --group-by entry --format csv --include-latest --verify`
 - Measurements:
   - On this Apple machine, the starter workspaces still degrade cleanly to `missing-runtime` because PyTorch/CUDA are unavailable.
-
-## Committed History
 
 ### March 12, 2026 — `c8f74d3` — lab: extend Triton-backed CUDA starter workspaces — score `3` — complexity `5`
 

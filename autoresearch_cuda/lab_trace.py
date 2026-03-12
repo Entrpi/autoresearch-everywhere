@@ -97,6 +97,13 @@ CUDA_TRACE_TARGETS: dict[str, LabTarget] = {
         status="starter-ready",
         notes="Starter-ready fixed workspace harness exists.",
     ),
+    "logits_softcap": LabTarget(
+        key="logits_softcap",
+        description="Final logits softcap and related pointwise output shaping",
+        metric="time_share_pct",
+        status="starter-ready",
+        notes="Starter-ready fixed workspace harness exists, with a first optional Triton pointwise softcap kernel.",
+    ),
     "optimizer_update": LabTarget(
         key="optimizer_update",
         description="Optimizer and parameter-update kernels",
@@ -192,14 +199,23 @@ _TARGET_PATTERNS: tuple[tuple[str, tuple[re.Pattern[str], ...]], ...] = (
         ),
     ),
     (
+        "logits_softcap",
+        tuple(
+            re.compile(pattern, re.IGNORECASE)
+            for pattern in (
+                r"softcap",
+                r"tanh",
+                r"logits",
+            )
+        ),
+    ),
+    (
         "loss_prelude",
         tuple(
             re.compile(pattern, re.IGNORECASE)
             for pattern in (
                 r"cross.?entropy",
                 r"xentropy",
-                r"logits",
-                r"softcap",
                 r"softmax",
                 r"loss",
             )

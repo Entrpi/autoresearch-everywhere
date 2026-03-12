@@ -15,6 +15,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 CUDA_STARTER_TARGET_KEYS = (
     "launch_fusion",
     "norm",
+    "logits_softcap",
     "loss_prelude",
     "data_movement",
     "matmul_epilogue",
@@ -206,6 +207,73 @@ def kernel_fn(
     nll = -log_probs.gather(dim=-1, index=targets.unsqueeze(-1)).squeeze(-1)
     weighted = nll * token_bytes.float()
     return weighted.to(dtype=logits.dtype), weighted.sum(), token_bytes.sum()
+'''
+
+
+LOGITS_SOFTCAP_TEMPLATE = '''"""
+Autoresearch CUDA kernel lab workspace.
+
+Target: Logits softcap
+Mutable file: yes
+
+This starter target ships with an optional Triton pointwise implementation and
+falls back to the reference path when Triton or CUDA is unavailable.
+"""
+
+from __future__ import annotations
+
+import torch
+
+try:
+    import triton
+    import triton.language as tl
+except Exception:  # pragma: no cover - workspace fallback path
+    triton = None
+    tl = None
+
+
+KERNEL_TARGET = "logits_softcap"
+WORKSPACE_IMPL = "triton-optional"
+
+if triton is not None:
+
+    @triton.jit
+    def _logits_softcap_kernel(
+        input_ptr,
+        output_ptr,
+        n_elements,
+        softcap,
+        BLOCK_SIZE: tl.constexpr,
+    ):
+        pid = tl.program_id(axis=0)
+        offsets = pid * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+        mask = offsets < n_elements
+        x = tl.load(input_ptr + offsets, mask=mask).to(tl.float32)
+        y = softcap * tl.math.tanh(x / softcap)
+        tl.store(output_ptr + offsets, y, mask=mask)
+
+
+def _logits_softcap_triton(logits: torch.Tensor, softcap: float = 15.0) -> torch.Tensor:
+    logits32 = logits.float().contiguous()
+    output = torch.empty_like(logits32)
+    output_flat = output.view(-1)
+    n_elements = output_flat.numel()
+    grid = lambda meta: (triton.cdiv(n_elements, meta["BLOCK_SIZE"]),)
+    _logits_softcap_kernel[grid](
+        logits32.view(-1),
+        output_flat,
+        n_elements,
+        softcap,
+        BLOCK_SIZE=1024,
+    )
+    return output
+
+
+def kernel_fn(logits: torch.Tensor, softcap: float = 15.0) -> torch.Tensor:
+    if triton is not None and logits.is_cuda and logits.is_contiguous():
+        return _logits_softcap_triton(logits, softcap=softcap)
+    logits32 = logits.float()
+    return softcap * torch.tanh(logits32 / softcap)
 '''
 
 
@@ -564,6 +632,18 @@ def _loss_prelude_reference(
     return weighted.to(dtype=logits.dtype), weighted.sum(), token_bytes.sum()
 
 
+def _logits_softcap_inputs(torch: Any, case: CudaLabCase, device: Any) -> tuple[Any, ...]:
+    rows, vocab = case.shape
+    dtype = _resolve_dtype(torch, case.dtype, device)
+    logits = torch.randn((rows, vocab), device=device, dtype=dtype)
+    return (logits,)
+
+
+def _logits_softcap_reference(torch: Any, logits: Any, softcap: float = 15.0) -> Any:
+    logits32 = logits.float()
+    return softcap * torch.tanh(logits32 / softcap)
+
+
 def _data_movement_inputs(torch: Any, case: CudaLabCase, device: Any) -> tuple[Any, ...]:
     b, t, h, d = case.shape
     dtype = _resolve_dtype(torch, case.dtype, device)
@@ -724,6 +804,21 @@ CUDA_WORKSPACE_TARGET_SPECS: dict[str, CudaTargetSpec] = {
         ),
         make_inputs=_loss_prelude_inputs,
         reference=_loss_prelude_reference,
+    ),
+    "logits_softcap": CudaTargetSpec(
+        target="logits_softcap",
+        template=LOGITS_SOFTCAP_TEMPLATE,
+        tolerance=1e-5,
+        quick_cases=(
+            CudaLabCase(shape=(512, 2048), dtype="float32"),
+            CudaLabCase(shape=(1024, 4096), dtype="float32"),
+        ),
+        full_cases=(
+            CudaLabCase(shape=(2048, 4096), dtype="float16"),
+            CudaLabCase(shape=(1024, 8192), dtype="float16"),
+        ),
+        make_inputs=_logits_softcap_inputs,
+        reference=_logits_softcap_reference,
     ),
     "data_movement": CudaTargetSpec(
         target="data_movement",
@@ -1065,7 +1160,7 @@ def init_cuda_workspace(*, target: str, workspace: Path, profile_context: dict[s
             "metric": "throughput_gb_s",
             "workspace_impl": (
                 "triton-optional"
-                if target in {"launch_fusion", "norm", "data_movement", "matmul_epilogue"}
+                if target in {"launch_fusion", "norm", "logits_softcap", "data_movement", "matmul_epilogue"}
                 else "reference"
             ),
             "profile_context": profile_context or {},
