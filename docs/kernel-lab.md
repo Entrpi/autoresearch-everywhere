@@ -239,7 +239,7 @@ Starter CUDA workspaces currently exist for:
 - `attention_prelude`
 - `fused_mlp`
 
-`norm`, `loss_prelude`, and `matmul_epilogue` currently have direct CUDA trainer-side hooks. They are the first CUDA targets that can move past workspace-local evidence into real `integration-ab` and `integration-suite` runs. The other starter CUDA targets are still workspace- and trace-backed only.
+`norm`, `loss_prelude`, `matmul_epilogue`, and `fused_mlp` currently have direct CUDA trainer-side hooks. They are the first CUDA targets that can move past workspace-local evidence into real `integration-ab` and `integration-suite` runs. The other starter CUDA targets are still workspace- and trace-backed only.
 
 The intended first CUDA trainer-side loop is:
 

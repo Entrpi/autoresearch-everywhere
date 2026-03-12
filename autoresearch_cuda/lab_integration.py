@@ -12,7 +12,7 @@ LAB_INTEGRATION_WORKSPACE_ENV = "AUTORESEARCH_CUDA_LAB_INTEGRATION_WORKSPACE"
 LAB_INTEGRATION_TARGET_ENV = "AUTORESEARCH_CUDA_LAB_INTEGRATION_TARGET"
 
 
-SUPPORTED_INTEGRATION_TARGETS = frozenset({"loss_prelude", "matmul_epilogue", "norm"})
+SUPPORTED_INTEGRATION_TARGETS = frozenset({"fused_mlp", "loss_prelude", "matmul_epilogue", "norm"})
 _NORM_WEIGHT_CACHE: dict[tuple[str, int | None, str, int], object] = {}
 
 
@@ -117,4 +117,9 @@ def maybe_call_integration_target(target: str, *args):
         if bias is None:
             bias = torch.zeros((weight.shape[-1],), device=x.device, dtype=x.dtype)
         return workspace.kernel_module.kernel_fn(x, weight, bias)
+    if target == "fused_mlp":
+        x = args[0]
+        w1 = args[1]
+        w2 = args[2]
+        return workspace.kernel_module.kernel_fn(x, w1, w2)
     return workspace.kernel_module.kernel_fn(*args)

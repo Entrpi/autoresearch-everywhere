@@ -29,7 +29,47 @@ On this hardware, the default canonical matched benchmark window for optimizatio
 
 ## Latest
 
-### New commit — lab: add broader CUDA starter workspaces — score `3` — complexity `6`
+### New commit — lab: add CUDA fused-MLP trainer hook — score `3` — complexity `7`
+
+**AI-identified within brief, human-shaped (3)**
+
+- Broadened the direct CUDA trainer-hook layer from `norm`, `loss_prelude`, and `matmul_epilogue` to also include `fused_mlp`.
+  - Meaning: the CUDA lab can now exercise a fourth trainer-real seam, this time inside the feed-forward path rather than the normalization, loss, or final projection path. That gives the direct CUDA integration story coverage on a real repeated block-local compute region rather than only edge seams.
+  - Motivation: after landing the broader starter CUDA workspaces, `fused_mlp` became the cleanest next direct hook because it already had a starter workspace and maps directly onto the existing CUDA trainer's MLP forward path without needing a fake adapter layer.
+  - Purpose: keep widening the direct CUDA trainer-hook set with seams that are narrow enough to validate honestly, but broad enough to move promotion evidence beyond only normalization and loss-side fragments.
+  - Extended `/Users/ent/Codex/autoresearch/autoresearch_cuda/lab_integration.py` so `fused_mlp` can run through the shared environment-driven workspace injection path alongside `norm`, `loss_prelude`, and `matmul_epilogue`.
+  - Wired `/Users/ent/Codex/autoresearch/autoresearch_cuda/train.py` so the CUDA MLP path can call a `fused_mlp` workspace implementation before falling back to the standard `c_fc -> relu.square -> c_proj` sequence.
+  - Updated the public CUDA lab story so the direct trainer-hook set is now `norm`, `loss_prelude`, `matmul_epilogue`, and `fused_mlp`.
+  - Kept the path narrow and honest: other CUDA starter targets still stop at workspace-local evidence, and non-CUDA machines still return structured `missing-runtime` integration results.
+
+**Grounding**
+
+- Files:
+  - `CHANGELOG.md`
+  - `README.md`
+  - `docs/kernel-lab.md`
+  - `program.md`
+  - `autoresearch_cuda/lab_integration.py`
+  - `autoresearch_cuda/train.py`
+- Validation:
+  - `python3 -m py_compile autoresearch_cuda/lab_integration.py autoresearch_cuda/train.py`
+  - `./.venv/bin/python kernel-lab.py --engine cuda init --target fused_mlp --workspace /tmp/cuda-fused-mlp-integration-workspace`
+  - `./.venv/bin/python kernel-lab.py --engine cuda integration-ab --workspace /tmp/cuda-fused-mlp-integration-workspace --preset upstream --time-budget 2 --repeats 2 --benchmark-skip-eval --no-checkpoint`
+  - `./.venv/bin/python kernel-lab.py --engine cuda init --target fused_mlp --workspace /tmp/cuda-fused-mlp-integration-workspace-2`
+  - `./.venv/bin/python kernel-lab.py --engine cuda integration-suite --workspace /tmp/cuda-fused-mlp-integration-workspace-2 --preset upstream --time-budget 2 --repeats 2 --benchmark-skip-eval --no-checkpoint`
+  - `python3 tools/changelog_scores.py --group-by entry --format csv --include-latest --verify`
+- Measurements:
+  - On this machine `torch` is not installed, so the new `fused_mlp` integration commands degrade cleanly to `missing-runtime` instead of failing as opaque import errors.
+  - The direct CUDA trainer-hook set is now:
+    - `norm`
+    - `loss_prelude`
+    - `matmul_epilogue`
+    - `fused_mlp`
+  - Other CUDA starter targets still stop at workspace-local evidence until more trainer seams are wired.
+
+## Committed History
+
+### March 12, 2026 — `2c7d33f` — lab: add broader CUDA starter workspaces — score `3` — complexity `6`
 
 **AI-identified within brief, human-shaped (3)**
 
@@ -74,8 +114,6 @@ On this hardware, the default canonical matched benchmark window for optimizatio
     - `loss_prelude`
     - `matmul_epilogue`
   - Broader CUDA trace families still remain outside the starter-workspace set until more fixed harnesses are added.
-
-## Committed History
 
 ### March 12, 2026 — `2e4cc37` — lab: broaden CUDA trainer-side integration seams — score `3` — complexity `7`
 

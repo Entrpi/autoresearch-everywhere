@@ -140,6 +140,9 @@ class MLP(nn.Module):
         self.c_proj = nn.Linear(4 * config.n_embd, config.n_embd, bias=False)
 
     def forward(self, x):
+        overridden = maybe_call_integration_target("fused_mlp", x, self.c_fc.weight.t(), self.c_proj.weight.t())
+        if overridden is not None:
+            return overridden
         x = self.c_fc(x)
         x = F.relu(x).square()
         x = self.c_proj(x)
