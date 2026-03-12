@@ -29,17 +29,21 @@ On this hardware, the default canonical matched benchmark window for optimizatio
 
 ## Latest
 
-### New commit — lab: add CUDA fused-MLP trainer hook — score `3` — complexity `7`
+### New commit — lab: add broader CUDA block-path trainer hooks — score `3` — complexity `8`
 
 **AI-identified within brief, human-shaped (3)**
 
-- Broadened the direct CUDA trainer-hook layer from `norm`, `loss_prelude`, and `matmul_epilogue` to also include `fused_mlp`.
-  - Meaning: the CUDA lab can now exercise a fourth trainer-real seam, this time inside the feed-forward path rather than the normalization, loss, or final projection path. That gives the direct CUDA integration story coverage on a real repeated block-local compute region rather than only edge seams.
-  - Motivation: after landing the broader starter CUDA workspaces, `fused_mlp` became the cleanest next direct hook because it already had a starter workspace and maps directly onto the existing CUDA trainer's MLP forward path without needing a fake adapter layer.
-  - Purpose: keep widening the direct CUDA trainer-hook set with seams that are narrow enough to validate honestly, but broad enough to move promotion evidence beyond only normalization and loss-side fragments.
-  - Extended `/Users/ent/Codex/autoresearch/autoresearch_cuda/lab_integration.py` so `fused_mlp` can run through the shared environment-driven workspace injection path alongside `norm`, `loss_prelude`, and `matmul_epilogue`.
-  - Wired `/Users/ent/Codex/autoresearch/autoresearch_cuda/train.py` so the CUDA MLP path can call a `fused_mlp` workspace implementation before falling back to the standard `c_fc -> relu.square -> c_proj` sequence.
-  - Updated the public CUDA lab story so the direct trainer-hook set is now `norm`, `loss_prelude`, `matmul_epilogue`, and `fused_mlp`.
+- Broadened the direct CUDA trainer-hook layer from edge seams into block-local seams by adding `fused_mlp` and `attention_prelude`.
+  - Meaning: the CUDA lab can now exercise two more trainer-real paths inside the transformer block itself:
+    - the feed-forward path via `fused_mlp`
+    - the Q/K/V staging path via `attention_prelude`
+    That moves the direct CUDA integration story beyond normalization, loss-side prelude, and final projection epilogues into repeated block-local compute and attention setup regions.
+  - Motivation: after the first narrow seams landed and the broader starter CUDA workspaces existed, the cleanest next direct hooks were the MLP path and the attention prelude. Both already had starter workspaces and map onto real trainer boundaries without forcing a fake full-attention or full-GEMM rewrite story.
+  - Purpose: keep widening the direct CUDA trainer-hook set with seams that are still narrow enough to validate honestly, but broad enough to make promotion evidence about repeated block-local work rather than only edge fragments.
+  - Extended `/Users/ent/Codex/autoresearch/autoresearch_cuda/lab_integration.py` so `fused_mlp` and `attention_prelude` both run through the shared environment-driven workspace injection path alongside the earlier direct targets.
+  - Retuned the `attention_prelude` starter workspace in `/Users/ent/Codex/autoresearch/autoresearch_cuda/lab_workspace.py` so it now matches the real Q/K/V staging seam, including optional value-embed gating, instead of normalizing after projection inside the workspace.
+  - Wired `/Users/ent/Codex/autoresearch/autoresearch_cuda/train.py` so the CUDA MLP path can call a `fused_mlp` workspace implementation and the attention path can call an `attention_prelude` workspace implementation before the existing rotary, norm, and attention-core logic.
+  - Updated the public CUDA lab story so the direct trainer-hook set is now `norm`, `loss_prelude`, `matmul_epilogue`, `fused_mlp`, and `attention_prelude`.
   - Kept the path narrow and honest: other CUDA starter targets still stop at workspace-local evidence, and non-CUDA machines still return structured `missing-runtime` integration results.
 
 **Grounding**
@@ -50,21 +54,27 @@ On this hardware, the default canonical matched benchmark window for optimizatio
   - `docs/kernel-lab.md`
   - `program.md`
   - `autoresearch_cuda/lab_integration.py`
+  - `autoresearch_cuda/lab_workspace.py`
   - `autoresearch_cuda/train.py`
 - Validation:
-  - `python3 -m py_compile autoresearch_cuda/lab_integration.py autoresearch_cuda/train.py`
+  - `python3 -m py_compile autoresearch_cuda/lab_workspace.py autoresearch_cuda/lab_integration.py autoresearch_cuda/train.py`
   - `./.venv/bin/python kernel-lab.py --engine cuda init --target fused_mlp --workspace /tmp/cuda-fused-mlp-integration-workspace`
   - `./.venv/bin/python kernel-lab.py --engine cuda integration-ab --workspace /tmp/cuda-fused-mlp-integration-workspace --preset upstream --time-budget 2 --repeats 2 --benchmark-skip-eval --no-checkpoint`
   - `./.venv/bin/python kernel-lab.py --engine cuda init --target fused_mlp --workspace /tmp/cuda-fused-mlp-integration-workspace-2`
   - `./.venv/bin/python kernel-lab.py --engine cuda integration-suite --workspace /tmp/cuda-fused-mlp-integration-workspace-2 --preset upstream --time-budget 2 --repeats 2 --benchmark-skip-eval --no-checkpoint`
+  - `./.venv/bin/python kernel-lab.py --engine cuda init --target attention_prelude --workspace /tmp/cuda-attention-prelude-integration-workspace`
+  - `./.venv/bin/python kernel-lab.py --engine cuda integration-ab --workspace /tmp/cuda-attention-prelude-integration-workspace --preset upstream --time-budget 2 --repeats 2 --benchmark-skip-eval --no-checkpoint`
+  - `./.venv/bin/python kernel-lab.py --engine cuda init --target attention_prelude --workspace /tmp/cuda-attention-prelude-integration-workspace-2`
+  - `./.venv/bin/python kernel-lab.py --engine cuda integration-suite --workspace /tmp/cuda-attention-prelude-integration-workspace-2 --preset upstream --time-budget 2 --repeats 2 --benchmark-skip-eval --no-checkpoint`
   - `python3 tools/changelog_scores.py --group-by entry --format csv --include-latest --verify`
 - Measurements:
-  - On this machine `torch` is not installed, so the new `fused_mlp` integration commands degrade cleanly to `missing-runtime` instead of failing as opaque import errors.
+  - On this machine `torch` is not installed, so the new `fused_mlp` and `attention_prelude` integration commands degrade cleanly to `missing-runtime` instead of failing as opaque import errors.
   - The direct CUDA trainer-hook set is now:
     - `norm`
     - `loss_prelude`
     - `matmul_epilogue`
     - `fused_mlp`
+    - `attention_prelude`
   - Other CUDA starter targets still stop at workspace-local evidence until more trainer seams are wired.
 
 ## Committed History

@@ -171,12 +171,6 @@ import torch
 KERNEL_TARGET = "attention_prelude"
 
 
-def _norm_last_dim(x: torch.Tensor, eps: float = 1e-6) -> torch.Tensor:
-    x32 = x.float()
-    scale = torch.rsqrt(torch.mean(x32.square(), dim=-1, keepdim=True) + eps)
-    return (x32 * scale).to(dtype=x.dtype)
-
-
 def kernel_fn(
     x: torch.Tensor,
     wq: torch.Tensor,
@@ -184,12 +178,19 @@ def kernel_fn(
     wv: torch.Tensor,
     n_head: int,
     head_dim: int,
+    ve: torch.Tensor | None = None,
+    ve_gate_weight: torch.Tensor | None = None,
+    ve_gate_channels: int = 32,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     bsz, seqlen, _ = x.shape
     q = torch.matmul(x, wq).view(bsz, seqlen, n_head, head_dim)
     k = torch.matmul(x, wk).view(bsz, seqlen, n_head, head_dim)
     v = torch.matmul(x, wv).view(bsz, seqlen, n_head, head_dim)
-    return _norm_last_dim(q), _norm_last_dim(k), v
+    if ve is not None and ve_gate_weight is not None:
+        ve_view = ve.view(bsz, seqlen, n_head, head_dim)
+        gate = 2 * torch.sigmoid(torch.matmul(x[..., :ve_gate_channels], ve_gate_weight))
+        v = v + gate.unsqueeze(-1) * ve_view
+    return q, k, v
 '''
 
 
@@ -322,7 +323,10 @@ def _attention_prelude_inputs(torch: Any, case: CudaLabCase, device: Any) -> tup
     wq = torch.randn((c, n_head * head_dim), device=device, dtype=dtype)
     wk = torch.randn((c, n_head * head_dim), device=device, dtype=dtype)
     wv = torch.randn((c, n_head * head_dim), device=device, dtype=dtype)
-    return x, wq, wk, wv, n_head, head_dim
+    ve = torch.randn((b, t, n_head * head_dim), device=device, dtype=dtype)
+    ve_gate_channels = int(aux.get("ve_gate_channels", 32))
+    ve_gate_weight = torch.randn((ve_gate_channels, n_head), device=device, dtype=dtype)
+    return x, wq, wk, wv, n_head, head_dim, ve, ve_gate_weight, ve_gate_channels
 
 
 def _attention_prelude_reference(
@@ -333,16 +337,18 @@ def _attention_prelude_reference(
     wv: Any,
     n_head: int,
     head_dim: int,
-    eps: float = 1e-6,
+    ve: Any | None = None,
+    ve_gate_weight: Any | None = None,
+    ve_gate_channels: int = 32,
 ) -> Any:
     bsz, seqlen, _ = x.shape
     q = torch.matmul(x, wq).view(bsz, seqlen, n_head, head_dim)
     k = torch.matmul(x, wk).view(bsz, seqlen, n_head, head_dim)
     v = torch.matmul(x, wv).view(bsz, seqlen, n_head, head_dim)
-    q32 = q.float()
-    k32 = k.float()
-    q = (q32 * torch.rsqrt(torch.mean(q32.square(), dim=-1, keepdim=True) + eps)).to(dtype=q.dtype)
-    k = (k32 * torch.rsqrt(torch.mean(k32.square(), dim=-1, keepdim=True) + eps)).to(dtype=k.dtype)
+    if ve is not None and ve_gate_weight is not None:
+        ve_view = ve.view(bsz, seqlen, n_head, head_dim)
+        gate = 2 * torch.sigmoid(torch.matmul(x[..., :ve_gate_channels], ve_gate_weight))
+        v = v + gate.unsqueeze(-1) * ve_view
     return q, k, v
 
 
