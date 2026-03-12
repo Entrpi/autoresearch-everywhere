@@ -29,7 +29,49 @@ On this hardware, the default canonical matched benchmark window for optimizatio
 
 ## Latest
 
-### New commit — lab: expand CUDA direct trainer hooks — score `3` — complexity `7`
+### New commit — lab: broaden CUDA trainer-side integration seams — score `3` — complexity `7`
+
+**AI-identified within brief, human-shaped (3)**
+
+- Broadened the direct CUDA trainer-hook layer from `norm` and `loss_prelude` to also include `matmul_epilogue`.
+  - Meaning: the CUDA lab can now exercise three distinct narrow trainer seams:
+    - normalization
+    - loss-side prelude
+    - final projection epilogue
+    That gives the CUDA integration story coverage on more than one part of the training stack before we attempt any broader family.
+  - Motivation: after `norm` and `loss_prelude`, the cleanest next seam was the final projection. `matmul_epilogue` already existed as a starter workspace, and the trainer has a clear final-projection boundary where a narrow epilogue hook can be inserted without committing to a full GEMM rewrite story.
+  - Purpose: keep widening the CUDA trainer-hook layer with seams that are both narrow and trainer-real, so future promotion evidence can move beyond one-off path fragments and start comparing different classes of kernel work under the same lab loop.
+  - Extended `/Users/ent/Codex/autoresearch/autoresearch_cuda/lab_integration.py` so `matmul_epilogue` can run through the shared environment-driven workspace injection path alongside `norm` and `loss_prelude`.
+  - Wired `/Users/ent/Codex/autoresearch/autoresearch_cuda/train.py` so the final projection can call a `matmul_epilogue` workspace implementation before the logits-softcap path, with a zero-bias fallback for the starter workspace contract.
+  - Updated the public CUDA lab story so the direct trainer-hook set is now `norm`, `loss_prelude`, and `matmul_epilogue`.
+  - Kept the path narrow and honest: broader CUDA starter targets still stop at workspace-local evidence, and non-CUDA machines still return structured `missing-runtime` integration results.
+
+**Grounding**
+
+- Files:
+  - `CHANGELOG.md`
+  - `README.md`
+  - `docs/kernel-lab.md`
+  - `program.md`
+  - `autoresearch_cuda/lab_integration.py`
+  - `autoresearch_cuda/train.py`
+- Validation:
+  - `python3 -m py_compile autoresearch_cuda/lab_integration.py autoresearch_cuda/train.py autoresearch_cuda/lab.py autoresearch_cuda/lab_trace.py`
+  - `./.venv/bin/python kernel-lab.py --engine cuda init --target matmul_epilogue --workspace /tmp/cuda-matmul-integration-workspace`
+  - `./.venv/bin/python kernel-lab.py --engine cuda integration-ab --workspace /tmp/cuda-matmul-integration-workspace --preset upstream --time-budget 2 --repeats 2 --benchmark-skip-eval --no-checkpoint`
+  - `./.venv/bin/python kernel-lab.py --engine cuda integration-suite --workspace /tmp/cuda-matmul-integration-workspace --preset upstream --time-budget 2 --repeats 2 --benchmark-skip-eval --no-checkpoint`
+  - `python3 tools/changelog_scores.py --group-by entry --format csv --include-latest --verify`
+- Measurements:
+  - On this machine `torch` is not installed, so the new `matmul_epilogue` integration commands degrade cleanly to `missing-runtime` instead of failing as opaque import errors.
+  - The direct CUDA trainer-hook set is now intentionally narrow but no longer small enough to be one-path-specific:
+    - `norm`
+    - `loss_prelude`
+    - `matmul_epilogue`
+  - Broader CUDA starter targets still stop at workspace-local evidence until more trainer seams are wired.
+
+## Committed History
+
+### March 12, 2026 — `ff37e76` — lab: expand CUDA direct trainer hooks — score `3` — complexity `7`
 
 **AI-identified within brief, human-shaped (3)**
 
@@ -63,8 +105,6 @@ On this hardware, the default canonical matched benchmark window for optimizatio
     - `norm`
     - `loss_prelude`
   - Broader CUDA starter targets still stop at workspace-local evidence until more trainer seams are wired.
-
-## Committed History
 
 ### March 12, 2026 — `89bbc11` — lab: add first CUDA trainer hook and integration evidence — score `3` — complexity `7`
 

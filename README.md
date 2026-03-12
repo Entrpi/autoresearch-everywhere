@@ -191,7 +191,7 @@ For CUDA, the split is similar but the trace side is more automatable:
   - `loss_prelude`
   - `data_movement`
   - `matmul_epilogue`
-- `norm` and `loss_prelude` are currently the first CUDA starter targets with direct trainer-side hooks, so they are the only ones that can collect CUDA `integration-ab` / `integration-suite` evidence today
+- `norm`, `loss_prelude`, and `matmul_epilogue` are currently the first CUDA starter targets with direct trainer-side hooks, so they are the only ones that can collect CUDA `integration-ab` / `integration-suite` evidence today
 - on non-CUDA machines or machines without PyTorch/CUDA installed, those CUDA integration commands return structured `missing-runtime` results instead of pretending the target is promotable
 - the long-term goal is that CUDA trace review becomes automated-by-default, with GUI inspection as the escalation path rather than the first step
 
@@ -345,9 +345,9 @@ Current project snapshot from [CHANGELOG.md](CHANGELOG.md):
 | Metric | Value |
 | --- | --- |
 | Mean autonomy score | `3.39 / 6` |
-| Mean complexity | `7.40 / commit` |
-| Mean score per top-level bullet | `3.45 / 6` |
-| History covered | `55` commits across `12` subsystems |
+| Mean complexity | `7.39 / commit` |
+| Mean score per top-level bullet | `3.44 / 6` |
+| History covered | `56` commits across `12` subsystems |
 <!-- autonomy-golf-snapshot:end -->
 
 Refresh with:

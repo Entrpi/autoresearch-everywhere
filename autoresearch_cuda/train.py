@@ -317,7 +317,12 @@ class GPT(nn.Module):
         x = norm(x)
 
         softcap = 15
-        logits = self.lm_head(x)
+        flat_x = x.view(-1, x.size(-1))
+        overridden_logits = maybe_call_integration_target("matmul_epilogue", flat_x, self.lm_head.weight.t())
+        if overridden_logits is not None:
+            logits = overridden_logits.view(B, T, -1)
+        else:
+            logits = self.lm_head(x)
         logits = logits.float()
 
         if targets is not None:
