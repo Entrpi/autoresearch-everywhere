@@ -23,6 +23,7 @@ SUPPORTED_INTEGRATION_TARGETS = frozenset(
         "matmul_epilogue",
         "norm",
         "rope_qk_fused",
+        "value_embed_gate",
     }
 )
 _NORM_WEIGHT_CACHE: dict[tuple[str, int | None, str, int], object] = {}
@@ -161,6 +162,12 @@ def maybe_call_integration_target(target: str, *args):
             ve_gate_weight,
             ve_gate_channels,
         )
+    if target == "value_embed_gate":
+        gate_input = args[0]
+        v = args[1]
+        ve = args[2]
+        ve_gate_weight = args[3]
+        return workspace.kernel_module.kernel_fn(gate_input, v, ve, ve_gate_weight)
     if target == "rope_qk_fused":
         q = args[0]
         k = args[1]

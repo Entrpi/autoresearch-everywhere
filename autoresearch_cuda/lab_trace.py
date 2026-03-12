@@ -69,6 +69,13 @@ CUDA_TRACE_TARGETS: dict[str, LabTarget] = {
         status="starter-ready",
         notes="Starter-ready fixed workspace harness exists for Q/K/V staging and norm-prelude work.",
     ),
+    "value_embed_gate": LabTarget(
+        key="value_embed_gate",
+        description="Value-embedding gating work inside attention staging",
+        metric="time_share_pct",
+        status="starter-ready",
+        notes="Starter-ready fixed workspace harness exists for the value-embed gate seam.",
+    ),
     "rope_qk_fused": LabTarget(
         key="rope_qk_fused",
         description="RoPE application and Q/K normalization work between attention staging and the attention core",
@@ -144,6 +151,18 @@ _TARGET_PATTERNS: tuple[tuple[str, tuple[re.Pattern[str], ...]], ...] = (
                 r"fused.*attn",
                 r"attn_(fwd|bwd)",
                 r"attention_fwd",
+            )
+        ),
+    ),
+    (
+        "value_embed_gate",
+        tuple(
+            re.compile(pattern, re.IGNORECASE)
+            for pattern in (
+                r"\bgate\b",
+                r"sigmoid",
+                r"value",
+                r"embed",
             )
         ),
     ),

@@ -29,7 +29,42 @@ On this hardware, the default canonical matched benchmark window for optimizatio
 
 ## Latest
 
-### New commit — lab: add Triton-backed CUDA logits softcap hook — score `3` — complexity `6`
+### New commit — lab: add CUDA value-embed gate trainer seam — score `3` — complexity `6`
+
+**AI-identified within brief, human-shaped (3)**
+
+- Add the next narrow CUDA trainer seam by splitting value-embedding gating out of the broader attention-prelude path.
+  - Meaning: the CUDA lab can now exercise a dedicated `value_embed_gate` seam inside attention staging, instead of only handling that work as an opaque part of the broader `attention_prelude` family. The new target is starter-ready, reference-first, and directly hookable in the real trainer path.
+  - Motivation: once `attention_prelude` and `rope_qk_fused` were in place, the next useful trainer-side seam was the value-embed gate itself. It is repeated, narrow, and much easier to benchmark and promote than a larger attention-side fused region.
+  - Purpose: keep broadening the CUDA direct-hook set with narrow, trainer-relevant seams that can eventually justify Triton work, instead of jumping straight to heavier attention-core kernels.
+  - Extending `/Users/ent/Codex/autoresearch/autoresearch_cuda/lab_workspace.py` with a starter-ready `value_embed_gate` target and fixed harness.
+  - Wiring `/Users/ent/Codex/autoresearch/autoresearch_cuda/train.py` and `/Users/ent/Codex/autoresearch/autoresearch_cuda/lab_integration.py` so `value_embed_gate` can run through the real trainer path.
+  - Updating the CUDA target catalog/docs so the direct-hook starter set now includes `value_embed_gate`.
+
+**Grounding**
+
+- Files:
+  - `CHANGELOG.md`
+  - `README.md`
+  - `docs/kernel-lab.md`
+  - `autoresearch_cuda/lab_integration.py`
+  - `autoresearch_cuda/lab_trace.py`
+  - `autoresearch_cuda/lab_workspace.py`
+  - `autoresearch_cuda/train.py`
+- Validation:
+  - `python3 -m py_compile autoresearch_cuda/lab_integration.py autoresearch_cuda/lab_trace.py autoresearch_cuda/lab_workspace.py autoresearch_cuda/train.py`
+  - `./.venv/bin/python kernel-lab.py --engine cuda init --target value_embed_gate --workspace /tmp/cuda-value-embed-gate`
+  - `python3 -m py_compile /tmp/cuda-value-embed-gate/kernel.py`
+  - `./.venv/bin/python kernel-lab.py --engine cuda bench --workspace /tmp/cuda-value-embed-gate --quick`
+  - `./.venv/bin/python kernel-lab.py --engine cuda verify --workspace /tmp/cuda-value-embed-gate --quick`
+  - `./.venv/bin/python kernel-lab.py --engine cuda integration-ab --workspace /tmp/cuda-value-embed-gate --preset upstream --time-budget 2 --benchmark-skip-eval --no-checkpoint`
+  - `python3 tools/changelog_scores.py --group-by entry --format csv --include-latest --verify`
+- Measurements:
+  - On this Apple machine, the new starter workspace and trainer hook still degrade cleanly to `missing-runtime` because PyTorch/CUDA are unavailable.
+
+## Committed History
+
+### March 12, 2026 — `f4f7a91` — lab: add Triton-backed CUDA logits softcap hook — score `3` — complexity `6`
 
 **AI-identified within brief, human-shaped (3)**
 
@@ -61,8 +96,6 @@ On this hardware, the default canonical matched benchmark window for optimizatio
   - `python3 tools/changelog_scores.py --group-by entry --format csv --include-latest --verify`
 - Measurements:
   - On this Apple machine, the new starter workspace and trainer hook still degrade cleanly to `missing-runtime` because PyTorch/CUDA are unavailable.
-
-## Committed History
 
 ### March 12, 2026 — `22f29c8` — lab: mark Triton-backed CUDA starter metadata consistently — score `2`
 

@@ -20,6 +20,7 @@ CUDA_STARTER_TARGET_KEYS = (
     "data_movement",
     "matmul_epilogue",
     "attention_prelude",
+    "value_embed_gate",
     "rope_qk_fused",
     "fused_mlp",
 )
@@ -492,6 +493,35 @@ def kernel_fn(
 '''
 
 
+VALUE_EMBED_GATE_TEMPLATE = '''"""
+Autoresearch CUDA kernel lab workspace.
+
+Target: Value-embed gate
+Mutable file: yes
+
+Replace `kernel_fn` with a faster Triton/CUDA implementation once the reference
+path is working.
+"""
+
+from __future__ import annotations
+
+import torch
+
+
+KERNEL_TARGET = "value_embed_gate"
+
+
+def kernel_fn(
+    gate_input: torch.Tensor,
+    v: torch.Tensor,
+    ve: torch.Tensor,
+    ve_gate_weight: torch.Tensor,
+) -> torch.Tensor:
+    gate = 2 * torch.sigmoid(torch.matmul(gate_input, ve_gate_weight))
+    return v + gate.unsqueeze(-1) * ve
+'''
+
+
 ROPE_QK_FUSED_TEMPLATE = '''"""
 Autoresearch CUDA kernel lab workspace.
 
@@ -708,6 +738,29 @@ def _attention_prelude_reference(
     return q, k, v
 
 
+def _value_embed_gate_inputs(torch: Any, case: CudaLabCase, device: Any) -> tuple[Any, ...]:
+    b, t, h, d = case.shape
+    aux = case.aux or {}
+    ve_gate_channels = int(aux.get("ve_gate_channels", 32))
+    dtype = _resolve_dtype(torch, case.dtype, device)
+    gate_input = torch.randn((b, t, ve_gate_channels), device=device, dtype=dtype)
+    v = torch.randn((b, t, h, d), device=device, dtype=dtype)
+    ve = torch.randn((b, t, h, d), device=device, dtype=dtype)
+    ve_gate_weight = torch.randn((ve_gate_channels, h), device=device, dtype=dtype)
+    return gate_input, v, ve, ve_gate_weight
+
+
+def _value_embed_gate_reference(
+    torch: Any,
+    gate_input: Any,
+    v: Any,
+    ve: Any,
+    ve_gate_weight: Any,
+) -> Any:
+    gate = 2 * torch.sigmoid(torch.matmul(gate_input, ve_gate_weight))
+    return v + gate.unsqueeze(-1) * ve
+
+
 def _rope_qk_fused_inputs(torch: Any, case: CudaLabCase, device: Any) -> tuple[Any, ...]:
     b, t, h, d = case.shape
     dtype = _resolve_dtype(torch, case.dtype, device)
@@ -864,6 +917,21 @@ CUDA_WORKSPACE_TARGET_SPECS: dict[str, CudaTargetSpec] = {
         ),
         make_inputs=_attention_prelude_inputs,
         reference=_attention_prelude_reference,
+    ),
+    "value_embed_gate": CudaTargetSpec(
+        target="value_embed_gate",
+        template=VALUE_EMBED_GATE_TEMPLATE,
+        tolerance=1e-5,
+        quick_cases=(
+            CudaLabCase(shape=(4, 256, 8, 128), dtype="float32", aux={"ve_gate_channels": 32}),
+            CudaLabCase(shape=(8, 128, 8, 128), dtype="float32", aux={"ve_gate_channels": 32}),
+        ),
+        full_cases=(
+            CudaLabCase(shape=(8, 256, 8, 128), dtype="float16", aux={"ve_gate_channels": 32}),
+            CudaLabCase(shape=(4, 512, 16, 128), dtype="float16", aux={"ve_gate_channels": 32}),
+        ),
+        make_inputs=_value_embed_gate_inputs,
+        reference=_value_embed_gate_reference,
     ),
     "rope_qk_fused": CudaTargetSpec(
         target="rope_qk_fused",
