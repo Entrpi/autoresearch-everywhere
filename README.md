@@ -204,9 +204,10 @@ For CUDA, the split is similar but the trace side is more automatable:
   - `norm` now ships with an optional Triton RMSNorm kernel
   - `logits_softcap` now ships with an optional Triton pointwise softcap kernel
   - `value_embed_gate` now ships with an optional Triton pointwise gate-application kernel
+  - `rope_qk_fused` now ships with an optional Triton row-wise RoPE + RMSNorm kernel
   - `data_movement` now ships with an optional Triton copy/reshape kernel
   - `matmul_epilogue` now ships with an optional Triton matmul+bias kernel
-  - the rest of the CUDA starter catalog, including `loss_prelude`, `attention_prelude`, `rope_qk_fused`, and `fused_mlp`, is still reference-first, so the CUDA substrate can grow incrementally instead of pretending every starter target is already Triton-native
+  - the rest of the CUDA starter catalog, including `loss_prelude`, `attention_prelude`, and `fused_mlp`, is still reference-first, so the CUDA substrate can grow incrementally instead of pretending every starter target is already Triton-native
 - `norm`, `logits_softcap`, `loss_prelude`, `matmul_epilogue`, `fused_mlp`, `attention_prelude`, `value_embed_gate`, `rope_qk_fused`, `launch_fusion`, and `data_movement` currently have direct CUDA trainer-side hooks, so they are the CUDA starter targets that can collect real `integration-ab` / `integration-suite` evidence today
 - on non-CUDA machines or machines without PyTorch/CUDA installed, those CUDA integration commands return structured `missing-runtime` results instead of pretending the target is promotable
 - the long-term goal is that CUDA trace review becomes automated-by-default, with GUI inspection as the escalation path rather than the first step
@@ -360,10 +361,10 @@ Current project snapshot from [CHANGELOG.md](CHANGELOG.md):
 
 | Metric | Value |
 | --- | --- |
-| Mean autonomy score | `3.31 / 6` |
-| Mean complexity | `7.19 / commit` |
-| Mean score per top-level bullet | `3.37 / 6` |
-| History covered | `67` commits across `12` subsystems |
+| Mean autonomy score | `3.30 / 6` |
+| Mean complexity | `7.13 / commit` |
+| Mean score per top-level bullet | `3.36 / 6` |
+| History covered | `69` commits across `12` subsystems |
 <!-- autonomy-golf-snapshot:end -->
 
 Refresh with:

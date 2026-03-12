@@ -29,7 +29,38 @@ On this hardware, the default canonical matched benchmark window for optimizatio
 
 ## Latest
 
-### New commit — lab: add Triton-backed CUDA value-embed gate workspace — score `3` — complexity `5`
+### New commit — lab: add Triton-backed CUDA rope/QK starter workspace — score `3` — complexity `5`
+
+**AI-identified within brief, human-shaped (3)**
+
+- Promote `rope_qk_fused` from a reference-first CUDA seam into a Triton-optional starter workspace.
+  - Meaning: `rope_qk_fused` no longer stops at the pure reference path. It now has a real optional Triton row-wise implementation for the fused RoPE + RMSNorm work, while keeping the existing trainer-side seam and fixed starter harness.
+  - Motivation: after `value_embed_gate`, the next best Triton candidate was another narrow attention-side seam that is still pointwise/reduction-shaped and already has a direct trainer hook, without overclaiming that the lab can optimize the full attention core yet.
+  - Purpose: keep extending Triton support incrementally with honest starter workspaces that match the real scope of what has been optimized so far.
+  - Extending `/Users/ent/Codex/autoresearch/autoresearch_cuda/lab_workspace.py` with an optional Triton row-wise RoPE + RMSNorm kernel and marking `rope_qk_fused` as `triton-optional`.
+  - Updating `/Users/ent/Codex/autoresearch/autoresearch_cuda/lab_trace.py`, `README.md`, and `docs/kernel-lab.md` so the CUDA starter catalog now reports `rope_qk_fused` as part of the Triton-backed slice.
+
+**Grounding**
+
+- Files:
+  - `CHANGELOG.md`
+  - `README.md`
+  - `docs/kernel-lab.md`
+  - `autoresearch_cuda/lab_trace.py`
+  - `autoresearch_cuda/lab_workspace.py`
+- Validation:
+  - `python3 -m py_compile autoresearch_cuda/lab_trace.py autoresearch_cuda/lab_workspace.py`
+  - `./.venv/bin/python kernel-lab.py --engine cuda init --target rope_qk_fused --workspace /tmp/cuda-triton-rope-qk-fused`
+  - `python3 -m py_compile /tmp/cuda-triton-rope-qk-fused/kernel.py`
+  - `./.venv/bin/python kernel-lab.py --engine cuda bench --workspace /tmp/cuda-triton-rope-qk-fused --quick`
+  - `./.venv/bin/python kernel-lab.py --engine cuda verify --workspace /tmp/cuda-triton-rope-qk-fused --quick`
+  - `python3 tools/changelog_scores.py --group-by entry --format csv --include-latest --verify`
+- Measurements:
+  - On this Apple machine, the new Triton-optional starter workspace still degrades cleanly to `missing-runtime` because PyTorch/CUDA are unavailable.
+
+## Committed History
+
+### March 12, 2026 — `6f93a5e` — lab: add Triton-backed CUDA value-embed gate workspace — score `3` — complexity `5`
 
 **AI-identified within brief, human-shaped (3)**
 
@@ -50,15 +81,13 @@ On this hardware, the default canonical matched benchmark window for optimizatio
   - `autoresearch_cuda/lab_workspace.py`
 - Validation:
   - `python3 -m py_compile autoresearch_cuda/lab_trace.py autoresearch_cuda/lab_workspace.py`
-  - `./.venv/bin/python kernel-lab.py --engine cuda init --target value_embed_gate --workspace /tmp/cuda-value-embed-gate`
-  - `python3 -m py_compile /tmp/cuda-value-embed-gate/kernel.py`
-  - `./.venv/bin/python kernel-lab.py --engine cuda bench --workspace /tmp/cuda-value-embed-gate --quick`
-  - `./.venv/bin/python kernel-lab.py --engine cuda verify --workspace /tmp/cuda-value-embed-gate --quick`
+  - `./.venv/bin/python kernel-lab.py --engine cuda init --target value_embed_gate --workspace /tmp/cuda-triton-value-embed-gate`
+  - `python3 -m py_compile /tmp/cuda-triton-value-embed-gate/kernel.py`
+  - `./.venv/bin/python kernel-lab.py --engine cuda bench --workspace /tmp/cuda-triton-value-embed-gate --quick`
+  - `./.venv/bin/python kernel-lab.py --engine cuda verify --workspace /tmp/cuda-triton-value-embed-gate --quick`
   - `python3 tools/changelog_scores.py --group-by entry --format csv --include-latest --verify`
 - Measurements:
   - On this Apple machine, the new Triton-optional starter workspace still degrades cleanly to `missing-runtime` because PyTorch/CUDA are unavailable.
-
-## Committed History
 
 ### March 12, 2026 — `801c84d` — lab: add CUDA value-embed gate trainer seam — score `3` — complexity `6`
 

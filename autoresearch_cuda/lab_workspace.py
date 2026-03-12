@@ -599,16 +599,87 @@ Autoresearch CUDA kernel lab workspace.
 Target: RoPE + Q/K RMSNorm
 Mutable file: yes
 
-Replace `kernel_fn` with a faster Triton/CUDA implementation once the reference
-path is working.
+This starter target ships with an optional Triton implementation for applying
+RoPE and row-wise RMSNorm, and falls back to the reference path when Triton or
+CUDA is unavailable.
 """
 
 from __future__ import annotations
 
 import torch
 
+try:
+    import triton
+    import triton.language as tl
+except Exception:  # pragma: no cover - workspace fallback path
+    triton = None
+    tl = None
+
 
 KERNEL_TARGET = "rope_qk_fused"
+WORKSPACE_IMPL = "triton-optional"
+
+if triton is not None:
+
+    @triton.jit
+    def _rope_rmsnorm_kernel(
+        x_ptr,
+        cos_ptr,
+        sin_ptr,
+        output_ptr,
+        stride_row,
+        half_dim,
+        seq_len,
+        n_head,
+        eps,
+        BLOCK_SIZE: tl.constexpr,
+    ):
+        row_idx = tl.program_id(axis=0)
+        offsets = tl.arange(0, BLOCK_SIZE)
+        mask = offsets < half_dim
+        seq_idx = (row_idx // n_head) % seq_len
+        x1 = tl.load(x_ptr + row_idx * stride_row + offsets, mask=mask, other=0.0).to(tl.float32)
+        x2 = tl.load(x_ptr + row_idx * stride_row + half_dim + offsets, mask=mask, other=0.0).to(tl.float32)
+        cos = tl.load(cos_ptr + seq_idx * half_dim + offsets, mask=mask, other=0.0).to(tl.float32)
+        sin = tl.load(sin_ptr + seq_idx * half_dim + offsets, mask=mask, other=0.0).to(tl.float32)
+        y1 = x1 * cos + x2 * sin
+        y2 = x1 * (-sin) + x2 * cos
+        mean_square = (tl.sum(y1 * y1, axis=0) + tl.sum(y2 * y2, axis=0)) / (2 * half_dim)
+        inv_rms = tl.rsqrt(mean_square + eps)
+        tl.store(output_ptr + row_idx * stride_row + offsets, y1 * inv_rms, mask=mask)
+        tl.store(output_ptr + row_idx * stride_row + half_dim + offsets, y2 * inv_rms, mask=mask)
+
+
+def _rope_rmsnorm_triton(
+    x: torch.Tensor,
+    cos: torch.Tensor,
+    sin: torch.Tensor,
+    eps: float = 1e-6,
+) -> torch.Tensor:
+    x_contig = x.contiguous()
+    rows = x_contig.numel() // x_contig.shape[-1]
+    dim = x_contig.shape[-1]
+    half_dim = dim // 2
+    x_2d = x_contig.view(rows, dim)
+    cos_2d = cos.contiguous().view(cos.shape[1], half_dim)
+    sin_2d = sin.contiguous().view(sin.shape[1], half_dim)
+    output = torch.empty_like(x_2d)
+    block_size = min(4096, triton.next_power_of_2(half_dim))
+    num_warps = 4 if block_size <= 1024 else 8
+    _rope_rmsnorm_kernel[(rows,)](
+        x_2d,
+        cos_2d,
+        sin_2d,
+        output,
+        x_2d.stride(0),
+        half_dim,
+        cos_2d.shape[0],
+        x_contig.shape[2],
+        eps,
+        BLOCK_SIZE=block_size,
+        num_warps=num_warps,
+    )
+    return output.view_as(x_contig)
 
 
 def _apply_rotary(x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor) -> torch.Tensor:
@@ -633,6 +704,16 @@ def kernel_fn(
     sin: torch.Tensor,
     eps: float = 1e-6,
 ) -> tuple[torch.Tensor, torch.Tensor]:
+    if (
+        triton is not None
+        and q.is_cuda
+        and k.is_cuda
+        and cos.is_cuda
+        and sin.is_cuda
+        and q.is_contiguous()
+        and k.is_contiguous()
+    ):
+        return _rope_rmsnorm_triton(q, cos, sin, eps=eps), _rope_rmsnorm_triton(k, cos, sin, eps=eps)
     q = _apply_rotary(q, cos, sin)
     k = _apply_rotary(k, cos, sin)
     return _rms_norm(q, eps=eps), _rms_norm(k, eps=eps)
@@ -1299,7 +1380,7 @@ def init_cuda_workspace(*, target: str, workspace: Path, profile_context: dict[s
             "metric": "throughput_gb_s",
             "workspace_impl": (
                 "triton-optional"
-                if target in {"launch_fusion", "norm", "logits_softcap", "value_embed_gate", "data_movement", "matmul_epilogue"}
+                if target in {"launch_fusion", "norm", "logits_softcap", "value_embed_gate", "rope_qk_fused", "data_movement", "matmul_epilogue"}
                 else "reference"
             ),
             "profile_context": profile_context or {},

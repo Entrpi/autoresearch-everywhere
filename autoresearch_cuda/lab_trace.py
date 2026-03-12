@@ -81,7 +81,7 @@ CUDA_TRACE_TARGETS: dict[str, LabTarget] = {
         description="RoPE application and Q/K normalization work between attention staging and the attention core",
         metric="time_share_pct",
         status="starter-ready",
-        notes="Starter-ready fixed workspace harness exists for fused RoPE + Q/K RMSNorm.",
+        notes="Starter-ready fixed workspace harness exists for fused RoPE + Q/K RMSNorm, with a first optional Triton row-wise implementation.",
     ),
     "norm": LabTarget(
         key="norm",
