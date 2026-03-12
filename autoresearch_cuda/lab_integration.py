@@ -12,7 +12,17 @@ LAB_INTEGRATION_WORKSPACE_ENV = "AUTORESEARCH_CUDA_LAB_INTEGRATION_WORKSPACE"
 LAB_INTEGRATION_TARGET_ENV = "AUTORESEARCH_CUDA_LAB_INTEGRATION_TARGET"
 
 
-SUPPORTED_INTEGRATION_TARGETS = frozenset({"attention_prelude", "fused_mlp", "loss_prelude", "matmul_epilogue", "norm"})
+SUPPORTED_INTEGRATION_TARGETS = frozenset(
+    {
+        "attention_prelude",
+        "data_movement",
+        "fused_mlp",
+        "launch_fusion",
+        "loss_prelude",
+        "matmul_epilogue",
+        "norm",
+    }
+)
 _NORM_WEIGHT_CACHE: dict[tuple[str, int | None, str, int], object] = {}
 
 
@@ -98,6 +108,10 @@ def maybe_call_integration_target(target: str, *args):
         x = args[0]
         eps = args[1] if len(args) > 1 else 1e-6
         return workspace.kernel_module.kernel_fn(x, _norm_weight_like(x), eps)
+    if target == "launch_fusion":
+        residual = args[0]
+        update = args[1]
+        return workspace.kernel_module.kernel_fn(residual, update)
     if target == "loss_prelude":
         logits = args[0]
         targets = args[1]
@@ -117,6 +131,9 @@ def maybe_call_integration_target(target: str, *args):
         if bias is None:
             bias = torch.zeros((weight.shape[-1],), device=x.device, dtype=x.dtype)
         return workspace.kernel_module.kernel_fn(x, weight, bias)
+    if target == "data_movement":
+        x = args[0]
+        return workspace.kernel_module.kernel_fn(x)
     if target == "attention_prelude":
         x = args[0]
         wq = args[1]

@@ -29,22 +29,18 @@ Autoresearch CUDA kernel lab workspace.
 Target: Launch fusion
 Mutable file: yes
 
-This starter target represents a launch-bound pointwise region. Replace
+This starter target represents a launch-bound residual-add region. Replace
 `kernel_fn` with a fused Triton/CUDA implementation once the reference path is
 working.
 """
 
 from __future__ import annotations
 
-import torch
-import torch.nn.functional as F
-
-
 KERNEL_TARGET = "launch_fusion"
 
 
-def kernel_fn(x: torch.Tensor, bias: torch.Tensor, residual: torch.Tensor) -> torch.Tensor:
-    return residual + F.silu(x + bias)
+def kernel_fn(residual: torch.Tensor, update: torch.Tensor) -> torch.Tensor:
+    return residual + update
 '''
 
 
@@ -114,7 +110,8 @@ Target: Data movement
 Mutable file: yes
 
 Replace `kernel_fn` with a faster Triton/CUDA implementation once the reference
-path is working.
+path is working. The starter target models the attention-output reshape from
+`[B, T, H, D]` to `[B, T, H*D]`.
 """
 
 from __future__ import annotations
@@ -126,7 +123,8 @@ KERNEL_TARGET = "data_movement"
 
 
 def kernel_fn(x: torch.Tensor) -> torch.Tensor:
-    return x.transpose(-1, -2).contiguous()
+    bsz, seqlen, _, _ = x.shape
+    return x.contiguous().view(bsz, seqlen, -1)
 '''
 
 
@@ -241,14 +239,13 @@ class CudaTargetSpec:
 def _launch_fusion_inputs(torch: Any, case: CudaLabCase, device: Any) -> tuple[Any, ...]:
     b, t, c = case.shape
     dtype = _resolve_dtype(torch, case.dtype, device)
-    x = torch.randn((b, t, c), device=device, dtype=dtype)
-    bias = torch.randn((1, 1, c), device=device, dtype=dtype)
     residual = torch.randn((b, t, c), device=device, dtype=dtype)
-    return x, bias, residual
+    update = torch.randn((b, t, c), device=device, dtype=dtype)
+    return residual, update
 
 
-def _launch_fusion_reference(torch: Any, x: Any, bias: Any, residual: Any) -> Any:
-    return residual + torch.nn.functional.silu(x + bias)
+def _launch_fusion_reference(torch: Any, residual: Any, update: Any) -> Any:
+    return residual + update
 
 
 def _norm_inputs(torch: Any, case: CudaLabCase, device: Any) -> tuple[Any, ...]:
@@ -290,14 +287,15 @@ def _loss_prelude_reference(
 
 
 def _data_movement_inputs(torch: Any, case: CudaLabCase, device: Any) -> tuple[Any, ...]:
-    b, t, c = case.shape
+    b, t, h, d = case.shape
     dtype = _resolve_dtype(torch, case.dtype, device)
-    x = torch.randn((b, t, c), device=device, dtype=dtype)
+    x = torch.randn((b, t, h, d), device=device, dtype=dtype)
     return (x,)
 
 
 def _data_movement_reference(torch: Any, x: Any) -> Any:
-    return x.transpose(-1, -2).contiguous()
+    bsz, seqlen, _, _ = x.shape
+    return x.contiguous().view(bsz, seqlen, -1)
 
 
 def _matmul_epilogue_inputs(torch: Any, case: CudaLabCase, device: Any) -> tuple[Any, ...]:
@@ -420,12 +418,12 @@ CUDA_WORKSPACE_TARGET_SPECS: dict[str, CudaTargetSpec] = {
         template=DATA_MOVEMENT_TEMPLATE,
         tolerance=1e-5,
         quick_cases=(
-            CudaLabCase(shape=(32, 128, 256), dtype="float32"),
-            CudaLabCase(shape=(16, 256, 512), dtype="float32"),
+            CudaLabCase(shape=(32, 128, 8, 64), dtype="float32"),
+            CudaLabCase(shape=(16, 256, 8, 128), dtype="float32"),
         ),
         full_cases=(
-            CudaLabCase(shape=(32, 256, 512), dtype="float16"),
-            CudaLabCase(shape=(16, 512, 1024), dtype="float16"),
+            CudaLabCase(shape=(32, 256, 8, 128), dtype="float16"),
+            CudaLabCase(shape=(16, 512, 16, 128), dtype="float16"),
         ),
         make_inputs=_data_movement_inputs,
         reference=_data_movement_reference,

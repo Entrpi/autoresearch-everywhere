@@ -146,7 +146,11 @@ class CausalSelfAttention(nn.Module):
         q, k = norm(q), norm(k)
 
         y = fa3.flash_attn_func(q, k, v, causal=True, window_size=window_size)
-        y = y.contiguous().view(B, T, -1)
+        overridden_y = maybe_call_integration_target("data_movement", y)
+        if overridden_y is not None:
+            y = overridden_y
+        else:
+            y = y.contiguous().view(B, T, -1)
         y = self.c_proj(y)
         return y
 
@@ -174,8 +178,12 @@ class Block(nn.Module):
         self.mlp = MLP(config)
 
     def forward(self, x, ve, cos_sin, window_size):
-        x = x + self.attn(norm(x), ve, cos_sin, window_size)
-        x = x + self.mlp(norm(x))
+        attn_update = self.attn(norm(x), ve, cos_sin, window_size)
+        overridden_attn = maybe_call_integration_target("launch_fusion", x, attn_update)
+        x = overridden_attn if overridden_attn is not None else x + attn_update
+        mlp_update = self.mlp(norm(x))
+        overridden_mlp = maybe_call_integration_target("launch_fusion", x, mlp_update)
+        x = overridden_mlp if overridden_mlp is not None else x + mlp_update
         return x
 
 

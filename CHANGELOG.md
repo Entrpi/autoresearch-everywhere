@@ -29,7 +29,56 @@ On this hardware, the default canonical matched benchmark window for optimizatio
 
 ## Latest
 
-### New commit — lab: add broader CUDA block-path trainer hooks — score `3` — complexity `8`
+### New commit — lab: add residual-add and reshape CUDA trainer hooks — score `3` — complexity `8`
+
+**AI-identified within brief, human-shaped (3)**
+
+- Broadened the direct CUDA trainer-hook layer again by wiring the remaining practical generic workspace families into real trainer seams: residual-add launch fusion and the attention-output reshape path.
+  - Meaning: the CUDA lab can now exercise two more repeated trainer-real paths without inventing fake integration stories:
+    - residual-add launch fusion via `launch_fusion`
+    - attention-output flattening via `data_movement`
+    That pushes the direct CUDA integration set past only norms, loss-side prep, epilogues, and block-local compute into the small repeated glue seams that often show up as launch-bound or reshape-heavy work in traces.
+  - Motivation: after `fused_mlp` and `attention_prelude`, the two remaining generic starter families still did not map onto honest trainer seams. The right next step was to retune those families around real residual-add and reshape boundaries instead of leaving them as synthetic-only workspaces.
+  - Purpose: widen the CUDA direct-hook set with the last practical narrow seams before the next stage shifts from adding hooks toward stronger integration evidence and eventual CUDA workspace promotion.
+  - Retuned `launch_fusion` in `/Users/ent/Codex/autoresearch/autoresearch_cuda/lab_workspace.py` so it models residual-add fusion, and retuned `data_movement` so it models the real attention-output reshape from `[B, T, H, D]` to `[B, T, H*D]`.
+  - Extended `/Users/ent/Codex/autoresearch/autoresearch_cuda/lab_integration.py` so `launch_fusion` and `data_movement` both run through the shared environment-driven workspace injection path.
+  - Wired `/Users/ent/Codex/autoresearch/autoresearch_cuda/train.py` so block residual adds can call a `launch_fusion` workspace implementation and the attention output reshape can call a `data_movement` workspace implementation before the existing projection path.
+  - Updated the public CUDA lab story so all current starter-ready CUDA targets now have direct trainer-side hooks.
+  - Kept the path narrow and honest: non-CUDA machines still return structured `missing-runtime` integration results instead of pretending the new seams were validated here.
+
+**Grounding**
+
+- Files:
+  - `CHANGELOG.md`
+  - `README.md`
+  - `docs/kernel-lab.md`
+  - `program.md`
+  - `autoresearch_cuda/lab_integration.py`
+  - `autoresearch_cuda/lab_workspace.py`
+  - `autoresearch_cuda/train.py`
+- Validation:
+  - `python3 -m py_compile autoresearch_cuda/lab_workspace.py autoresearch_cuda/lab_integration.py autoresearch_cuda/train.py`
+  - `./.venv/bin/python kernel-lab.py --engine cuda init --target launch_fusion --workspace /tmp/cuda-launch-fusion-integration-workspace`
+  - `./.venv/bin/python kernel-lab.py --engine cuda integration-ab --workspace /tmp/cuda-launch-fusion-integration-workspace --preset upstream --time-budget 2 --repeats 2 --benchmark-skip-eval --no-checkpoint`
+  - `./.venv/bin/python kernel-lab.py --engine cuda init --target data_movement --workspace /tmp/cuda-data-movement-integration-workspace`
+  - `./.venv/bin/python kernel-lab.py --engine cuda integration-suite --workspace /tmp/cuda-data-movement-integration-workspace --preset upstream --time-budget 2 --repeats 2 --benchmark-skip-eval --no-checkpoint`
+  - `./.venv/bin/python kernel-lab.py --engine cuda bench --workspace /tmp/cuda-data-movement-integration-workspace --quick`
+  - `python3 tools/changelog_scores.py --group-by entry --format csv --include-latest --verify`
+- Measurements:
+  - On this machine `torch` is not installed, so the new `launch_fusion` and `data_movement` integration commands degrade cleanly to `missing-runtime` instead of failing as opaque import errors.
+  - The direct CUDA trainer-hook set is now:
+    - `launch_fusion`
+    - `norm`
+    - `loss_prelude`
+    - `data_movement`
+    - `matmul_epilogue`
+    - `fused_mlp`
+    - `attention_prelude`
+  - That means every current starter-ready CUDA target now has a direct trainer-side seam, even though real trainer-side validation still requires a CUDA-capable machine.
+
+## Committed History
+
+### March 12, 2026 — `7d8699c` — lab: add broader CUDA block-path trainer hooks — score `3` — complexity `8`
 
 **AI-identified within brief, human-shaped (3)**
 
@@ -76,8 +125,6 @@ On this hardware, the default canonical matched benchmark window for optimizatio
     - `fused_mlp`
     - `attention_prelude`
   - Other CUDA starter targets still stop at workspace-local evidence until more trainer seams are wired.
-
-## Committed History
 
 ### March 12, 2026 — `2c7d33f` — lab: add broader CUDA starter workspaces — score `3` — complexity `6`
 
