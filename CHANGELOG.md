@@ -29,7 +29,34 @@ On this hardware, the default canonical matched benchmark window for optimizatio
 
 ## Latest
 
-### New commit — lab: extend Triton-backed CUDA starter workspaces — score `3` — complexity `5`
+### New commit — lab: mark Triton-backed CUDA starter metadata consistently — score `2`
+
+**AI-identified within brief, human-approved (2)**
+
+- Tighten the follow-up metadata and changelog grounding after the broader Triton starter-family expansion landed.
+  - Meaning: generated CUDA starter workspaces now report the same Triton-backed implementation status in `metadata.json` that the templates and docs already claimed, so the starter catalog is internally consistent again.
+  - Motivation: after the broader Triton-backed slice landed, `data_movement` and `matmul_epilogue` still emitted `workspace_impl=reference` in generated metadata even though the workspace templates had already been upgraded to optional Triton paths.
+  - Purpose: keep the CUDA starter-catalog state machine honest before building more trainer-side CUDA lab depth on top of it.
+  - Updating `/Users/ent/Codex/autoresearch/autoresearch_cuda/lab_workspace.py` so generated `data_movement` and `matmul_epilogue` workspaces are marked `triton-optional` just like the underlying templates.
+  - Moving the already-landed broader Triton starter-family change into committed history and recording the actual validation that was run for it.
+
+**Grounding**
+
+- Files:
+  - `CHANGELOG.md`
+  - `autoresearch_cuda/lab_workspace.py`
+- Validation:
+  - `python3 -m py_compile autoresearch_cuda/lab_workspace.py`
+  - `./.venv/bin/python kernel-lab.py --engine cuda init --target data_movement --workspace /tmp/cuda-triton-data-movement`
+  - `./.venv/bin/python kernel-lab.py --engine cuda bench --workspace /tmp/cuda-triton-data-movement --quick`
+  - `./.venv/bin/python kernel-lab.py --engine cuda verify --workspace /tmp/cuda-triton-matmul-epilogue --quick`
+  - `python3 tools/changelog_scores.py --group-by entry --format csv --include-latest --verify`
+- Measurements:
+  - On this Apple machine, the starter workspaces still degrade cleanly to `missing-runtime` because PyTorch/CUDA are unavailable.
+
+## Committed History
+
+### March 12, 2026 — `c8f74d3` — lab: extend Triton-backed CUDA starter workspaces — score `3` — complexity `5`
 
 **AI-identified within brief, human-shaped (3)**
 
@@ -42,10 +69,28 @@ On this hardware, the default canonical matched benchmark window for optimizatio
 
 **Grounding**
 
+- Files:
+  - `CHANGELOG.md`
+  - `README.md`
+  - `docs/kernel-lab.md`
+  - `autoresearch_cuda/lab_trace.py`
+  - `autoresearch_cuda/lab_workspace.py`
+- Validation:
+  - `python3 -m py_compile autoresearch_cuda/lab_workspace.py autoresearch_cuda/lab_trace.py`
+  - `./.venv/bin/python kernel-lab.py --engine cuda init --target data_movement --workspace /tmp/cuda-triton-data-movement`
+  - `./.venv/bin/python kernel-lab.py --engine cuda init --target matmul_epilogue --workspace /tmp/cuda-triton-matmul-epilogue`
+  - `python3 -m py_compile /tmp/cuda-triton-data-movement/kernel.py /tmp/cuda-triton-matmul-epilogue/kernel.py`
+  - `./.venv/bin/python kernel-lab.py --engine cuda bench --workspace /tmp/cuda-triton-data-movement --quick`
+  - `./.venv/bin/python kernel-lab.py --engine cuda verify --workspace /tmp/cuda-triton-matmul-epilogue --quick`
+  - `python3 tools/changelog_scores.py --group-by entry --format csv --include-latest --verify`
 - Measurements:
-  - Not measured yet.
-
-## Committed History
+  - On this Apple machine, the new Triton-backed starter workspaces still degrade cleanly to `missing-runtime` because PyTorch/CUDA are unavailable.
+  - The Triton-backed CUDA starter set is now:
+    - `launch_fusion`
+    - `norm`
+    - `data_movement`
+    - `matmul_epilogue`
+  - The rest of the CUDA starter catalog remains reference-first for now.
 
 ### March 12, 2026 — `2ea3d54` — lab: add first Triton-backed CUDA starter workspaces — score `3` — complexity `5`
 

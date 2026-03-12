@@ -1063,7 +1063,11 @@ def init_cuda_workspace(*, target: str, workspace: Path, profile_context: dict[s
             "target": target,
             "status": "starter-ready",
             "metric": "throughput_gb_s",
-            "workspace_impl": "triton-optional" if target in {"launch_fusion", "norm"} else "reference",
+            "workspace_impl": (
+                "triton-optional"
+                if target in {"launch_fusion", "norm", "data_movement", "matmul_epilogue"}
+                else "reference"
+            ),
             "profile_context": profile_context or {},
         },
     )
