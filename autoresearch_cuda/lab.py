@@ -7,7 +7,12 @@ from dataclasses import asdict
 from pathlib import Path
 
 from autoresearch_cuda.config import CUDA_PRESETS
-from autoresearch_cuda.lab_trace import CudaKernelLab, auto_review_cuda_trace, capture_cuda_trace
+from autoresearch_cuda.lab_trace import (
+    CudaKernelLab,
+    auto_review_cuda_trace,
+    capture_cuda_trace,
+    deep_profile_cuda_trace,
+)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -55,6 +60,15 @@ def build_parser() -> argparse.ArgumentParser:
     )
     trace_profile_parser.add_argument("--metadata", required=True, help="Trace metadata sidecar emitted by `capture`")
     trace_profile_parser.add_argument("--output", help="Optional JSON output path for the summarized trace profile")
+
+    deep_profile_parser = subparsers.add_parser(
+        "deep-profile",
+        help="Run Nsight Compute on the top trace-ranked CUDA family and classify it more deeply",
+    )
+    deep_profile_parser.add_argument("--trace-profile", required=True)
+    deep_profile_parser.add_argument("--rank", type=int, default=1)
+    deep_profile_parser.add_argument("--time-budget", type=float, default=5.0)
+    deep_profile_parser.add_argument("--output", help="Optional JSON output path for the deeper diagnosis")
 
     orchestrate_parser = subparsers.add_parser(
         "orchestrate",
@@ -166,6 +180,21 @@ def main(argv: list[str] | None = None) -> None:
 
     if args.command == "trace-profile":
         result = lab.trace_profile(metadata_path=Path(args.metadata).expanduser())
+        if args.output:
+            output = Path(args.output).expanduser()
+            output.parent.mkdir(parents=True, exist_ok=True)
+            output.write_text(json.dumps(asdict(result), indent=2, sort_keys=True) + "\n", encoding="utf-8")
+            print(output)
+            return
+        print(json.dumps(asdict(result), indent=2, sort_keys=True))
+        return
+
+    if args.command == "deep-profile":
+        result = deep_profile_cuda_trace(
+            Path(args.trace_profile).expanduser(),
+            rank=args.rank,
+            time_budget=args.time_budget,
+        )
         if args.output:
             output = Path(args.output).expanduser()
             output.parent.mkdir(parents=True, exist_ok=True)

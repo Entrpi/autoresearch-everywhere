@@ -157,6 +157,7 @@ CUDA now has the first trace-first automation path too, and a small first starte
 - `uv run kernel-lab.py --engine cuda capture --preset upstream --time-budget 20 --output /tmp/cuda-upstream-trace`
 - `uv run kernel-lab.py --engine cuda trace-profile --metadata /tmp/cuda-upstream-trace.metadata.json --output /tmp/cuda-upstream-trace.profile.json`
 - `uv run kernel-lab.py --engine cuda auto-review --trace-profile /tmp/cuda-upstream-trace.profile.json`
+- `uv run kernel-lab.py --engine cuda deep-profile --trace-profile /tmp/cuda-upstream-trace.profile.json --rank 1`
 - `uv run kernel-lab.py --engine cuda evidence --target launch_fusion --preset upstream`
 - `uv run kernel-lab.py --engine cuda orchestrate --trace-profile /tmp/cuda-upstream-trace.profile.json --workspace-root /tmp/cuda-lab`
 - `uv run kernel-lab.py --engine cuda promotion-check --target launch_fusion --preset upstream`
@@ -183,6 +184,7 @@ For CUDA, the split is similar but the trace side is more automatable:
 - `capture` wraps the real trainer under Nsight Systems and writes a `.nsys-rep` plus a metadata sidecar
 - `trace-profile` turns the exported Nsight reports into ranked kernel target families
 - `auto-review` classifies the run as launch-bound, sync-bound, copy-bound, kernel-dominated, or mixed
+- `deep-profile` optionally reruns the top trace-ranked family under Nsight Compute so the lab can record a more specific diagnosis such as compute-bound, bandwidth-bound, or under-occupied
 - `evidence` and `promotion-check` expose whether a target is still just trace-ranked, already trace-backed, ready for a starter workspace, or deprioritized by the automated review
 - `orchestrate` now consumes the trace profile plus accumulated evidence to pick the next CUDA target family to pursue, and for starter-ready families it emits real `extract` / `bench` / `verify` commands instead of just placeholder notes
 - starter CUDA workspaces currently exist for:
@@ -348,9 +350,9 @@ Current project snapshot from [CHANGELOG.md](CHANGELOG.md):
 | Metric | Value |
 | --- | --- |
 | Mean autonomy score | `3.36 / 6` |
-| Mean complexity | `7.40 / commit` |
-| Mean score per top-level bullet | `3.42 / 6` |
-| History covered | `60` commits across `12` subsystems |
+| Mean complexity | `7.41 / commit` |
+| Mean score per top-level bullet | `3.41 / 6` |
+| History covered | `61` commits across `12` subsystems |
 <!-- autonomy-golf-snapshot:end -->
 
 Refresh with:

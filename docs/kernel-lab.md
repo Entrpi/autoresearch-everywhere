@@ -213,6 +213,10 @@ That flow currently does seven things:
 - `auto-review`
   - classifies the run as `launch-bound`, `sync-bound`, `copy-bound`, `kernel-dominated`, or `mixed`
   - records that judgment into the shared ledger as machine-generated evidence
+- `deep-profile`
+  - optionally reruns the top trace-ranked family under Nsight Compute
+  - records a deeper diagnosis such as `compute-bound`, `bandwidth-bound`, or `under-occupied`
+  - is the next step when a starter-ready family looks important enough that Nsight Systems timing alone is no longer enough
 - `evidence`
   - summarizes what the ledger currently knows about one CUDA target on one preset
   - exposes whether trace review is still thin, already trace-backed, ready for a starter workspace, or currently deprioritized

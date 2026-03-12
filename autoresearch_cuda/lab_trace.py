@@ -33,6 +33,7 @@ from autoresearch_lab.labs import (
     LabEvidenceResult,
     LabAutoTraceReviewResult,
     LabCapabilities,
+    LabDeepProfileResult,
     LabIntegrationABResult,
     LabIntegrationSuiteResult,
     LabOrchestrationPlan,
@@ -47,6 +48,11 @@ from tools.calibrate_eval_policy import parse_summary
 
 
 TRACE_SCHEMA_VERSION = 1
+CUDA_NCU_METRICS = (
+    "sm__throughput.avg.pct_of_peak_sustained_elapsed",
+    "dram__throughput.avg.pct_of_peak_sustained_elapsed",
+    "smsp__warps_active.avg.pct_of_peak_sustained_active",
+)
 REPO_ROOT = Path(__file__).resolve().parents[1]
 CUDA_TRACE_TARGETS: dict[str, LabTarget] = {
     "flash_attention": LabTarget(
@@ -343,6 +349,17 @@ def _safe_run(command: list[str]) -> subprocess.CompletedProcess[str]:
     return subprocess.run(command, capture_output=True, text=True, check=False)
 
 
+def _override_or_append_flag(command: list[str], flag: str, value: str) -> list[str]:
+    updated = list(command)
+    if flag in updated:
+        idx = updated.index(flag)
+        if idx + 1 < len(updated):
+            updated[idx + 1] = value
+            return updated
+    updated.extend([flag, value])
+    return updated
+
+
 def _tool_version(tool: str) -> str | None:
     path = shutil.which(tool)
     if not path:
@@ -377,6 +394,27 @@ def _load_csv_rows(path: Path) -> list[dict[str, str]]:
     return rows
 
 
+def _load_ncu_metric_rows(path: Path) -> list[dict[str, str]]:
+    if not path.exists():
+        return []
+    lines = [line for line in path.read_text(encoding="utf-8", errors="replace").splitlines() if line.strip()]
+    header_index = None
+    for idx, line in enumerate(lines):
+        lowered = line.lower()
+        if "," in line and ("metric name" in lowered or "metric value" in lowered):
+            header_index = idx
+            break
+    if header_index is None:
+        return []
+    reader = csv.DictReader(lines[header_index:])
+    rows: list[dict[str, str]] = []
+    for row in reader:
+        normalized = {str(key).strip(): (value.strip() if isinstance(value, str) else "") for key, value in row.items()}
+        if any(value for value in normalized.values()):
+            rows.append(normalized)
+    return rows
+
+
 def _coerce_float(row: dict[str, str], *candidate_keys: str) -> float | None:
     lowered = {key.lower(): value for key, value in row.items()}
     for candidate in candidate_keys:
@@ -398,6 +436,38 @@ def _coerce_int(row: dict[str, str], *candidate_keys: str) -> int | None:
     if value is None:
         return None
     return int(value)
+
+
+def _summarize_ncu_metrics(rows: list[dict[str, str]]) -> dict[str, float]:
+    values_by_metric: dict[str, list[float]] = {}
+    for row in rows:
+        metric_name = row.get("Metric Name") or row.get("Metric") or row.get("Name")
+        if not metric_name:
+            continue
+        metric_value = _coerce_float(row, "Metric Value", "Value", "Avg")
+        if metric_value is None:
+            continue
+        values_by_metric.setdefault(metric_name, []).append(metric_value)
+    return {
+        metric: float(statistics.median(values))
+        for metric, values in values_by_metric.items()
+        if values
+    }
+
+
+def _classify_ncu_metrics(metrics: dict[str, float]) -> tuple[str | None, float | None]:
+    sm_pct = metrics.get("sm__throughput.avg.pct_of_peak_sustained_elapsed")
+    dram_pct = metrics.get("dram__throughput.avg.pct_of_peak_sustained_elapsed")
+    occ_pct = metrics.get("smsp__warps_active.avg.pct_of_peak_sustained_active")
+    if occ_pct is not None and occ_pct < 35.0:
+        return "under-occupied", 0.7
+    if dram_pct is not None and dram_pct >= 70.0 and (sm_pct is None or dram_pct - sm_pct >= 10.0):
+        return "bandwidth-bound", 0.8
+    if sm_pct is not None and sm_pct >= 70.0 and (dram_pct is None or sm_pct - dram_pct >= 10.0):
+        return "compute-bound", 0.8
+    if sm_pct is not None or dram_pct is not None or occ_pct is not None:
+        return "mixed", 0.45
+    return None, None
 
 
 def _match_target_family(name: str) -> str:
@@ -711,6 +781,173 @@ def trace_profile_cuda(metadata_path: Path) -> LabTraceProfileResult:
     return profile
 
 
+def deep_profile_cuda_trace(
+    trace_profile_path: Path,
+    *,
+    rank: int = 1,
+    time_budget: float = 5.0,
+) -> LabDeepProfileResult:
+    start = time.perf_counter()
+    payload = json.loads(trace_profile_path.expanduser().read_text(encoding="utf-8"))
+    preset = str(payload.get("preset") or "upstream")
+    candidates = payload.get("candidates", [])
+    if not candidates:
+        return LabDeepProfileResult(
+            engine="cuda",
+            backend_family="cuda",
+            preset=preset,
+            target="unknown",
+            status="insufficient-trace-data",
+            wall_seconds=time.perf_counter() - start,
+            diagnosis=None,
+            confidence=None,
+            details={
+                "failure_reason": "Trace profile has no candidates.",
+                "trace_profile_path": str(trace_profile_path.expanduser()),
+            },
+        )
+    if rank <= 0 or rank > len(candidates):
+        raise ValueError(f"rank must be between 1 and {len(candidates)}")
+    candidate = candidates[rank - 1]
+    target = str(candidate.get("target") or "unknown")
+    trace_metadata_path = payload.get("details", {}).get("trace_metadata_path")
+    if not trace_metadata_path:
+        return LabDeepProfileResult(
+            engine="cuda",
+            backend_family="cuda",
+            preset=preset,
+            target=target,
+            status="insufficient-trace-data",
+            wall_seconds=time.perf_counter() - start,
+            diagnosis=None,
+            confidence=None,
+            details={
+                "failure_reason": "Trace profile did not record a trace metadata path.",
+                "trace_profile_path": str(trace_profile_path.expanduser()),
+            },
+        )
+    metadata = load_trace_metadata(Path(trace_metadata_path))
+    details = metadata.get("details", {})
+    train_command = list(details.get("train_command") or [])
+    if not train_command:
+        return LabDeepProfileResult(
+            engine="cuda",
+            backend_family="cuda",
+            preset=preset,
+            target=target,
+            status="insufficient-trace-data",
+            wall_seconds=time.perf_counter() - start,
+            diagnosis=None,
+            confidence=None,
+            details={
+                "failure_reason": "Trace metadata did not record the original train command.",
+                "trace_profile_path": str(trace_profile_path.expanduser()),
+                "trace_metadata_path": trace_metadata_path,
+            },
+        )
+    train_command = _override_or_append_flag(train_command, "--time-budget", str(time_budget))
+    ncu_path = shutil.which("ncu") or shutil.which("nv-nsight-cu-cli")
+    sample_kernel_names = tuple(candidate.get("details", {}).get("sample_kernel_names") or ())
+    kernel_selector = None
+    if sample_kernel_names:
+        kernel_selector = f"regex:.*{re.escape(str(sample_kernel_names[0]))}.*"
+    elif target:
+        kernel_selector = f"regex:.*{re.escape(target)}.*"
+    if ncu_path is None:
+        return LabDeepProfileResult(
+            engine="cuda",
+            backend_family="cuda",
+            preset=preset,
+            target=target,
+            status="missing-tool",
+            wall_seconds=time.perf_counter() - start,
+            diagnosis=None,
+            confidence=None,
+            details={
+                "failure_reason": "Nsight Compute CLI (`ncu` or `nv-nsight-cu-cli`) is not installed or not on PATH.",
+                "trace_profile_path": str(trace_profile_path.expanduser()),
+                "trace_metadata_path": trace_metadata_path,
+                "kernel_selector": kernel_selector,
+            },
+        )
+    output_prefix = trace_profile_path.expanduser().with_suffix("")
+    csv_path = output_prefix.parent / f"{output_prefix.name}.rank{rank}.ncu.csv"
+    stderr_path = output_prefix.parent / f"{output_prefix.name}.rank{rank}.ncu.stderr.log"
+    ncu_command = [
+        ncu_path,
+        "--csv",
+        "--page",
+        "raw",
+        "--target-processes",
+        "all",
+        "--kernel-name-base",
+        "demangled",
+        "--metrics",
+        ",".join(CUDA_NCU_METRICS),
+        "--log-file",
+        str(csv_path),
+    ]
+    if kernel_selector:
+        ncu_command.extend(["--kernel-name", kernel_selector])
+    ncu_command.extend(train_command)
+    proc = _safe_run(ncu_command)
+    _write_text(stderr_path, proc.stderr)
+    rows = _load_ncu_metric_rows(csv_path)
+    metrics = _summarize_ncu_metrics(rows)
+    diagnosis, confidence = _classify_ncu_metrics(metrics)
+    status = "ok" if proc.returncode == 0 and metrics else "insufficient-metrics"
+    if proc.returncode != 0:
+        status = "profile-failed"
+    if status == "ok":
+        append_lab_event(
+            engine="cuda",
+            backend_family="cuda",
+            target=target,
+            workspace=trace_profile_path.expanduser().parent,
+            event_type="deep-profile",
+            status=status,
+            metric_name="diagnosis_confidence",
+            metric_value=confidence,
+            preset=preset,
+            details={
+                "trace_profile_path": str(trace_profile_path.expanduser()),
+                "trace_metadata_path": trace_metadata_path,
+                "diagnosis": diagnosis,
+                "confidence": confidence,
+                "kernel_selector": kernel_selector,
+                "sample_kernel_names": sample_kernel_names,
+                "metrics": metrics,
+                "ncu_csv_path": str(csv_path),
+                "ncu_stderr_path": str(stderr_path),
+            },
+        )
+    return LabDeepProfileResult(
+        engine="cuda",
+        backend_family="cuda",
+        preset=preset,
+        target=target,
+        status=status,
+        wall_seconds=time.perf_counter() - start,
+        diagnosis=diagnosis,
+        confidence=confidence,
+        details={
+            "trace_profile_path": str(trace_profile_path.expanduser()),
+            "trace_metadata_path": trace_metadata_path,
+            "kernel_selector": kernel_selector,
+            "sample_kernel_names": sample_kernel_names,
+            "train_command": train_command,
+            "ncu_command": ncu_command,
+            "ncu_returncode": proc.returncode,
+            "ncu_csv_path": str(csv_path),
+            "ncu_stderr_path": str(stderr_path),
+            "metrics": metrics,
+            "review_notes": (
+                "Deep CUDA diagnosis uses Nsight Compute to classify the top trace-ranked family as compute-bound, bandwidth-bound, under-occupied, or mixed."
+            ),
+        },
+    )
+
+
 def auto_review_cuda_trace(trace_profile_path: Path) -> LabAutoTraceReviewResult:
     start = time.perf_counter()
     payload = json.loads(trace_profile_path.expanduser().read_text(encoding="utf-8"))
@@ -809,6 +1046,7 @@ class CudaKernelLab:
         supports_capture=True,
         supports_trace_profile=True,
         supports_auto_trace_review=True,
+        supports_deep_trace_profile=True,
     )
 
     def target_catalog(self) -> dict[str, LabTarget]:
@@ -882,6 +1120,10 @@ class CudaKernelLab:
             commands.append("# this target currently looks low-value; prioritize a different CUDA target first")
         else:
             if target in CUDA_STARTER_TARGET_KEYS:
+                if summary.deep_profile_ok_count == 0 and target in {"norm", "fused_mlp", "matmul_epilogue", "rope_qk_fused", "flash_attention"}:
+                    commands.append(
+                        f"uv run kernel-lab.py --engine cuda deep-profile --trace-profile {profile_path.expanduser()} --rank {rank}"
+                    )
                 commands.extend(
                     [
                         f"uv run kernel-lab.py --engine cuda extract --profile {profile_path.expanduser()} --workspace {(workspace_root.expanduser() / target)} --rank {rank}",
@@ -960,6 +1202,12 @@ class CudaKernelLab:
                 "# this starter workspace has both trace-backed relevance and a passing fixed-harness verify run",
                 "# the next step is a real CUDA trainer integration path for this target family",
                 f"uv run kernel-lab.py --engine cuda integration-suite --workspace <workspace> --preset {preset or 'upstream'} --time-budget 20 --repeats 2 --benchmark-skip-eval --no-checkpoint",
+            )
+        elif target in CUDA_STARTER_TARGET_KEYS and summary.deep_profile_ok_count == 0 and summary.auto_review_ok_count > 0:
+            status = "needs-deep-profile"
+            commands = (
+                "# this target is trace-backed, but deeper kernel diagnosis has not been recorded yet",
+                "# run `uv run kernel-lab.py --engine cuda deep-profile --trace-profile <profile.json> --rank <n>` before promoting it further",
             )
         elif summary.auto_review_ok_count > 0 or summary.trace_profile_ok_count > 0:
             if target in CUDA_STARTER_TARGET_KEYS:

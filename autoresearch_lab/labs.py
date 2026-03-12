@@ -16,6 +16,7 @@ class LabCapabilities:
     supports_capture: bool
     supports_trace_profile: bool
     supports_auto_trace_review: bool
+    supports_deep_trace_profile: bool = False
 
 
 @dataclass(frozen=True)
@@ -146,6 +147,19 @@ class LabAutoTraceReviewResult:
     preset: str
     status: str
     dominant_issue: str | None
+    confidence: float | None
+    details: dict[str, Any]
+
+
+@dataclass(frozen=True)
+class LabDeepProfileResult:
+    engine: str
+    backend_family: str
+    preset: str
+    target: str
+    status: str
+    wall_seconds: float
+    diagnosis: str | None
     confidence: float | None
     details: dict[str, Any]
 

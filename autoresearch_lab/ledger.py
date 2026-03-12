@@ -25,6 +25,7 @@ class LabEvidenceSummary:
     capture_ok_count: int
     trace_profile_ok_count: int
     auto_review_ok_count: int
+    deep_profile_ok_count: int
     trace_review_ok_count: int
     integration_ab_ok_count: int
     last_event_at: str | None
@@ -32,6 +33,7 @@ class LabEvidenceSummary:
     last_capture_at: str | None
     last_trace_profile_at: str | None
     last_auto_review_at: str | None
+    last_deep_profile_at: str | None
     last_trace_review_at: str | None
     last_integration_ab_at: str | None
     last_workspace: str | None
@@ -169,6 +171,9 @@ def summarize_lab_evidence(
     auto_review_ok = [
         event for event in events if event.get("event_type") == "auto-review" and event.get("status") == "ok"
     ]
+    deep_profile_ok = [
+        event for event in events if event.get("event_type") == "deep-profile" and event.get("status") == "ok"
+    ]
     trace_review_ok = [
         event for event in events if event.get("event_type") == "trace-review" and event.get("status") == "ok"
     ]
@@ -185,6 +190,7 @@ def summarize_lab_evidence(
     integration_ab_preset_count = len(integration_ab_presets)
     last_trace_profile = trace_profile_ok[-1] if trace_profile_ok else None
     last_auto_review = auto_review_ok[-1] if auto_review_ok else None
+    last_deep_profile = deep_profile_ok[-1] if deep_profile_ok else None
     last_trace_review = trace_review_ok[-1] if trace_review_ok else None
     trace_relevance = (
         last_trace_review.get("details", {}).get("relevance")
@@ -257,6 +263,9 @@ def summarize_lab_evidence(
     elif verify_ok and capture_ok:
         promotion_status = "ready-for-integration-test"
         evidence_bonus = 1.2 if trace_relevance == "high" else 1.0
+    elif deep_profile_ok:
+        promotion_status = "trace-backed"
+        evidence_bonus = 0.95 if trace_relevance == "high" else 0.8 if trace_relevance == "medium" else 0.65
     elif auto_review_ok or trace_profile_ok:
         promotion_status = "trace-backed"
         evidence_bonus = 0.8 if trace_relevance == "high" else 0.6 if trace_relevance == "medium" else 0.45
@@ -281,6 +290,7 @@ def summarize_lab_evidence(
         capture_ok_count=len(capture_ok),
         trace_profile_ok_count=len(trace_profile_ok),
         auto_review_ok_count=len(auto_review_ok),
+        deep_profile_ok_count=len(deep_profile_ok),
         trace_review_ok_count=len(trace_review_ok),
         integration_ab_ok_count=len(integration_ab_ok),
         last_event_at=events[-1]["created_at"] if events else None,
@@ -288,6 +298,7 @@ def summarize_lab_evidence(
         last_capture_at=last_capture["created_at"] if last_capture else None,
         last_trace_profile_at=last_trace_profile["created_at"] if last_trace_profile else None,
         last_auto_review_at=last_auto_review["created_at"] if last_auto_review else None,
+        last_deep_profile_at=last_deep_profile["created_at"] if last_deep_profile else None,
         last_trace_review_at=last_trace_review["created_at"] if last_trace_review else None,
         last_integration_ab_at=last_integration_ab["created_at"] if last_integration_ab else None,
         last_workspace=events[-1]["workspace"] if events else None,
@@ -306,6 +317,12 @@ def summarize_lab_evidence(
             ),
             "last_auto_review_confidence": (
                 last_auto_review.get("details", {}).get("confidence") if last_auto_review else None
+            ),
+            "last_deep_profile_diagnosis": (
+                last_deep_profile.get("details", {}).get("diagnosis") if last_deep_profile else None
+            ),
+            "last_deep_profile_confidence": (
+                last_deep_profile.get("details", {}).get("confidence") if last_deep_profile else None
             ),
             "last_integration_delta_steady_state_tok_per_sec": integration_delta,
             "last_integration_delta_relative_pct_steady_state_tok_per_sec": integration_relative_delta,

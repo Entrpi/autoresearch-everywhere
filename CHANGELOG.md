@@ -29,7 +29,49 @@ On this hardware, the default canonical matched benchmark window for optimizatio
 
 ## Latest
 
-### New commit — lab: add CUDA RoPE and Q/K-normalization trainer hook — score `3` — complexity `8`
+### New commit — lab: add CUDA deeper kernel diagnosis — score `3` — complexity `8`
+
+**AI-identified within brief, human-shaped (3)**
+
+- Extended the CUDA trace-first lab with an optional deeper diagnosis stage built on Nsight Compute.
+  - Meaning: CUDA trace review is no longer limited to Nsight Systems timing plus a broad automatic bottleneck label. A trace-ranked family can now be rerun through `deep-profile` so the lab records a more specific diagnosis such as `compute-bound`, `bandwidth-bound`, or `under-occupied`, and promotion/orchestration can use that evidence instead of treating all trace-backed targets the same.
+  - Motivation: the CUDA trace path had reached the point where `capture`, `trace-profile`, and `auto-review` could tell us that a family mattered, but not why it mattered at the kernel level. Without that deeper signal, starter-ready CUDA families risked moving toward promotion on timing share alone.
+  - Purpose: make CUDA the first backend where the lab can move beyond timing-only trace evidence and toward machine-generated kernel diagnosis that meaningfully shapes orchestration and promotion.
+  - Added `LabDeepProfileResult` and deeper-diagnosis capability flags to the shared lab boundary in `/Users/ent/Codex/autoresearch/autoresearch_lab/labs.py`.
+  - Extended the shared ledger in `/Users/ent/Codex/autoresearch/autoresearch_lab/ledger.py` to persist deeper CUDA diagnoses and let that evidence affect later promotion/ranking.
+  - Added `deep-profile` to `/Users/ent/Codex/autoresearch/autoresearch_cuda/lab.py` and implemented the Nsight Compute runner plus metric classification in `/Users/ent/Codex/autoresearch/autoresearch_cuda/lab_trace.py`.
+  - Updated CUDA orchestration and promotion checks so starter-ready families like `norm`, `fused_mlp`, `matmul_epilogue`, and `rope_qk_fused` can explicitly require deeper diagnosis before moving further.
+  - Updated the user-facing CUDA lab story so the trace-first path now includes `deep-profile` as the step between broad trace review and stronger promotion claims.
+
+**Grounding**
+
+- Files:
+  - `CHANGELOG.md`
+  - `README.md`
+  - `docs/kernel-lab.md`
+  - `program.md`
+  - `autoresearch_lab/labs.py`
+  - `autoresearch_lab/ledger.py`
+  - `autoresearch_cuda/lab.py`
+  - `autoresearch_cuda/lab_trace.py`
+- Validation:
+  - `python3 -m py_compile autoresearch_lab/labs.py autoresearch_lab/ledger.py autoresearch_cuda/lab.py autoresearch_cuda/lab_trace.py`
+  - `./.venv/bin/python kernel-lab.py --engine cuda deep-profile --trace-profile /tmp/cuda-deep-profile.synthetic.json --rank 1`
+  - `./.venv/bin/python - <<'PY'`
+    `... synthetic Nsight Compute CSV parse/classification check for bandwidth-bound diagnosis ...`
+    `PY`
+  - `python3 tools/changelog_scores.py --group-by entry --format csv --include-latest --verify`
+  - `python3 tools/render_autonomy_badge.py`
+- Measurements:
+  - On this Apple machine, `deep-profile` degrades cleanly to `missing-tool` when `ncu` is unavailable instead of failing as an opaque shell error.
+  - The first deeper diagnosis layer is intentionally narrow:
+    - it uses three initial Nsight Compute metrics
+    - it classifies `compute-bound`, `bandwidth-bound`, `under-occupied`, or `mixed`
+    - and it records that result as structured evidence rather than treating it as a side note outside the lab loop.
+
+## Committed History
+
+### March 12, 2026 — `ba578ad` — lab: add CUDA RoPE and Q/K-normalization trainer hook — score `3` — complexity `8`
 
 **AI-identified within brief, human-shaped (3)**
 
@@ -75,8 +117,6 @@ On this hardware, the default canonical matched benchmark window for optimizatio
     - `rope_qk_fused`
     - `fused_mlp`
   - The current direct CUDA trainer-hook set is now identical to that starter-ready set, so every narrow CUDA starter target has a real trainer-side seam even though full validation still requires a CUDA-capable machine.
-
-## Committed History
 
 ### March 12, 2026 — `0f29146` — lab: add residual-add and reshape CUDA trainer hooks — score `3` — complexity `8`
 
