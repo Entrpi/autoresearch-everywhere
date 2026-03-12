@@ -187,6 +187,8 @@ For CUDA, the split is similar but the trace side is more automatable:
   - `launch_fusion`
   - `norm`
   - `loss_prelude`
+  - `data_movement`
+  - `matmul_epilogue`
 - the long-term goal is that CUDA trace review becomes automated-by-default, with GUI inspection as the escalation path rather than the first step
 
 The lab also keeps a small evidence ledger at `results/kernel_lab/ledger.jsonl`. That lets later profiles and plans see whether a target is still unexplored, only verified, trace-backed, or ready for an integration A/B instead of treating every target as a fresh idea.
@@ -338,10 +340,10 @@ Current project snapshot from [CHANGELOG.md](CHANGELOG.md):
 
 | Metric | Value |
 | --- | --- |
-| Mean autonomy score | `3.42 / 6` |
-| Mean complexity | `7.44 / commit` |
-| Mean score per top-level bullet | `3.47 / 6` |
-| History covered | `52` commits across `12` subsystems |
+| Mean autonomy score | `3.41 / 6` |
+| Mean complexity | `7.42 / commit` |
+| Mean score per top-level bullet | `3.46 / 6` |
+| History covered | `53` commits across `12` subsystems |
 <!-- autonomy-golf-snapshot:end -->
 
 Refresh with:

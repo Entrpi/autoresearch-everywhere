@@ -12,7 +12,7 @@ from autoresearch_lab.labs import LabBenchResult, LabExtractResult
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-CUDA_STARTER_TARGET_KEYS = ("launch_fusion", "norm", "loss_prelude")
+CUDA_STARTER_TARGET_KEYS = ("launch_fusion", "norm", "loss_prelude", "data_movement", "matmul_epilogue")
 
 
 LAUNCH_FUSION_TEMPLATE = '''"""
@@ -99,6 +99,52 @@ def kernel_fn(
 '''
 
 
+DATA_MOVEMENT_TEMPLATE = '''"""
+Autoresearch CUDA kernel lab workspace.
+
+Target: Data movement
+Mutable file: yes
+
+Replace `kernel_fn` with a faster Triton/CUDA implementation once the reference
+path is working.
+"""
+
+from __future__ import annotations
+
+import torch
+
+
+KERNEL_TARGET = "data_movement"
+
+
+def kernel_fn(x: torch.Tensor) -> torch.Tensor:
+    return x.transpose(-1, -2).contiguous()
+'''
+
+
+MATMUL_EPILOGUE_TEMPLATE = '''"""
+Autoresearch CUDA kernel lab workspace.
+
+Target: Matmul epilogue
+Mutable file: yes
+
+Replace `kernel_fn` with a faster Triton/CUDA implementation once the reference
+path is working.
+"""
+
+from __future__ import annotations
+
+import torch
+
+
+KERNEL_TARGET = "matmul_epilogue"
+
+
+def kernel_fn(x: torch.Tensor, weight: torch.Tensor, bias: torch.Tensor) -> torch.Tensor:
+    return torch.matmul(x, weight) + bias
+'''
+
+
 @dataclass(frozen=True)
 class CudaLabCase:
     shape: tuple[int, ...]
@@ -168,6 +214,30 @@ def _loss_prelude_reference(
     return weighted.to(dtype=logits.dtype), weighted.sum(), token_bytes.sum()
 
 
+def _data_movement_inputs(torch: Any, case: CudaLabCase, device: Any) -> tuple[Any, ...]:
+    b, t, c = case.shape
+    dtype = _resolve_dtype(torch, case.dtype, device)
+    x = torch.randn((b, t, c), device=device, dtype=dtype)
+    return (x,)
+
+
+def _data_movement_reference(torch: Any, x: Any) -> Any:
+    return x.transpose(-1, -2).contiguous()
+
+
+def _matmul_epilogue_inputs(torch: Any, case: CudaLabCase, device: Any) -> tuple[Any, ...]:
+    m, k, n = case.shape
+    dtype = _resolve_dtype(torch, case.dtype, device)
+    x = torch.randn((m, k), device=device, dtype=dtype)
+    weight = torch.randn((k, n), device=device, dtype=dtype)
+    bias = torch.randn((n,), device=device, dtype=dtype)
+    return x, weight, bias
+
+
+def _matmul_epilogue_reference(torch: Any, x: Any, weight: Any, bias: Any) -> Any:
+    return torch.matmul(x, weight) + bias
+
+
 CUDA_WORKSPACE_TARGET_SPECS: dict[str, CudaTargetSpec] = {
     "launch_fusion": CudaTargetSpec(
         target="launch_fusion",
@@ -213,6 +283,36 @@ CUDA_WORKSPACE_TARGET_SPECS: dict[str, CudaTargetSpec] = {
         ),
         make_inputs=_loss_prelude_inputs,
         reference=_loss_prelude_reference,
+    ),
+    "data_movement": CudaTargetSpec(
+        target="data_movement",
+        template=DATA_MOVEMENT_TEMPLATE,
+        tolerance=1e-5,
+        quick_cases=(
+            CudaLabCase(shape=(32, 128, 256), dtype="float32"),
+            CudaLabCase(shape=(16, 256, 512), dtype="float32"),
+        ),
+        full_cases=(
+            CudaLabCase(shape=(32, 256, 512), dtype="float16"),
+            CudaLabCase(shape=(16, 512, 1024), dtype="float16"),
+        ),
+        make_inputs=_data_movement_inputs,
+        reference=_data_movement_reference,
+    ),
+    "matmul_epilogue": CudaTargetSpec(
+        target="matmul_epilogue",
+        template=MATMUL_EPILOGUE_TEMPLATE,
+        tolerance=1e-5,
+        quick_cases=(
+            CudaLabCase(shape=(512, 1024, 2048), dtype="float32"),
+            CudaLabCase(shape=(1024, 1024, 2048), dtype="float32"),
+        ),
+        full_cases=(
+            CudaLabCase(shape=(1024, 2048, 4096), dtype="float16"),
+            CudaLabCase(shape=(2048, 2048, 4096), dtype="float16"),
+        ),
+        make_inputs=_matmul_epilogue_inputs,
+        reference=_matmul_epilogue_reference,
     ),
 }
 

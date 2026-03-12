@@ -234,6 +234,8 @@ Starter CUDA workspaces currently exist for:
 - `launch_fusion`
 - `norm`
 - `loss_prelude`
+- `data_movement`
+- `matmul_epilogue`
 
 If Nsight is not installed, the CUDA commands still emit structured metadata and explicit fallback statuses (`missing-tool`, `capture-unavailable`, `insufficient-trace-data`) instead of failing as an opaque shell error. That makes it possible to keep the outer workflow stable across developer machines that do not yet have NVIDIA tooling installed.
 

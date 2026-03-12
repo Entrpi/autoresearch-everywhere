@@ -29,7 +29,46 @@ On this hardware, the default canonical matched benchmark window for optimizatio
 
 ## Latest
 
-### New commit — lab: add CUDA starter workspaces and fixed harnesses — score `4` — complexity `9`
+### New commit — lab: add more CUDA starter workspace families — score `3` — complexity `6`
+
+**AI-identified within brief, human-shaped (3)**
+
+- Promoted `data_movement` and `matmul_epilogue` from trace-only CUDA families into real starter workspaces with fixed harness support.
+  - Meaning: the CUDA starter-workspace layer now covers two more trace-visible families beyond pointwise fusion, norms, and loss-prelude work. Targets that previously stopped at `ready-for-cuda-workspace-family` can now move through `extract`, `bench`, and `verify` like the other narrow CUDA starters.
+  - Motivation: once the first CUDA starter set landed, `data_movement` was the cleanest next family to promote and `matmul_epilogue` was the next most practical step toward more trainer-relevant CUDA work without jumping directly into full attention kernels.
+  - Purpose: broaden the CUDA workspace layer one family at a time while keeping the trace-first architecture intact and the harnesses honest.
+  - Added `data_movement` and `matmul_epilogue` starter templates plus fixed benchmark cases to `/Users/ent/Codex/autoresearch/autoresearch_cuda/lab_workspace.py`.
+  - Promoted both targets to `starter-ready` in the CUDA trace catalog so orchestration and promotion-check treat them like real workspace-capable families.
+  - Updated the docs to list both families alongside the other current CUDA starter workspaces.
+
+**Grounding**
+
+- Files:
+  - `CHANGELOG.md`
+  - `README.md`
+  - `docs/kernel-lab.md`
+  - `autoresearch_cuda/lab_trace.py`
+  - `autoresearch_cuda/lab_workspace.py`
+- Validation:
+  - `python3 -m py_compile autoresearch_cuda/lab.py autoresearch_cuda/lab_trace.py autoresearch_cuda/lab_workspace.py autoresearch_lab/labs.py autoresearch_lab/entrypoints.py`
+  - `./.venv/bin/python kernel-lab.py --engine cuda list-targets`
+  - `./.venv/bin/python kernel-lab.py --engine cuda init --target data_movement --workspace /tmp/cuda-data-movement-workspace`
+  - `./.venv/bin/python kernel-lab.py --engine cuda bench --workspace /tmp/cuda-data-movement-workspace --quick`
+  - `./.venv/bin/python kernel-lab.py --engine cuda verify --workspace /tmp/cuda-data-movement-workspace --quick`
+  - `./.venv/bin/python kernel-lab.py --engine cuda init --target matmul_epilogue --workspace /tmp/cuda-matmul-epilogue-workspace`
+  - `./.venv/bin/python kernel-lab.py --engine cuda bench --workspace /tmp/cuda-matmul-epilogue-workspace --quick`
+  - `./.venv/bin/python kernel-lab.py --engine cuda verify --workspace /tmp/cuda-matmul-epilogue-workspace --quick`
+  - `./.venv/bin/python kernel-lab.py --engine cuda extract --profile /tmp/cuda-trace-sim.profile.json --workspace /tmp/cuda-data-movement-extract --rank 2`
+  - `./.venv/bin/python kernel-lab.py --engine cuda promotion-check --target data_movement --preset upstream`
+  - `python3 tools/changelog_scores.py --group-by entry --format csv --include-latest --verify`
+- Measurements:
+  - On this machine `torch` is not installed, so `data_movement` and `matmul_epilogue` bench/verify degrade cleanly to `missing-runtime` instead of failing as opaque import errors.
+  - The synthetic trace profile now lets `extract --rank 2` instantiate a real `data_movement` workspace instead of returning `starter-unavailable`.
+  - `promotion-check` for `data_movement` now reports `ready-for-cuda-workspace` instead of `ready-for-cuda-workspace-family`.
+
+## Committed History
+
+### March 12, 2026 — `59c4136` — lab: add CUDA starter workspaces and fixed harnesses — score `4` — complexity `9`
 
 **Human-directed, AI-shaped (4)**
 
@@ -72,8 +111,6 @@ On this hardware, the default canonical matched benchmark window for optimizatio
     - `evidence -> trace-backed`
   - For starter-ready families, `promotion-check` now reports `ready-for-cuda-workspace`.
   - For broader families like `data_movement`, `promotion-check` now reports `ready-for-cuda-workspace-family`, making the distinction between “workspace exists” and “workspace family should be added” explicit.
-
-## Committed History
 
 ### March 12, 2026 — `a3b806e` — lab: add CUDA trace evidence and orchestration — score `4` — complexity `10`
 

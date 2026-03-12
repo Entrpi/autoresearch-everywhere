@@ -84,13 +84,15 @@ CUDA_TRACE_TARGETS: dict[str, LabTarget] = {
         key="matmul_epilogue",
         description="GEMM-adjacent epilogue and projection kernels",
         metric="time_share_pct",
-        status="trace-ready",
+        status="starter-ready",
+        notes="Starter-ready fixed workspace harness exists.",
     ),
     "data_movement": LabTarget(
         key="data_movement",
         description="Copy, cast, transpose, and data-movement kernels",
         metric="time_share_pct",
-        status="trace-ready",
+        status="starter-ready",
+        notes="Starter-ready fixed workspace harness exists.",
     ),
     "launch_fusion": LabTarget(
         key="launch_fusion",
