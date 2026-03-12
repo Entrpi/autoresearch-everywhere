@@ -29,7 +29,38 @@ On this hardware, the default canonical matched benchmark window for optimizatio
 
 ## Latest
 
-### New commit — lab: add CUDA value-embed gate trainer seam — score `3` — complexity `6`
+### New commit — lab: add Triton-backed CUDA value-embed gate workspace — score `3` — complexity `5`
+
+**AI-identified within brief, human-shaped (3)**
+
+- Promote `value_embed_gate` from a reference-first CUDA seam into a truthful Triton-optional starter workspace.
+  - Meaning: `value_embed_gate` still uses the reference gate projection, but it now has a real optional Triton kernel for the hot pointwise gate-application path. The target is no longer just trainer-hookable; it now has a credible backend-specific workspace implementation too.
+  - Motivation: after landing the narrow trainer seam, the next practical Triton step was to accelerate the repeated pointwise portion without pretending the lab already has a fully fused GEMM-plus-gating kernel.
+  - Purpose: keep extending Triton support incrementally with honest starter workspaces that match the real scope of what has been optimized so far.
+  - Extending `/Users/ent/Codex/autoresearch/autoresearch_cuda/lab_workspace.py` with an optional Triton pointwise gate-application kernel and marking `value_embed_gate` as `triton-optional`.
+  - Updating `/Users/ent/Codex/autoresearch/autoresearch_cuda/lab_trace.py`, `README.md`, and `docs/kernel-lab.md` so the CUDA starter catalog now reports `value_embed_gate` as part of the Triton-backed slice.
+
+**Grounding**
+
+- Files:
+  - `CHANGELOG.md`
+  - `README.md`
+  - `docs/kernel-lab.md`
+  - `autoresearch_cuda/lab_trace.py`
+  - `autoresearch_cuda/lab_workspace.py`
+- Validation:
+  - `python3 -m py_compile autoresearch_cuda/lab_trace.py autoresearch_cuda/lab_workspace.py`
+  - `./.venv/bin/python kernel-lab.py --engine cuda init --target value_embed_gate --workspace /tmp/cuda-value-embed-gate`
+  - `python3 -m py_compile /tmp/cuda-value-embed-gate/kernel.py`
+  - `./.venv/bin/python kernel-lab.py --engine cuda bench --workspace /tmp/cuda-value-embed-gate --quick`
+  - `./.venv/bin/python kernel-lab.py --engine cuda verify --workspace /tmp/cuda-value-embed-gate --quick`
+  - `python3 tools/changelog_scores.py --group-by entry --format csv --include-latest --verify`
+- Measurements:
+  - On this Apple machine, the new Triton-optional starter workspace still degrades cleanly to `missing-runtime` because PyTorch/CUDA are unavailable.
+
+## Committed History
+
+### March 12, 2026 — `801c84d` — lab: add CUDA value-embed gate trainer seam — score `3` — complexity `6`
 
 **AI-identified within brief, human-shaped (3)**
 
@@ -61,8 +92,6 @@ On this hardware, the default canonical matched benchmark window for optimizatio
   - `python3 tools/changelog_scores.py --group-by entry --format csv --include-latest --verify`
 - Measurements:
   - On this Apple machine, the new starter workspace and trainer hook still degrade cleanly to `missing-runtime` because PyTorch/CUDA are unavailable.
-
-## Committed History
 
 ### March 12, 2026 — `f4f7a91` — lab: add Triton-backed CUDA logits softcap hook — score `3` — complexity `6`
 

@@ -74,7 +74,7 @@ CUDA_TRACE_TARGETS: dict[str, LabTarget] = {
         description="Value-embedding gating work inside attention staging",
         metric="time_share_pct",
         status="starter-ready",
-        notes="Starter-ready fixed workspace harness exists for the value-embed gate seam.",
+        notes="Starter-ready fixed workspace harness exists for the value-embed gate seam, with a first optional Triton pointwise gate-application kernel.",
     ),
     "rope_qk_fused": LabTarget(
         key="rope_qk_fused",
