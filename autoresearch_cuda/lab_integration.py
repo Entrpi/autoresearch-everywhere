@@ -12,7 +12,7 @@ LAB_INTEGRATION_WORKSPACE_ENV = "AUTORESEARCH_CUDA_LAB_INTEGRATION_WORKSPACE"
 LAB_INTEGRATION_TARGET_ENV = "AUTORESEARCH_CUDA_LAB_INTEGRATION_TARGET"
 
 
-SUPPORTED_INTEGRATION_TARGETS = frozenset({"norm"})
+SUPPORTED_INTEGRATION_TARGETS = frozenset({"loss_prelude", "norm"})
 _NORM_WEIGHT_CACHE: dict[tuple[str, int | None, str, int], object] = {}
 
 
@@ -98,4 +98,14 @@ def maybe_call_integration_target(target: str, *args):
         x = args[0]
         eps = args[1] if len(args) > 1 else 1e-6
         return workspace.kernel_module.kernel_fn(x, _norm_weight_like(x), eps)
+    if target == "loss_prelude":
+        logits = args[0]
+        targets = args[1]
+        token_bytes = args[2] if len(args) > 2 else None
+        softcap = args[3] if len(args) > 3 else 15.0
+        import torch  # type: ignore
+
+        if token_bytes is None:
+            token_bytes = torch.ones_like(targets, dtype=torch.int32)
+        return workspace.kernel_module.kernel_fn(logits, targets, token_bytes, softcap)
     return workspace.kernel_module.kernel_fn(*args)

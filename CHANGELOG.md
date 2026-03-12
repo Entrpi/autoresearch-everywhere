@@ -29,7 +29,44 @@ On this hardware, the default canonical matched benchmark window for optimizatio
 
 ## Latest
 
-### New commit — lab: add first CUDA trainer hook and integration evidence — score `3` — complexity `7`
+### New commit — lab: expand CUDA direct trainer hooks — score `3` — complexity `7`
+
+**AI-identified within brief, human-shaped (3)**
+
+- Expanded the narrow CUDA trainer-hook layer from `norm` alone to `norm` plus `loss_prelude`.
+  - Meaning: the direct CUDA trainer-side integration path now covers both a normalization seam and a loss-side seam, so the CUDA lab can start collecting trainer evidence from more than one narrow target family instead of treating `norm` as the only special case.
+  - Motivation: once the first CUDA trainer hook landed, the cleanest next step was another target that already existed as a starter workspace and matched a clear trainer seam. The logits-softcap-plus-loss prelude path is the narrowest useful follow-on before broader families like data movement or epilogues.
+  - Purpose: widen the CUDA trainer-hook layer carefully, keep the path tied to existing starter workspaces, and keep non-CUDA machines on the same structured `missing-runtime` workflow instead of hand-maintained special cases.
+  - Extended `/Users/ent/Codex/autoresearch/autoresearch_cuda/lab_integration.py` so `loss_prelude` can run through the same environment-driven workspace injection path as `norm`.
+  - Wired `/Users/ent/Codex/autoresearch/autoresearch_cuda/train.py` so the logits softcap and training-loss seam can call a `loss_prelude` workspace implementation safely, including masked `ignore_index=-1` handling.
+  - Updated the public CUDA lab story so the direct trainer-hook set is now explicitly `norm` plus `loss_prelude`.
+  - Kept the path narrow and honest: broader CUDA starter targets still stop at workspace-local evidence, and non-CUDA machines still return structured `missing-runtime` integration results.
+
+**Grounding**
+
+- Files:
+  - `CHANGELOG.md`
+  - `README.md`
+  - `docs/kernel-lab.md`
+  - `program.md`
+  - `autoresearch_cuda/lab_integration.py`
+  - `autoresearch_cuda/train.py`
+- Validation:
+  - `python3 -m py_compile autoresearch_cuda/lab_integration.py autoresearch_cuda/train.py autoresearch_cuda/lab.py autoresearch_cuda/lab_trace.py`
+  - `./.venv/bin/python kernel-lab.py --engine cuda init --target loss_prelude --workspace /tmp/cuda-loss-integration-workspace`
+  - `./.venv/bin/python kernel-lab.py --engine cuda integration-ab --workspace /tmp/cuda-loss-integration-workspace --preset upstream --time-budget 2 --repeats 2 --benchmark-skip-eval --no-checkpoint`
+  - `./.venv/bin/python kernel-lab.py --engine cuda integration-suite --workspace /tmp/cuda-loss-integration-workspace --preset upstream --time-budget 2 --repeats 2 --benchmark-skip-eval --no-checkpoint`
+  - `python3 tools/changelog_scores.py --group-by entry --format csv --include-latest --verify`
+- Measurements:
+  - On this machine `torch` is not installed, so both `loss_prelude` integration commands degrade cleanly to `missing-runtime` instead of failing as opaque import errors.
+  - The direct CUDA trainer-hook set is now intentionally narrow but no longer single-target:
+    - `norm`
+    - `loss_prelude`
+  - Broader CUDA starter targets still stop at workspace-local evidence until more trainer seams are wired.
+
+## Committed History
+
+### March 12, 2026 — `89bbc11` — lab: add first CUDA trainer hook and integration evidence — score `3` — complexity `7`
 
 **AI-identified within brief, human-shaped (3)**
 
@@ -66,8 +103,6 @@ On this hardware, the default canonical matched benchmark window for optimizatio
     - `norm` is directly integrable
     - broader CUDA starter targets still stop at workspace-local evidence
   - `promotion-check` for `norm` remains conservative and still reports `needs-capture` until trace-backed evidence exists.
-
-## Committed History
 
 ### March 12, 2026 — `e68136a` — lab: add more CUDA starter workspace families — score `3` — complexity `6`
 
