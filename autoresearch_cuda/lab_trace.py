@@ -102,7 +102,7 @@ CUDA_TRACE_TARGETS: dict[str, LabTarget] = {
         description="Softmax / logits / cross-entropy-side kernels",
         metric="time_share_pct",
         status="starter-ready",
-        notes="Starter-ready fixed workspace harness exists.",
+        notes="Starter-ready fixed workspace harness exists, with a first optional Triton row-wise cross-entropy-prelude implementation.",
     ),
     "logits_softcap": LabTarget(
         key="logits_softcap",

@@ -183,8 +183,9 @@ Autoresearch CUDA kernel lab workspace.
 Target: Loss prelude
 Mutable file: yes
 
-Replace `kernel_fn` with a faster Triton/CUDA implementation once the reference
-path is working.
+This starter target ships with an optional Triton row-wise cross-entropy
+prelude implementation and falls back to the reference path when Triton or CUDA
+is unavailable.
 """
 
 from __future__ import annotations
@@ -192,8 +193,80 @@ from __future__ import annotations
 import torch
 import torch.nn.functional as F
 
+try:
+    import triton
+    import triton.language as tl
+except Exception:  # pragma: no cover - workspace fallback path
+    triton = None
+    tl = None
+
 
 KERNEL_TARGET = "loss_prelude"
+WORKSPACE_IMPL = "triton-optional"
+
+if triton is not None:
+
+    @triton.jit
+    def _loss_prelude_kernel(
+        logits_ptr,
+        targets_ptr,
+        token_bytes_ptr,
+        weighted_ptr,
+        stride_row,
+        vocab_size,
+        softcap,
+        BLOCK_SIZE: tl.constexpr,
+    ):
+        row_idx = tl.program_id(axis=0)
+        offsets = tl.arange(0, BLOCK_SIZE)
+        row_start = logits_ptr + row_idx * stride_row
+        row_max = tl.full((), float("-inf"), tl.float32)
+        for start in range(0, vocab_size, BLOCK_SIZE):
+            col_offsets = start + offsets
+            mask = col_offsets < vocab_size
+            logits = tl.load(row_start + col_offsets, mask=mask, other=float("-inf")).to(tl.float32)
+            logits = softcap * tl.math.tanh(logits / softcap)
+            row_max = tl.maximum(row_max, tl.max(logits, axis=0))
+        exp_sum = tl.zeros((), dtype=tl.float32)
+        for start in range(0, vocab_size, BLOCK_SIZE):
+            col_offsets = start + offsets
+            mask = col_offsets < vocab_size
+            logits = tl.load(row_start + col_offsets, mask=mask, other=float("-inf")).to(tl.float32)
+            logits = softcap * tl.math.tanh(logits / softcap)
+            exp_sum += tl.sum(tl.exp(logits - row_max), axis=0)
+        target_idx = tl.load(targets_ptr + row_idx).to(tl.int32)
+        target_logit = tl.load(row_start + target_idx).to(tl.float32)
+        target_logit = softcap * tl.math.tanh(target_logit / softcap)
+        token_bytes = tl.load(token_bytes_ptr + row_idx).to(tl.float32)
+        nll = tl.log(exp_sum) + row_max - target_logit
+        tl.store(weighted_ptr + row_idx, nll * token_bytes)
+
+
+def _loss_prelude_triton(
+    logits: torch.Tensor,
+    targets: torch.Tensor,
+    token_bytes: torch.Tensor,
+    softcap: float = 15.0,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    logits32 = logits.float().contiguous()
+    targets_contig = targets.contiguous()
+    token_bytes_contig = token_bytes.contiguous()
+    rows, vocab = logits32.shape
+    weighted32 = torch.empty((rows,), device=logits32.device, dtype=torch.float32)
+    block_size = min(4096, triton.next_power_of_2(vocab))
+    num_warps = 4 if block_size <= 1024 else 8
+    _loss_prelude_kernel[(rows,)](
+        logits32,
+        targets_contig,
+        token_bytes_contig,
+        weighted32,
+        logits32.stride(0),
+        vocab,
+        softcap,
+        BLOCK_SIZE=block_size,
+        num_warps=num_warps,
+    )
+    return weighted32.to(dtype=logits.dtype), weighted32.sum(), token_bytes_contig.sum()
 
 
 def kernel_fn(
@@ -202,6 +275,17 @@ def kernel_fn(
     token_bytes: torch.Tensor,
     softcap: float = 15.0,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    if (
+        triton is not None
+        and logits.is_cuda
+        and targets.is_cuda
+        and token_bytes.is_cuda
+        and logits.dim() == 2
+        and targets.dim() == 1
+        and token_bytes.dim() == 1
+        and logits.is_contiguous()
+    ):
+        return _loss_prelude_triton(logits, targets, token_bytes, softcap=softcap)
     logits32 = logits.float()
     softcapped = softcap * torch.tanh(logits32 / softcap)
     log_probs = F.log_softmax(softcapped, dim=-1)
@@ -1380,7 +1464,7 @@ def init_cuda_workspace(*, target: str, workspace: Path, profile_context: dict[s
             "metric": "throughput_gb_s",
             "workspace_impl": (
                 "triton-optional"
-                if target in {"launch_fusion", "norm", "logits_softcap", "value_embed_gate", "rope_qk_fused", "data_movement", "matmul_epilogue"}
+                if target in {"launch_fusion", "norm", "loss_prelude", "logits_softcap", "value_embed_gate", "rope_qk_fused", "data_movement", "matmul_epilogue"}
                 else "reference"
             ),
             "profile_context": profile_context or {},
