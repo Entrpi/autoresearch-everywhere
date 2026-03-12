@@ -29,7 +29,25 @@ On this hardware, the default canonical matched benchmark window for optimizatio
 
 ## Latest
 
-### New commit — lab: start Triton-backed CUDA starter workspaces — score `3` — complexity `5`
+### New commit — lab: extend Triton-backed CUDA starter workspaces — score `3` — complexity `5`
+
+**AI-identified within brief, human-shaped (3)**
+
+- Extend the first Triton-backed CUDA slice from the narrow launch-fusion and RMSNorm targets into the next practical starter workspace families.
+  - Meaning: the CUDA lab is starting to move from “a couple of proof-point Triton starters” toward a broader starter catalog where more trace-ranked families can open a real Triton workspace instead of only a reference workspace.
+  - Motivation: once the first Triton-backed starters existed, the next useful step was to cover the adjacent families that are still narrow enough for a fixed harness but are closer to real trainer-side CUDA work, starting with `data_movement` and `matmul_epilogue`.
+  - Purpose: broaden the real Triton-backed CUDA substrate without skipping straight to giant attention or GEMM rewrites, so the trace-first CUDA lab can keep turning ranked families into concrete backend workspaces incrementally.
+  - Extending `/Users/ent/Codex/autoresearch/autoresearch_cuda/lab_workspace.py` with optional Triton implementations for `data_movement` and `matmul_epilogue`.
+  - Updating the CUDA lab docs and target notes so they keep distinguishing Triton-backed starter targets from reference-first starter targets honestly.
+
+**Grounding**
+
+- Measurements:
+  - Not measured yet.
+
+## Committed History
+
+### March 12, 2026 — `2ea3d54` — lab: add first Triton-backed CUDA starter workspaces — score `3` — complexity `5`
 
 **AI-identified within brief, human-shaped (3)**
 
@@ -59,8 +77,6 @@ On this hardware, the default canonical matched benchmark window for optimizatio
 - Measurements:
   - On this Apple machine, the generated Triton-backed workspaces still degrade cleanly through the existing `missing-runtime` path because PyTorch/CUDA are unavailable.
   - The first Triton slice is intentionally partial: only `launch_fusion` and `norm` are Triton-backed so far, while the rest of the CUDA starter catalog remains reference-first.
-
-## Committed History
 
 ### March 12, 2026 — `36bea5b` — lab: make CUDA deep-profile evidence policy-driving — score `3` — complexity `6`
 

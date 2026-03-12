@@ -108,14 +108,14 @@ CUDA_TRACE_TARGETS: dict[str, LabTarget] = {
         description="GEMM-adjacent epilogue and projection kernels",
         metric="time_share_pct",
         status="starter-ready",
-        notes="Starter-ready fixed workspace harness exists.",
+        notes="Starter-ready fixed workspace harness exists, with a first optional Triton matmul+bias implementation.",
     ),
     "data_movement": LabTarget(
         key="data_movement",
         description="Copy, cast, transpose, and data-movement kernels",
         metric="time_share_pct",
         status="starter-ready",
-        notes="Starter-ready fixed workspace harness exists.",
+        notes="Starter-ready fixed workspace harness exists, with a first optional Triton copy/reshape implementation.",
     ),
     "launch_fusion": LabTarget(
         key="launch_fusion",

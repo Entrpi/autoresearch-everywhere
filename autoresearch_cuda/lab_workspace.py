@@ -215,20 +215,62 @@ Autoresearch CUDA kernel lab workspace.
 Target: Data movement
 Mutable file: yes
 
-Replace `kernel_fn` with a faster Triton/CUDA implementation once the reference
-path is working. The starter target models the attention-output reshape from
-`[B, T, H, D]` to `[B, T, H*D]`.
+This starter target ships with an optional Triton copy/reshape implementation
+and falls back to the reference path when Triton or CUDA is unavailable. The
+starter target models the attention-output reshape from `[B, T, H, D]` to
+`[B, T, H*D]`.
 """
 
 from __future__ import annotations
 
 import torch
 
+try:
+    import triton
+    import triton.language as tl
+except Exception:  # pragma: no cover - workspace fallback path
+    triton = None
+    tl = None
+
 
 KERNEL_TARGET = "data_movement"
+WORKSPACE_IMPL = "triton-optional"
+
+if triton is not None:
+
+    @triton.jit
+    def _data_movement_kernel(
+        input_ptr,
+        output_ptr,
+        n_elements,
+        BLOCK_SIZE: tl.constexpr,
+    ):
+        pid = tl.program_id(axis=0)
+        offsets = pid * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+        mask = offsets < n_elements
+        values = tl.load(input_ptr + offsets, mask=mask)
+        tl.store(output_ptr + offsets, values, mask=mask)
+
+
+def _data_movement_triton(x: torch.Tensor) -> torch.Tensor:
+    x_contig = x.contiguous()
+    output = torch.empty_like(x_contig)
+    output_flat = output.view(-1)
+    n_elements = output_flat.numel()
+    grid = lambda meta: (triton.cdiv(n_elements, meta["BLOCK_SIZE"]),)
+    _data_movement_kernel[grid](
+        x_contig.view(-1),
+        output_flat,
+        n_elements,
+        BLOCK_SIZE=1024,
+    )
+    bsz, seqlen, _, _ = x_contig.shape
+    return output.view(bsz, seqlen, -1)
 
 
 def kernel_fn(x: torch.Tensor) -> torch.Tensor:
+    if triton is not None and x.is_cuda and x.is_contiguous():
+        return _data_movement_triton(x)
     bsz, seqlen, _, _ = x.shape
     return x.contiguous().view(bsz, seqlen, -1)
 '''
@@ -240,19 +282,103 @@ Autoresearch CUDA kernel lab workspace.
 Target: Matmul epilogue
 Mutable file: yes
 
-Replace `kernel_fn` with a faster Triton/CUDA implementation once the reference
-path is working.
+This starter target ships with an optional Triton matmul+bias implementation
+and falls back to the reference path when Triton or CUDA is unavailable.
 """
 
 from __future__ import annotations
 
 import torch
 
+try:
+    import triton
+    import triton.language as tl
+except Exception:  # pragma: no cover - workspace fallback path
+    triton = None
+    tl = None
+
 
 KERNEL_TARGET = "matmul_epilogue"
+WORKSPACE_IMPL = "triton-optional"
+
+if triton is not None:
+
+    @triton.jit
+    def _matmul_epilogue_kernel(
+        a_ptr,
+        b_ptr,
+        bias_ptr,
+        c_ptr,
+        M,
+        N,
+        K,
+        stride_am,
+        stride_ak,
+        stride_bk,
+        stride_bn,
+        stride_cm,
+        stride_cn,
+        BLOCK_M: tl.constexpr,
+        BLOCK_N: tl.constexpr,
+        BLOCK_K: tl.constexpr,
+    ):
+        pid_m = tl.program_id(axis=0)
+        pid_n = tl.program_id(axis=1)
+        offs_m = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
+        offs_n = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
+        offs_k = tl.arange(0, BLOCK_K)
+        accumulator = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
+        for k_start in range(0, K, BLOCK_K):
+            k_offsets = k_start + offs_k
+            a_ptrs = a_ptr + offs_m[:, None] * stride_am + k_offsets[None, :] * stride_ak
+            b_ptrs = b_ptr + k_offsets[:, None] * stride_bk + offs_n[None, :] * stride_bn
+            a_mask = (offs_m[:, None] < M) & (k_offsets[None, :] < K)
+            b_mask = (k_offsets[:, None] < K) & (offs_n[None, :] < N)
+            a = tl.load(a_ptrs, mask=a_mask, other=0.0)
+            b = tl.load(b_ptrs, mask=b_mask, other=0.0)
+            accumulator += tl.dot(a, b)
+        bias = tl.load(bias_ptr + offs_n, mask=offs_n < N, other=0.0).to(tl.float32)
+        accumulator += bias[None, :]
+        c_ptrs = c_ptr + offs_m[:, None] * stride_cm + offs_n[None, :] * stride_cn
+        c_mask = (offs_m[:, None] < M) & (offs_n[None, :] < N)
+        tl.store(c_ptrs, accumulator, mask=c_mask)
+
+
+def _matmul_epilogue_triton(x: torch.Tensor, weight: torch.Tensor, bias: torch.Tensor) -> torch.Tensor:
+    x_contig = x.contiguous()
+    weight_contig = weight.contiguous()
+    bias_contig = bias.contiguous()
+    m, k = x_contig.shape
+    k_w, n = weight_contig.shape
+    if k != k_w:
+        raise ValueError(f"matmul_epilogue expects matching K dimensions, got {k} and {k_w}")
+    output = torch.empty((m, n), device=x_contig.device, dtype=x_contig.dtype)
+    grid = lambda meta: (triton.cdiv(m, meta["BLOCK_M"]), triton.cdiv(n, meta["BLOCK_N"]))
+    _matmul_epilogue_kernel[grid](
+        x_contig,
+        weight_contig,
+        bias_contig,
+        output,
+        m,
+        n,
+        k,
+        x_contig.stride(0),
+        x_contig.stride(1),
+        weight_contig.stride(0),
+        weight_contig.stride(1),
+        output.stride(0),
+        output.stride(1),
+        BLOCK_M=64,
+        BLOCK_N=64,
+        BLOCK_K=32,
+        num_warps=4,
+    )
+    return output
 
 
 def kernel_fn(x: torch.Tensor, weight: torch.Tensor, bias: torch.Tensor) -> torch.Tensor:
+    if triton is not None and x.is_cuda and weight.is_cuda and bias.is_cuda and x.dim() == 2 and weight.dim() == 2:
+        return _matmul_epilogue_triton(x, weight, bias)
     return torch.matmul(x, weight) + bias
 '''
 
