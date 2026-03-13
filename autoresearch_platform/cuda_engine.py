@@ -19,7 +19,7 @@ class CUDAEngine:
     reference_preset = "upstream"
     capabilities = EngineCapabilities(
         supports_platform_bringup=True,
-        supports_local_search=False,
+        supports_local_search=True,
         supports_eval_calibration=False,
         supports_checkpoint_mint=False,
         supports_runtime_eval_policy=False,
@@ -192,14 +192,39 @@ class CUDAEngine:
         )
 
     def default_local_seq_lens(self, preset: str, *, mode: str) -> list[int]:
-        return [CUDA_PRESETS[preset].seq_len]
+        preset_config = CUDA_PRESETS[preset]
+        if mode == "fast":
+            return [preset_config.seq_len]
+        candidates = [preset_config.seq_len]
+        halved = max(512, preset_config.seq_len // 2)
+        if halved != preset_config.seq_len:
+            candidates.append(halved)
+        return sorted(set(candidates))
 
     def default_local_window_patterns(self, preset: str, *, mode: str) -> list[str]:
-        return [CUDA_PRESETS[preset].window_pattern]
+        preset_config = CUDA_PRESETS[preset]
+        patterns = [preset_config.window_pattern]
+        if mode == "full" and preset_config.window_pattern != "L":
+            patterns.append("L")
+        return list(dict.fromkeys(patterns))
 
     def local_batch_candidates(self, preset: str, *, seq_len: int) -> list[tuple[int, int]]:
         value = CUDA_PRESETS[preset]
-        return [(value.device_batch_size, value.total_batch_size)]
+        base_device_batch = value.device_batch_size
+        device_batches = sorted({
+            max(16, base_device_batch // 4),
+            max(16, base_device_batch // 2),
+            base_device_batch,
+        })
+        grad_accum_candidates = (1, 2)
+        combos: list[tuple[int, int]] = []
+        for device_batch in device_batches:
+            tokens_per_fwdbwd = seq_len * device_batch
+            if tokens_per_fwdbwd <= 0:
+                continue
+            for grad_accum in grad_accum_candidates:
+                combos.append((device_batch, tokens_per_fwdbwd * grad_accum))
+        return sorted(set(combos))
 
     def calibration_signatures(self) -> dict[str, str | None]:
         return {

@@ -52,8 +52,12 @@ import torch.nn.functional as F
 
 from autoresearch_cuda.lab_integration import maybe_call_integration_target
 from autoresearch_cuda.runtime import detect_cuda_runtime_profile
-from kernels import get_kernel
 from autoresearch_cuda.prepare import Tokenizer, make_dataloader, evaluate_bpb
+
+try:
+    from kernels import get_kernel
+except Exception:
+    get_kernel = None
 
 cap = torch.cuda.get_device_capability()
 cuda_runtime = detect_cuda_runtime_profile(cap, device_name=torch.cuda.get_device_name())
@@ -71,12 +75,13 @@ def _resolve_flash_attention_interface():
                 return module, f"installed:{module_name}"
         except Exception:
             continue
-    try:
-        module = get_kernel(cuda_runtime.selected_flash_attention_repo).flash_attn_interface
-        if hasattr(module, "flash_attn_func"):
-            return module, f"kernels:{cuda_runtime.selected_flash_attention_repo}"
-    except Exception:
-        pass
+    if get_kernel is not None:
+        try:
+            module = get_kernel(cuda_runtime.selected_flash_attention_repo).flash_attn_interface
+            if hasattr(module, "flash_attn_func"):
+                return module, f"kernels:{cuda_runtime.selected_flash_attention_repo}"
+        except Exception:
+            pass
     return None, "torch-sdpa"
 
 

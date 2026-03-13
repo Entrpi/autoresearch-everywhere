@@ -15,8 +15,6 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from autoresearch_mlx.eval_policy import DEFAULT_EVAL_HARDWARE_KEY, EVAL_POLICY_VERSION, find_eval_calibration  # noqa: E402
-from autoresearch_mlx.eval_telemetry import summarize_eval_telemetry  # noqa: E402
 from autoresearch_platform.engines import (  # noqa: E402
     DEFAULT_ENGINE_NAME,
     HardwareFingerprint,
@@ -26,6 +24,18 @@ from autoresearch_platform.engines import (  # noqa: E402
     get_engine,
 )
 from autoresearch_platform.platform_defaults import write_platform_default_cache  # noqa: E402
+
+try:  # noqa: E402
+    from autoresearch_mlx.eval_policy import DEFAULT_EVAL_HARDWARE_KEY, EVAL_POLICY_VERSION, find_eval_calibration
+    from autoresearch_mlx.eval_telemetry import summarize_eval_telemetry
+
+    HAS_MLX_CALIBRATION_SUPPORT = True
+except Exception:  # pragma: no cover - exercised on non-MLX hosts
+    DEFAULT_EVAL_HARDWARE_KEY = "apple-m5-32gb-10gpu"
+    EVAL_POLICY_VERSION = 1
+    find_eval_calibration = None
+    summarize_eval_telemetry = None
+    HAS_MLX_CALIBRATION_SUPPORT = False
 
 M5_REFERENCE_DEFAULT_PRESET = "m5-small"
 PLATFORM_CALIBRATION_SCHEMA_VERSION = 2
@@ -226,6 +236,16 @@ def estimate_eval_overhead_fraction(row: ProbeResult, ranking_time_budget: float
 
 
 def telemetry_for_preset(preset: str, *, hardware_key: str) -> dict:
+    if not HAS_MLX_CALIBRATION_SUPPORT or summarize_eval_telemetry is None:
+        return {
+            "eligible_count": 0,
+            "commit_count": 0,
+            "day_count": 0,
+            "observed_rungs": [],
+            "stable_rungs": [],
+            "last_seen_on": None,
+            "last_seen_age_days": None,
+        }
     summary = summarize_eval_telemetry(preset, hardware_key=hardware_key, policy_version=EVAL_POLICY_VERSION)
     return {
         "eligible_count": summary.eligible_count,
@@ -555,7 +575,9 @@ def select_best_local_row(rows: list[ProbeResult]) -> ProbeResult:
 
 
 def compare_to_m5_reference(*, preset: str, eval_rows: list[dict], train_probe: ProbeResult) -> dict | None:
-    reference = find_eval_calibration(preset, hardware_key=DEFAULT_EVAL_HARDWARE_KEY)
+    reference = None
+    if HAS_MLX_CALIBRATION_SUPPORT and find_eval_calibration is not None:
+        reference = find_eval_calibration(preset, hardware_key=DEFAULT_EVAL_HARDWARE_KEY)
     train_reference = M5_TRAIN_REFERENCE.get(preset)
     if reference is None and train_reference is None:
         return None

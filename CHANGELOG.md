@@ -29,7 +29,35 @@ On this hardware, the default canonical matched benchmark window for optimizatio
 
 ## Latest
 
-### New commit — docs: add a CUDA core-loop parity roadmap — score `4` — complexity `5`
+### New commit — calibration: start CUDA engine parity with local search and runtime-safe bring-up — score `4` — complexity `7`
+
+**Human-directed, AI-shaped (4)**
+
+- Start the first real CUDA core-loop parity slice by making the shared CUDA engine participate in local search and by removing MLX-specific import assumptions that were breaking CUDA-only bring-up environments.
+  - Meaning: the CUDA engine now advertises and implements local search through the shared engine boundary, with real sequence-length, window-pattern, and batch-shape candidates instead of a single fixed upstream point. `calibrate_platform.py` also no longer hard-imports MLX eval-policy modules at startup, so `calibrate.py --engine cuda` can run in a CUDA-only environment without `mlx` installed. The CUDA trainer now treats the repo-local `kernels` package as optional instead of a mandatory import, which keeps GB10-class environments that rely on installed FlashAttention packages from failing before training even begins.
+  - Motivation: the CUDA parity roadmap was already committed, and the next concrete gap was clear: `calibrate.py --engine cuda` still could not behave like a real bring-up flow because the shared engine exposed no local search and the orchestration stack still assumed MLX was importable. The GB10 validation environment also exposed that the trainer was too brittle about where FlashAttention came from.
+  - Purpose: turn the parity roadmap into the first real code step toward a CUDA engine that can participate in the same bring-up loop shape as MLX, while making the CUDA path robust in the GB10 container/runtime environment we are actively validating against.
+  - Extending `autoresearch_platform/cuda_engine.py` so full-mode CUDA bring-up can search beyond one fixed upstream shape.
+  - Making `tools/calibrate_platform.py` degrade cleanly on non-MLX hosts instead of failing on top-level imports.
+  - Making `autoresearch_cuda/train.py` accept environments where installed FlashAttention is present but the repo-local `kernels` package is not.
+
+**Grounding**
+
+- Files:
+  - `CHANGELOG.md`
+  - `autoresearch_cuda/train.py`
+  - `autoresearch_platform/cuda_engine.py`
+  - `tools/calibrate_platform.py`
+- Validation:
+  - `python3 -m py_compile autoresearch_cuda/train.py autoresearch_platform/cuda_engine.py tools/calibrate_platform.py`
+  - local probes confirming CUDA engine local-search candidates and non-MLX import safety
+  - remote GB10 container bring-up progressed through hardware fingerprinting into the first coarse CUDA trainer probe instead of failing immediately on MLX imports or missing repo-local kernels
+- Measurements:
+  - No new stable trainer benchmark was recorded in this slice; the main grounded result is that the parity path now reaches real CUDA probing on GB10 instead of stopping on infrastructure mismatches.
+
+## Committed History
+
+### March 13, 2026 — `69960ca` — docs: add CUDA core-loop parity roadmap — score `4` — complexity `5`
 
 **Human-directed, AI-shaped (4)**
 
@@ -50,8 +78,6 @@ On this hardware, the default canonical matched benchmark window for optimizatio
   - `python3 tools/changelog_scores.py --group-by entry --format csv --include-latest --verify`
 - Measurements:
   - No new runtime measurements; this is a synthesis and planning document grounded in the existing GB10 validation and the current shared-engine code.
-
-## Committed History
 
 ### March 13, 2026 — `71788a0` — cuda: add GB10-compatible attention fallback and shared summary parsing — score `3` — complexity `5`
 
