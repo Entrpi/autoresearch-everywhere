@@ -167,6 +167,27 @@ CUDA now has the first trace-first automation path too, and a small first starte
 - `uv run kernel-lab.py --engine cuda integration-ab --workspace /tmp/cuda-lab/norm --preset upstream --time-budget 20 --benchmark-skip-eval --no-checkpoint`
 - `uv run kernel-lab.py --engine cuda integration-suite --workspace /tmp/cuda-lab/norm --preset upstream --time-budget 20 --repeats 2 --benchmark-skip-eval --no-checkpoint`
 
+On a real GB10 system, that flow is now validated through:
+
+- real trainer smoke with installed FlashAttention on `blackwell-gb10`
+- real Nsight Systems capture
+- real `trace-profile` / `auto-review`
+- real Nsight Compute `deep-profile` once host GPU counters are enabled
+- real CUDA workspace `bench` / `verify`
+
+The first grounded GB10 trace currently says:
+
+- dominant issue: `sync-bound`
+- top ranked family: `launch_fusion` (`65.4%`)
+- second ranked family: `data_movement` (`34.6%`)
+
+And the first deeper CUDA diagnoses now work too:
+
+- `launch_fusion`: weak / mixed
+- `data_movement`: weak / mixed, with very low SM throughput and very high active-warp percentage
+
+So the current CUDA story is no longer hypothetical: the trace-first pipeline works on real Blackwell hardware, but it is still conservative about promotion when deeper evidence is weak.
+
 The lab now has two layers on purpose:
 
 - heuristic layer:
@@ -214,6 +235,8 @@ For CUDA, the split is similar but the trace side is more automatable:
 - `norm`, `logits_softcap`, `loss_prelude`, `matmul_epilogue`, `fused_mlp`, `attention_prelude`, `value_embed_gate`, `rope_qk_fused`, `launch_fusion`, and `data_movement` currently have direct CUDA trainer-side hooks, so they are the CUDA starter targets that can collect real `integration-ab` / `integration-suite` evidence today
 - on non-CUDA machines or machines without PyTorch/CUDA installed, those CUDA integration commands return structured `missing-runtime` results instead of pretending the target is promotable
 - the long-term goal is that CUDA trace review becomes automated-by-default, with GUI inspection as the escalation path rather than the first step
+
+For full CUDA profiling, the host also has to allow GPU performance counters. On Linux/NVIDIA hosts, that means enabling unrestricted profiling in the NVIDIA driver, then rebooting, and in our container setup it is safest to add `--cap-add=SYS_ADMIN` as well. Without that, `deep-profile` will fail with `ERR_NVGPUCTRPERM` even if `ncu` is installed.
 
 The lab also keeps a small evidence ledger at `results/kernel_lab/ledger.jsonl`. That lets later profiles and plans see whether a target is still unexplored, only verified, trace-backed, or ready for an integration A/B instead of treating every target as a fresh idea.
 
@@ -364,10 +387,10 @@ Current project snapshot from [CHANGELOG.md](CHANGELOG.md):
 
 | Metric | Value |
 | --- | --- |
-| Mean autonomy score | `3.29 / 6` |
-| Mean complexity | `7.04 / commit` |
-| Mean score per top-level bullet | `3.35 / 6` |
-| History covered | `72` commits across `12` subsystems |
+| Mean autonomy score | `3.28 / 6` |
+| Mean complexity | `7.01 / commit` |
+| Mean score per top-level bullet | `3.34 / 6` |
+| History covered | `73` commits across `12` subsystems |
 <!-- autonomy-golf-snapshot:end -->
 
 Refresh with:

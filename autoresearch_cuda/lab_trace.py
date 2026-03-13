@@ -44,7 +44,7 @@ from autoresearch_lab.labs import (
     LabTraceResult,
 )
 from autoresearch_lab.ledger import summarize_lab_evidence
-from tools.calibrate_eval_policy import parse_summary
+from autoresearch_platform.summary import parse_summary
 
 
 TRACE_SCHEMA_VERSION = 1
@@ -151,6 +151,44 @@ _TARGET_PATTERNS: tuple[tuple[str, tuple[re.Pattern[str], ...]], ...] = (
                 r"fused.*attn",
                 r"attn_(fwd|bwd)",
                 r"attention_fwd",
+            )
+        ),
+    ),
+    (
+        "data_movement",
+        tuple(
+            re.compile(pattern, re.IGNORECASE)
+            for pattern in (
+                r"copy",
+                r"cast",
+                r"memcpy",
+                r"memset",
+                r"transpose",
+                r"permute",
+                r"contiguous",
+            )
+        ),
+    ),
+    (
+        "launch_fusion",
+        tuple(
+            re.compile(pattern, re.IGNORECASE)
+            for pattern in (
+                r"distribution_elementwise",
+                r"distribution_nullary",
+                r"uniform_kernel",
+                r"normal_kernel",
+                r"fillfunctor",
+                r"vectorized_elementwise_kernel",
+                r"elementwise_kernel",
+                r"gpu_kernel_impl",
+                r"gpu_kernel_impl_nocast",
+                r"arange_cuda_out",
+                r"sin_kernel_cuda",
+                r"cos_kernel_cuda",
+                r"reciprocal_kernel_cuda",
+                r"pow_tensor_tensor_kernel",
+                r"philox",
             )
         ),
     ),
@@ -265,21 +303,6 @@ _TARGET_PATTERNS: tuple[tuple[str, tuple[re.Pattern[str], ...]], ...] = (
                 r"\bmma\b",
                 r"wmma",
                 r"epilogue",
-            )
-        ),
-    ),
-    (
-        "data_movement",
-        tuple(
-            re.compile(pattern, re.IGNORECASE)
-            for pattern in (
-                r"copy",
-                r"cast",
-                r"memcpy",
-                r"memset",
-                r"transpose",
-                r"permute",
-                r"contiguous",
             )
         ),
     ),
@@ -436,7 +459,14 @@ def _load_ncu_metric_rows(path: Path) -> list[dict[str, str]]:
     header_index = None
     for idx, line in enumerate(lines):
         lowered = line.lower()
-        if "," in line and ("metric name" in lowered or "metric value" in lowered):
+        if "," not in line:
+            continue
+        if (
+            "metric name" in lowered
+            or "metric value" in lowered
+            or "launch__kernel_name" in lowered
+            or "sm__throughput.avg.pct_of_peak_sustained_elapsed" in lowered
+        ):
             header_index = idx
             break
     if header_index is None:
@@ -474,6 +504,22 @@ def _coerce_int(row: dict[str, str], *candidate_keys: str) -> int | None:
 
 
 def _summarize_ncu_metrics(rows: list[dict[str, str]]) -> dict[str, float]:
+    if not rows:
+        return {}
+    # Newer Nsight Compute CSV exports can be "wide", with the requested metrics
+    # present as columns on each kernel row instead of a long Metric Name/Value table.
+    wide_values: dict[str, list[float]] = {}
+    for metric in CUDA_NCU_METRICS:
+        values = [value for row in rows if (value := _coerce_float(row, metric)) is not None]
+        if values:
+            wide_values[metric] = values
+    if wide_values:
+        return {
+            metric: float(statistics.median(values))
+            for metric, values in wide_values.items()
+            if values
+        }
+
     values_by_metric: dict[str, list[float]] = {}
     for row in rows:
         metric_name = row.get("Metric Name") or row.get("Metric") or row.get("Name")

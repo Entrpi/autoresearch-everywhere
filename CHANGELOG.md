@@ -29,7 +29,52 @@ On this hardware, the default canonical matched benchmark window for optimizatio
 
 ## Latest
 
-### New commit — lab: add Triton-backed CUDA attention prelude workspace — score `3` — complexity `5`
+### New commit — lab: validate CUDA deep-profile automation on GB10 — score `3` — complexity `5`
+
+**AI-identified within brief, human-shaped (3)**
+
+- Tighten CUDA trace-family parsing and document the first real GB10 deep-profile results and setup requirements.
+  - Meaning: the CUDA lab is no longer only synthetically trace-capable. It now has a real Blackwell GB10 validation path where `capture`, `trace-profile`, `auto-review`, and `deep-profile` all run successfully, and the lab’s family ranking is corrected against actual Nsight Systems output instead of the earlier false-positive `matmul_epilogue` mapping.
+  - Motivation: once host GPU counters were enabled, the remaining blocker was no longer NVIDIA tooling. It was our own parser and matching logic. The first real GB10 run showed that we were misclassifying random/fill/sin/cos setup kernels and that Nsight Compute on this host emits a wide CSV format our parser did not understand.
+  - Purpose: make the CUDA trace-first lab genuinely trustworthy on real hardware before pushing harder on trainer integration or automatic promotion.
+  - Updating `/Users/ent/Codex/autoresearch/autoresearch_cuda/lab_trace.py` so:
+    - copy/cast kernels rank under `data_movement` instead of being swallowed by `launch_fusion`
+    - generic setup/elementwise kernels rank under `launch_fusion` instead of falsely surfacing as `matmul_epilogue`
+    - `deep-profile` supports both long and wide Nsight Compute CSV formats
+  - Updating `README.md` and `docs/kernel-lab.md` so the docs now record:
+    - the real GB10 result (`launch_fusion` about `65.4%`, `data_movement` about `34.6%`, dominant issue `sync-bound`)
+    - the current promotion state (`launch_fusion` ready for a real CUDA workspace, `data_movement` still blocked on manual review because deep diagnosis is weak/mixed)
+    - the host-side setup needed for full CUDA profiling (`NVreg_RestrictProfilingToAdminUsers=0`, reboot, and `--cap-add=SYS_ADMIN` in the container path)
+
+**Grounding**
+
+- Files:
+  - `CHANGELOG.md`
+  - `README.md`
+  - `docs/kernel-lab.md`
+  - `autoresearch_cuda/lab_trace.py`
+- Validation:
+  - `python3 -m py_compile autoresearch_cuda/lab_trace.py`
+  - real GB10 `deep-profile` rerun for `data_movement` after enabling GPU counters and patching wide-CSV parsing:
+    - `status=ok`
+    - `diagnosis=mixed`
+    - `confidence=0.45`
+  - real GB10 `deep-profile` for `launch_fusion`
+  - real GB10 `evidence` / `promotion-check` on both `launch_fusion` and `data_movement`
+  - `python3 tools/changelog_scores.py --group-by entry --format csv --include-latest --verify`
+- Measurements:
+  - Real GB10 trace-profile after the matcher fix:
+    - `launch_fusion`: `65.44129853361615%`
+    - `data_movement`: `34.55870146638384%`
+    - dominant issue: `sync-bound`
+  - Real GB10 deep-profile for `data_movement`:
+    - `sm__throughput.avg.pct_of_peak_sustained_elapsed`: `1.59`
+    - `smsp__warps_active.avg.pct_of_peak_sustained_active`: `91.88`
+    - diagnosis: `mixed`
+
+## Committed History
+
+### March 12, 2026 — `0f3d248` — lab: add Triton-backed CUDA attention prelude workspace — score `3` — complexity `5`
 
 **AI-identified within brief, human-shaped (3)**
 
@@ -57,8 +102,6 @@ On this hardware, the default canonical matched benchmark window for optimizatio
   - `python3 tools/changelog_scores.py --group-by entry --format csv --include-latest --verify`
 - Measurements:
   - On this Apple machine, the new Triton-optional starter workspace still degrades cleanly to `missing-runtime` because PyTorch/CUDA are unavailable.
-
-## Committed History
 
 ### March 12, 2026 — `bbc9a01` — lab: add Triton-backed CUDA fused MLP workspace — score `3` — complexity `5`
 

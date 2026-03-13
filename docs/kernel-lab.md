@@ -185,6 +185,25 @@ The point of this first CUDA slice is different from the MLX slice:
 - MLX proves the end-to-end lab workflow, but its serious trace tooling is still GUI/manual
 - CUDA is where the repo can start automating trace review in earnest
 
+That trace-first CUDA path is now grounded on a real GB10 system, not just synthetic artifacts. The first full Blackwell GB10 run validated:
+
+- real trainer smoke with installed FlashAttention
+- real Nsight Systems capture
+- real `trace-profile` / `auto-review`
+- real Nsight Compute `deep-profile` once host GPU counters were enabled
+- real starter workspace `bench` / `verify`
+
+The first grounded GB10 trace currently says:
+
+- dominant issue: `sync-bound`
+- `launch_fusion` accounts for about `65.4%` of observed CUDA kernel time
+- `data_movement` accounts for about `34.6%`
+
+The first deeper diagnoses are both still weak or mixed, which is why the lab keeps promotion conservative:
+
+- `launch_fusion` can move into a real CUDA workspace
+- `data_movement` has a correct workspace and real GB10 bench/verify results, but still lands in `needs-manual-cuda-review` because the deeper diagnosis is not strong enough yet
+
 So the first CUDA lab commands are:
 
 ```bash
@@ -262,6 +281,21 @@ The first Triton-backed CUDA workspace slice is intentionally narrow:
 - the CUDA starter catalog is still intentionally narrow: each Triton-backed target accelerates one honest seam inside the larger path rather than pretending the whole surrounding block is already a Triton-native rewrite
 
 `norm`, `logits_softcap`, `loss_prelude`, `matmul_epilogue`, `fused_mlp`, `attention_prelude`, `value_embed_gate`, `rope_qk_fused`, `launch_fusion`, and `data_movement` currently have direct CUDA trainer-side hooks. They are the CUDA targets that can now move past workspace-local evidence into real `integration-ab` and `integration-suite` runs.
+
+## CUDA profiling setup notes
+
+For full CUDA profiling, the host must allow GPU performance counters. If `deep-profile` fails with `ERR_NVGPUCTRPERM`, the usual Linux/NVIDIA fix is:
+
+```bash
+echo 'options nvidia NVreg_RestrictProfilingToAdminUsers=0' | sudo tee /etc/modprobe.d/99-nvidia-profiling.conf
+sudo update-initramfs -u
+sudo reboot
+grep RmProfilingAdminOnly /proc/driver/nvidia/params
+```
+
+After reboot, `RmProfilingAdminOnly: 0` means the host is configured correctly. In our container setup, adding `--cap-add=SYS_ADMIN` to the Docker run also helped ensure `ncu` could collect metrics cleanly.
+
+One practical note from the GB10 validation: newer Nsight Compute CSV exports can come back in a wide-table format instead of the older long `Metric Name` / `Metric Value` format. The CUDA lab now supports both, because the first real GB10 `deep-profile` surfaced exactly that parser mismatch.
 
 The intended first CUDA trainer-side loop is:
 
