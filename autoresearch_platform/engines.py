@@ -146,6 +146,9 @@ class TrainingEngine(Protocol):
     def local_batch_candidates(self, preset: str, *, seq_len: int) -> list[tuple[int, int]]:
         ...
 
+    def batch_profile_candidates(self, preset: str, *, seq_len: int) -> list[tuple[int, int]]:
+        ...
+
     def calibration_signatures(self) -> dict[str, str | None]:
         ...
 

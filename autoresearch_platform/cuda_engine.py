@@ -134,13 +134,18 @@ class CUDAEngine:
                 f"device_batch_size={resolved.device_batch_size}"
             )
 
-        resolved_device_batch, resolved_total_batch = self._short_probe_batch_shape(
-            seq_len=resolved.seq_len,
-            device_batch_size=resolved.device_batch_size,
-            total_batch_size=resolved.total_batch_size,
-            time_budget=resolved.time_budget,
-            benchmark_skip_eval=benchmark_skip_eval,
-        )
+        explicit_batch_shape = device_batch_size is not None or total_batch_size is not None
+        if explicit_batch_shape:
+            resolved_device_batch = resolved.device_batch_size
+            resolved_total_batch = resolved.total_batch_size
+        else:
+            resolved_device_batch, resolved_total_batch = self._short_probe_batch_shape(
+                seq_len=resolved.seq_len,
+                device_batch_size=resolved.device_batch_size,
+                total_batch_size=resolved.total_batch_size,
+                time_budget=resolved.time_budget,
+                benchmark_skip_eval=benchmark_skip_eval,
+            )
         grad_accum_steps = self._infer_grad_accum(
             resolved.seq_len,
             resolved_device_batch,
@@ -272,6 +277,26 @@ class CUDAEngine:
             base_device_batch,
         })
         grad_accum_candidates = (1, 2)
+        combos: list[tuple[int, int]] = []
+        for device_batch in device_batches:
+            tokens_per_fwdbwd = seq_len * device_batch
+            if tokens_per_fwdbwd <= 0:
+                continue
+            for grad_accum in grad_accum_candidates:
+                combos.append((device_batch, tokens_per_fwdbwd * grad_accum))
+        return sorted(set(combos))
+
+    def batch_profile_candidates(self, preset: str, *, seq_len: int) -> list[tuple[int, int]]:
+        value = CUDA_PRESETS[preset]
+        base_device_batch = value.device_batch_size
+        device_batches = sorted(
+            {
+                max(8, base_device_batch // 2),
+                base_device_batch,
+                base_device_batch * 2,
+            }
+        )
+        grad_accum_candidates = (1, 2, 4)
         combos: list[tuple[int, int]] = []
         for device_batch in device_batches:
             tokens_per_fwdbwd = seq_len * device_batch

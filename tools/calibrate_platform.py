@@ -38,7 +38,7 @@ except Exception:  # pragma: no cover - exercised on non-MLX hosts
     HAS_MLX_CALIBRATION_SUPPORT = False
 
 M5_REFERENCE_DEFAULT_PRESET = "m5-small"
-PLATFORM_CALIBRATION_SCHEMA_VERSION = 2
+PLATFORM_CALIBRATION_SCHEMA_VERSION = 3
 
 MODE_FAST = "fast"
 MODE_FULL = "full"
@@ -513,6 +513,55 @@ def classify_zones(*, presets: list[str], candidate: RankedProbe, probe_by_prese
                 "quality_delta": quality_delta,
             }
     return zones
+
+
+def choose_batch_profile_anchor_preset(engine: TrainingEngine, presets: list[str]) -> str:
+    non_reference = [preset for preset in presets if preset != engine.reference_preset]
+    if not non_reference:
+        return presets[0]
+    if len(non_reference) >= 2:
+        return non_reference[1]
+    return non_reference[0]
+
+
+def run_batch_profile(
+    *,
+    engine: TrainingEngine,
+    preset: str,
+    time_budget: float,
+    logs_dir: Path,
+) -> list[ProbeResult]:
+    preset_config = engine.preset_catalog()[preset]
+    rows: list[ProbeResult] = []
+    for device_batch, total_batch in engine.batch_profile_candidates(preset, seq_len=preset_config.seq_len):
+        tokens_per_fwdbwd = preset_config.seq_len * device_batch
+        if total_batch % tokens_per_fwdbwd != 0:
+            continue
+        rows.append(
+            run_train_probe(
+                engine=engine,
+                preset=preset,
+                time_budget=time_budget,
+                logs_dir=logs_dir,
+                stage="batch-profile",
+                benchmark_skip_eval=True,
+                seq_len=preset_config.seq_len,
+                window_pattern=preset_config.window_pattern,
+                device_batch_size=device_batch,
+                total_batch_size=total_batch,
+                no_checkpoint=True,
+            )
+        )
+    return rows
+
+
+def apply_batch_profile(*, seq_len: int, batch_profile: ProbeResult) -> tuple[int, int, int]:
+    device_batch_size = batch_profile.device_batch_size
+    tokens_per_fwdbwd = seq_len * device_batch_size
+    target_total_tokens = batch_profile.total_batch_size
+    grad_accum_steps = max(1, round(target_total_tokens / max(tokens_per_fwdbwd, 1)))
+    total_batch_size = tokens_per_fwdbwd * grad_accum_steps
+    return device_batch_size, total_batch_size, grad_accum_steps
 
 
 def run_local_search(
@@ -1104,12 +1153,61 @@ def run_platform_calibration(args) -> dict:
     if not ranking_presets:
         raise RuntimeError("No successful presets were found during the coarse envelope.")
 
+    batch_profile_probe: ProbeResult | None = None
+    batch_profile_time_budget = min(5.0, ranking_time_budget)
+    batch_profile_overrides: dict[str, tuple[int, int]] = {}
+    if engine.capabilities.supports_local_search:
+        batch_profile_anchor = choose_batch_profile_anchor_preset(engine, ranking_presets)
+        batch_profile_inputs = {
+            "schema_version": PLATFORM_CALIBRATION_SCHEMA_VERSION,
+            "mode": mode,
+            "anchor_preset": batch_profile_anchor,
+            "time_budget": batch_profile_time_budget,
+        }
+        batch_profile_phase = load_phase_if_matching(output_dir, "batch_profile", batch_profile_inputs, force=args.force)
+        if batch_profile_phase is None:
+            batch_profile_rows = run_batch_profile(
+                engine=engine,
+                preset=batch_profile_anchor,
+                time_budget=batch_profile_time_budget,
+                logs_dir=logs_dir,
+            )
+            batch_profile_probe = select_best_local_row(batch_profile_rows)
+            batch_profile_phase = save_phase(
+                output_dir,
+                "batch_profile",
+                inputs=batch_profile_inputs,
+                payload={
+                    "time_budget": batch_profile_time_budget,
+                    "anchor_preset": batch_profile_anchor,
+                    "rows": [asdict(row) for row in batch_profile_rows],
+                    "winner": asdict(batch_profile_probe),
+                },
+            )
+        batch_profile_probe = probe_from_dict(batch_profile_phase["payload"]["winner"])
+        for preset in ranking_presets:
+            preset_config = engine.preset_catalog()[preset]
+            device_batch_size, total_batch_size, _ = apply_batch_profile(
+                seq_len=preset_config.seq_len,
+                batch_profile=batch_profile_probe,
+            )
+            batch_profile_overrides[preset] = (device_batch_size, total_batch_size)
+
     ranking_inputs = {
         "schema_version": PLATFORM_CALIBRATION_SCHEMA_VERSION,
         "mode": mode,
         "presets": ranking_presets,
         "time_budget": ranking_time_budget,
         "hardware_key": hardware.hardware_key,
+        "batch_profile": (
+            {
+                "anchor_preset": batch_profile_phase["payload"]["anchor_preset"],
+                "device_batch_size": batch_profile_probe.device_batch_size,
+                "total_batch_size": batch_profile_probe.total_batch_size,
+            }
+            if batch_profile_probe is not None
+            else None
+        ),
     }
     ranking_phase = load_phase_if_matching(output_dir, "candidate_ranking", ranking_inputs, force=args.force)
     if ranking_phase is None:
@@ -1121,6 +1219,8 @@ def run_platform_calibration(args) -> dict:
                 logs_dir=logs_dir,
                 stage="ranking",
                 benchmark_skip_eval=False,
+                device_batch_size=batch_profile_overrides.get(preset, (None, None))[0],
+                total_batch_size=batch_profile_overrides.get(preset, (None, None))[1],
                 no_checkpoint=True,
             )
             for preset in ranking_presets
@@ -1365,6 +1465,23 @@ def run_platform_calibration(args) -> dict:
             "rows": [ranked_probe_to_dict(item) for item in ranked_candidates],
             "winner": ranked_probe_to_dict(candidate_family),
         },
+        "batch_profile": (
+            {
+                "time_budget": batch_profile_time_budget,
+                "anchor_preset": batch_profile_phase["payload"]["anchor_preset"],
+                "rows": [asdict(probe_from_dict(row)) for row in batch_profile_phase["payload"]["rows"]],
+                "winner": asdict(batch_profile_probe),
+                "overrides": {
+                    preset: {
+                        "device_batch_size": override[0],
+                        "total_batch_size": override[1],
+                    }
+                    for preset, override in batch_profile_overrides.items()
+                },
+            }
+            if batch_profile_probe is not None
+            else None
+        ),
         "local_search": {
             "time_budget": local_search_time_budget,
             "rows": [asdict(row) for row in local_rows],

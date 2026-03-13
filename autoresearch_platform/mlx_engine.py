@@ -276,6 +276,9 @@ class MLXEngine:
                 combos.append((device_batch, total_batch))
         return sorted(set(combos))
 
+    def batch_profile_candidates(self, preset: str, *, seq_len: int) -> list[tuple[int, int]]:
+        return self.local_batch_candidates(preset, seq_len=seq_len)
+
     def calibration_signatures(self) -> dict[str, str | None]:
         return {
             "eval_semantics_signature": current_eval_semantics_signature(),

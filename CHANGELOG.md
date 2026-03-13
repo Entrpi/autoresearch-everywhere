@@ -29,37 +29,42 @@ On this hardware, the default canonical matched benchmark window for optimizatio
 
 ## Latest
 
-### New commit — cuda/eval: trust CUDA runtime eval calibration across tuned batch shapes — score `2`
+### New commit — calibration: add batch-profile-first hardware normalization to bring-up — score `2`
 
 **AI-identified within brief, human-approved (2)**
 
-- Relax CUDA runtime eval-policy trust so it keys off model shape on known hardware instead of rejecting a calibration row just because local search picked a different training batch split.
-  - Meaning: CUDA runtime eval policy now treats `seq_len`, `depth`, and `window_pattern` as the compatibility boundary for a preset family, while ignoring `device_batch_size` and `total_batch_size` differences that only affect how the same model family is scheduled. That allows a tuned platform default like the GB10 `m5-small` candidate to reuse the seeded CUDA eval ladder even though the shipped preset batch is still different.
-  - Motivation: after the GB10 FA4 bring-up completed, real trainer runs were still falling back to `shape-fallback` because the runtime demanded exact training-batch equality with the seeded calibration row. That was too strict for the actual question the eval ladder is trying to answer and would have kept CUDA eval policy permanently brittle around local-search results.
-  - Purpose: make CUDA runtime eval selection behave like a real platform-calibration system by trusting the calibrated eval ladder for the same model family on the same hardware, even when batch tuning evolves separately.
+- Add a batch-profile phase ahead of preset ranking so bring-up compares preset families under a hardware-shaped batch regime instead of each family's shipped default split.
+  - Meaning: `calibrate.py` now runs a dedicated `batch-profile` phase before candidate ranking. It picks an anchor preset for the engine, sweeps a small grid of `(device_batch_size, total_batch_size)` pairs on that anchor, chooses the best short-run hardware batch profile, and then projects that profile across the ranking stage before doing the existing local search inside the winning family. The CUDA engine also now respects explicit batch-shape overrides during short probes instead of silently re-normalizing them away.
+  - Motivation: on the M5 side we repeatedly found that machine batch and total-batch behavior were closer to hardware constants than preset-family constants. The first GB10 FA4 bring-up that selected `m5-small` also suggested the same problem on CUDA: preset ranking was still being done at each family's shipped batch shape, which could bias the comparison before local search ever had a chance to help.
+  - Purpose: make platform bring-up compare families closer to their local efficient plateau on a given machine, rather than comparing default batch splits that may be artifacts of one reference machine or an older tuning pass.
 
 **Grounding**
 
 - Files:
   - `CHANGELOG.md`
-  - `autoresearch_cuda/eval_policy.py`
-  - `autoresearch_cuda/train.py`
   - `autoresearch_platform/cuda_engine.py`
+  - `autoresearch_platform/engines.py`
+  - `autoresearch_platform/mlx_engine.py`
+  - `tools/calibrate_platform.py`
 - Validation:
-  - `python3 -m py_compile autoresearch_cuda/train.py autoresearch_cuda/eval_policy.py autoresearch_platform/cuda_engine.py`
-  - real GB10 FA4-backed trainer probe:
-    - `python train.py --engine cuda --preset m5-small --time-budget 5 --no-checkpoint --no-compile`
+  - `python3 -m py_compile autoresearch_platform/engines.py autoresearch_platform/mlx_engine.py autoresearch_platform/cuda_engine.py tools/calibrate_platform.py`
+  - real GB10 FA4-backed fast bring-up rerun completed through the new `batch-profile` phase and wrote:
+    - `batch_profile.json`
+    - `candidate_ranking.json`
+    - `report.json`
 - Measurements:
-  - on real GB10 + FA4, `m5-small` now resolves:
-    - `eval_calibration_status=calibrated-limited`
-    - `canonical_rung=cheap`
-    - `eval_calibration_effective_confidence=seed-single-checkpoint`
-    - `eval_calibration_limited_by=confidence`
-  - same run completed with:
-    - `val_bpb=2.248036`
-    - `eval_seconds=0.8`
-    - `steady_state_tok_per_sec=138262.9`
-    - `resolved_attention_backend=installed:flash_attn.flash_attn_interface`
+  - first real GB10 batch-profile sweep (anchor `m5-small`, `5s` probes) tested:
+    - `db=16 tb=8192` -> `146502.8 tok/s`
+    - `db=16 tb=16384` -> `152054.9 tok/s`
+    - `db=32 tb=16384` -> `151522.6 tok/s`
+    - `db=32 tb=32768` -> `154377.9 tok/s`
+  - current winner from that first sweep:
+    - `device_batch_size=32`
+    - `total_batch_size=32768`
+  - the resulting GB10 ranking stage under that normalized batch profile currently gives:
+    - `m5-tiny`: `val_bpb=2.172939`, `235839.5 tok/s`
+    - `m5-small`: `val_bpb=2.183708`, `153599.1 tok/s`
+  - this is the first evidence that batch-profile-first ranking can materially change family ordering on CUDA, and it also shows the current sweep range is probably still too narrow for Blackwell.
 
 ## Committed History
 
