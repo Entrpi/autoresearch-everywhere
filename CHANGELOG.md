@@ -29,7 +29,40 @@ On this hardware, the default canonical matched benchmark window for optimizatio
 
 ## Latest
 
-### New commit — docs: add a kernel-lab roadmap toward whole attention backends — score `4` — complexity `5`
+### New commit — cuda: add GB10-compatible attention fallback and shared summary parsing — score `3` — complexity `5`
+
+**AI-identified within brief, human-shaped (3)**
+
+- Make the CUDA trainer resolve real FlashAttention implementations more flexibly and fall back cleanly when they are unavailable, while moving trainer-summary parsing into one shared module.
+  - Meaning: the CUDA trainer no longer assumes a single packaged FlashAttention path. It now tries the installed `flash_attn.flash_attn_interface` path first, then the older `hopper.flash_attn_interface`, then the repo-local `kernels` package, and finally falls back to PyTorch SDPA with a local-window causal mask. At the same time, the `parse_summary` helper is no longer duplicated inside the eval-calibration tooling; it now lives in `autoresearch_platform/summary.py` and is reused by both MLX and CUDA platform code.
+  - Motivation: the real GB10 validation run used FlashAttention 4 from the SM120-support PR, which imports through the installed `flash_attn.flash_attn_interface` path rather than the older repo-assumed layout. Without this fallback stack, the trainer stayed artificially brittle even after the GB10 environment was otherwise working. The duplicated summary parser was also an unnecessary divergence across platform tooling.
+  - Purpose: keep the CUDA trainer runnable across real packaged FlashAttention variants on Blackwell/GB10 and simplify the shared engine/calibration code before a deeper CUDA core-loop parity push.
+  - Surfacing both the preferred attention backend and the resolved runtime backend in trainer output so GB10 runs make the actual path explicit.
+  - Repointing MLX/CUDA engine utilities and eval-calibration helpers to one shared summary parser.
+
+**Grounding**
+
+- Files:
+  - `CHANGELOG.md`
+  - `README.md`
+  - `autoresearch_cuda/train.py`
+  - `autoresearch_mlx/lab_workspace.py`
+  - `autoresearch_platform/cuda_engine.py`
+  - `autoresearch_platform/mlx_engine.py`
+  - `autoresearch_platform/summary.py`
+  - `tools/calibrate_eval_policy.py`
+- Validation:
+  - `python3 -m py_compile autoresearch_cuda/train.py autoresearch_platform/summary.py autoresearch_platform/cuda_engine.py autoresearch_platform/mlx_engine.py tools/calibrate_eval_policy.py autoresearch_mlx/lab_workspace.py`
+- Measurements:
+  - Real GB10 CUDA smoke after syncing the fallback logic:
+    - `resolved_attention_backend=installed:flash_attn.flash_attn_interface`
+    - `steady_state_tok_per_sec=245727`
+    - `peak_vram_mb=45011.5`
+    - `num_params_M=50.3`
+
+## Committed History
+
+### March 13, 2026 — `fde764c` — docs: add a kernel-lab roadmap toward whole attention backends — score `4` — complexity `5`
 
 **Human-directed, AI-shaped (4)**
 
@@ -48,8 +81,6 @@ On this hardware, the default canonical matched benchmark window for optimizatio
   - `python3 tools/changelog_scores.py --group-by entry --format csv --include-latest --verify`
 - Measurements:
   - No new runtime measurements; this was a documentation and planning update.
-
-## Committed History
 
 ### March 13, 2026 — `0c5657b` — docs: fold CUDA into the main README flow — score `4` — complexity `6`
 

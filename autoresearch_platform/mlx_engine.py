@@ -10,7 +10,8 @@ from autoresearch_mlx.calibration_signature import current_eval_semantics_signat
 from autoresearch_mlx.constants import MAX_SEQ_LEN
 from autoresearch_mlx.eval_policy import detect_current_hardware_key
 from autoresearch_mlx.train import PRESETS
-from tools.calibrate_eval_policy import default_eval_batch_size, parse_summary, run_eval_rungs
+from autoresearch_platform.summary import parse_summary
+from tools.calibrate_eval_policy import default_eval_batch_size, run_eval_rungs
 
 from .engines import EngineCapabilities, EnginePreset, HardwareFingerprint, ProbeResult
 

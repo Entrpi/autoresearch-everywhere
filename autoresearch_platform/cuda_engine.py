@@ -8,7 +8,7 @@ from pathlib import Path
 
 from autoresearch_cuda.config import CUDA_PRESETS, resolve_run_preset
 from autoresearch_cuda.runtime import detect_cuda_runtime_profile, query_nvidia_driver_version
-from tools.calibrate_eval_policy import parse_summary
+from autoresearch_platform.summary import parse_summary
 
 from .engines import EngineCapabilities, EnginePreset, HardwareFingerprint, ProbeResult
 

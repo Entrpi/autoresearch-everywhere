@@ -57,7 +57,55 @@ from autoresearch_cuda.prepare import Tokenizer, make_dataloader, evaluate_bpb
 
 cap = torch.cuda.get_device_capability()
 cuda_runtime = detect_cuda_runtime_profile(cap, device_name=torch.cuda.get_device_name())
-fa3 = get_kernel(cuda_runtime.selected_flash_attention_repo).flash_attn_interface
+
+
+def _resolve_flash_attention_interface():
+    installed_candidates = [
+        "flash_attn.flash_attn_interface",
+        "hopper.flash_attn_interface",
+    ]
+    for module_name in installed_candidates:
+        try:
+            module = __import__(module_name, fromlist=["flash_attn_func"])
+            if hasattr(module, "flash_attn_func"):
+                return module, f"installed:{module_name}"
+        except Exception:
+            continue
+    try:
+        module = get_kernel(cuda_runtime.selected_flash_attention_repo).flash_attn_interface
+        if hasattr(module, "flash_attn_func"):
+            return module, f"kernels:{cuda_runtime.selected_flash_attention_repo}"
+    except Exception:
+        pass
+    return None, "torch-sdpa"
+
+
+FLASH_ATTN_INTERFACE, RESOLVED_ATTENTION_BACKEND = _resolve_flash_attention_interface()
+
+
+def _build_local_causal_mask(seq_len: int, window_size: tuple[int, int], device: torch.device):
+    left_window, _ = window_size
+    if left_window < 0 or left_window >= seq_len:
+        return None
+    positions = torch.arange(seq_len, device=device)
+    distance = positions[:, None] - positions[None, :]
+    return (distance >= 0) & (distance < left_window)
+
+
+def attention_func(q, k, v, *, causal: bool, window_size: tuple[int, int]):
+    if FLASH_ATTN_INTERFACE is not None:
+        return FLASH_ATTN_INTERFACE.flash_attn_func(q, k, v, causal=causal, window_size=window_size)
+
+    q = q.permute(0, 2, 1, 3)
+    k = k.permute(0, 2, 1, 3)
+    v = v.permute(0, 2, 1, 3)
+    if q.size(1) != k.size(1):
+        repeat_factor = q.size(1) // k.size(1)
+        k = k.repeat_interleave(repeat_factor, dim=1)
+        v = v.repeat_interleave(repeat_factor, dim=1)
+    attn_mask = _build_local_causal_mask(q.size(2), window_size, q.device) if causal else None
+    y = F.scaled_dot_product_attention(q, k, v, attn_mask=attn_mask, is_causal=causal and attn_mask is None)
+    return y.permute(0, 2, 1, 3)
 
 # ---------------------------------------------------------------------------
 # GPT Model
@@ -159,7 +207,7 @@ class CausalSelfAttention(nn.Module):
             q, k = apply_rotary_emb(q, cos, sin), apply_rotary_emb(k, cos, sin)
             q, k = norm(q), norm(k)
 
-        y = fa3.flash_attn_func(q, k, v, causal=True, window_size=window_size)
+        y = attention_func(q, k, v, causal=True, window_size=window_size)
         overridden_y = maybe_call_integration_target("data_movement", y)
         if overridden_y is not None:
             y = overridden_y
@@ -585,8 +633,9 @@ memory_gb = device_props.total_memory / (1024**3)
 hardware_key = f"nvidia-{cuda_runtime.reference_family.family_key}-{int(round(memory_gb))}gb"
 print(f"CUDA runtime: {cuda_runtime.architecture_name}")
 print(f"CUDA reference family: {cuda_runtime.reference_family.family_name}")
-print(f"Selected attention backend: {cuda_runtime.selected_attention_backend}")
-print(f"Selected flash-attention repo: {cuda_runtime.selected_flash_attention_repo}")
+print(f"Preferred attention backend: {cuda_runtime.selected_attention_backend}")
+print(f"Resolved attention backend: {RESOLVED_ATTENTION_BACKEND}")
+print(f"Preferred flash-attention repo: {cuda_runtime.selected_flash_attention_repo}")
 
 def build_model_config(depth):
     base_dim = depth * ASPECT_RATIO
@@ -761,4 +810,5 @@ print(f"accelerator_compute_capability: {cap[0]}.{cap[1]}")
 print(f"cuda_reference_family: {cuda_runtime.reference_family.family_key}")
 if cuda_runtime.preferred_flash_attention_generation is not None:
     print(f"preferred_flash_attention_generation: {cuda_runtime.preferred_flash_attention_generation}")
-print(f"selected_flash_attention_repo: {cuda_runtime.selected_flash_attention_repo}")
+print(f"preferred_flash_attention_repo: {cuda_runtime.selected_flash_attention_repo}")
+print(f"resolved_attention_backend: {RESOLVED_ATTENTION_BACKEND}")

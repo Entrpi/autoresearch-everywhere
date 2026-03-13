@@ -42,7 +42,7 @@ from autoresearch_mlx.lab_profile import (
 )
 from autoresearch_mlx.lab_trace import capture_workspace_trace
 from autoresearch_platform.platform_defaults import load_platform_default_cache
-from tools.calibrate_eval_policy import parse_summary
+from autoresearch_platform.summary import parse_summary
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
