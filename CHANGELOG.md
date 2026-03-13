@@ -44,7 +44,7 @@ On this hardware, the default canonical matched benchmark window for optimizatio
   - Updating `README.md` and `docs/kernel-lab.md` so the docs now record:
     - the real GB10 result (`launch_fusion` about `65.4%`, `data_movement` about `34.6%`, dominant issue `sync-bound`)
     - the current promotion state (`launch_fusion` ready for a real CUDA workspace, `data_movement` still blocked on manual review because deep diagnosis is weak/mixed)
-    - the host-side setup needed for full CUDA profiling (`NVreg_RestrictProfilingToAdminUsers=0`, reboot, and `--cap-add=SYS_ADMIN` in the container path)
+    - the host-side setup needed for full CUDA profiling (`NVreg_RestrictProfilingToAdminUsers=0`, reboot, and `--cap-add=SYS_ADMIN` in the container path), the exact FlashAttention 4 install source used on GB10 via the SM120-support PR, and the concrete container snapshot used for the validation run (the local March 1, 2026 image of `vllm-node-tf5:latest`, image ID `sha256:c1ba011f841cacdfc234e5b754b1cb5e8120b8d4bd6b896c6703b28a44ba185a`, source repo `eugr/spark-vllm-docker`, best available source pin `8f11e7e5edd8c964f7a44fbd29f0c86a8df49a82`, NVIDIA PyTorch `26.01` build `256811084` / ref `9fa5c48351cf93ac6e6972ca113a7e3c54675a76`, PyTorch `2.10.0a0+a36e1d39eb.nv26.01.42222806`, CUDA `13.1`)
 
 **Grounding**
 

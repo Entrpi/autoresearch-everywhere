@@ -169,11 +169,23 @@ CUDA now has the first trace-first automation path too, and a small first starte
 
 On a real GB10 system, that flow is now validated through:
 
-- real trainer smoke with installed FlashAttention on `blackwell-gb10`
+- real trainer smoke with installed FlashAttention on `blackwell-gb10` via [FA4 PR](https://github.com/Dao-AILab/flash-attention/pull/2268)
 - real Nsight Systems capture
 - real `trace-profile` / `auto-review`
 - real Nsight Compute `deep-profile` once host GPU counters are enabled
 - real CUDA workspace `bench` / `verify`
+
+The GB10 validation here used eugr's vLLM container image, tracked as the local March 1, 2026 snapshot of:
+
+- `vllm-node-tf5:latest`
+- image ID `sha256:c1ba011f841cacdfc234e5b754b1cb5e8120b8d4bd6b896c6703b28a44ba185a`
+- source repo: [`eugr/spark-vllm-docker`](https://github.com/eugr/spark-vllm-docker)
+- best available source pin for that build date: `8f11e7e5edd8c964f7a44fbd29f0c86a8df49a82` (the repo commit at HEAD before the local image creation timestamp)
+- NVIDIA PyTorch `26.01` image family (`com.nvidia.build.id=256811084`, `com.nvidia.build.ref=9fa5c48351cf93ac6e6972ca113a7e3c54675a76`)
+- PyTorch `2.10.0a0+a36e1d39eb.nv26.01.42222806`
+- CUDA runtime `13.1`
+
+with the repo mounted into the container and `--cap-add=SYS_ADMIN` enabled for full profiling.
 
 The first grounded GB10 trace currently says:
 
@@ -236,7 +248,7 @@ For CUDA, the split is similar but the trace side is more automatable:
 - on non-CUDA machines or machines without PyTorch/CUDA installed, those CUDA integration commands return structured `missing-runtime` results instead of pretending the target is promotable
 - the long-term goal is that CUDA trace review becomes automated-by-default, with GUI inspection as the escalation path rather than the first step
 
-For full CUDA profiling, the host also has to allow GPU performance counters. On Linux/NVIDIA hosts, that means enabling unrestricted profiling in the NVIDIA driver, then rebooting, and in our container setup it is safest to add `--cap-add=SYS_ADMIN` as well. Without that, `deep-profile` will fail with `ERR_NVGPUCTRPERM` even if `ncu` is installed.
+For full CUDA profiling, the host also has to allow GPU performance counters. On Linux/NVIDIA hosts, that means enabling unrestricted profiling in the NVIDIA driver, then rebooting, and in our GB10 container setup it was safest to add `--cap-add=SYS_ADMIN` as well. Without that, `deep-profile` will fail with `ERR_NVGPUCTRPERM` even if `ncu` is installed.
 
 The lab also keeps a small evidence ledger at `results/kernel_lab/ledger.jsonl`. That lets later profiles and plans see whether a target is still unexplored, only verified, trace-backed, or ready for an integration A/B instead of treating every target as a fresh idea.
 

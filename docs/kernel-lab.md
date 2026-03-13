@@ -187,11 +187,23 @@ The point of this first CUDA slice is different from the MLX slice:
 
 That trace-first CUDA path is now grounded on a real GB10 system, not just synthetic artifacts. The first full Blackwell GB10 run validated:
 
-- real trainer smoke with installed FlashAttention
+- real trainer smoke with installed FlashAttention via [FA4 PR](https://github.com/Dao-AILab/flash-attention/pull/2268)
 - real Nsight Systems capture
 - real `trace-profile` / `auto-review`
 - real Nsight Compute `deep-profile` once host GPU counters were enabled
 - real starter workspace `bench` / `verify`
+
+The concrete environment for that validation was eugr's vLLM container image, tracked as the local March 1, 2026 snapshot of:
+
+- `vllm-node-tf5:latest`
+- image ID `sha256:c1ba011f841cacdfc234e5b754b1cb5e8120b8d4bd6b896c6703b28a44ba185a`
+- source repo: [`eugr/spark-vllm-docker`](https://github.com/eugr/spark-vllm-docker)
+- best available source pin for that build date: `8f11e7e5edd8c964f7a44fbd29f0c86a8df49a82` (the repo commit at HEAD before the local image creation timestamp)
+- NVIDIA PyTorch `26.01` image family (`com.nvidia.build.id=256811084`, `com.nvidia.build.ref=9fa5c48351cf93ac6e6972ca113a7e3c54675a76`)
+- PyTorch `2.10.0a0+a36e1d39eb.nv26.01.42222806`
+- CUDA runtime `13.1`
+
+with the repo bind-mounted into `/workspace/autoresearch-everywhere`.
 
 The first grounded GB10 trace currently says:
 
@@ -294,6 +306,20 @@ grep RmProfilingAdminOnly /proc/driver/nvidia/params
 ```
 
 After reboot, `RmProfilingAdminOnly: 0` means the host is configured correctly. In our container setup, adding `--cap-add=SYS_ADMIN` to the Docker run also helped ensure `ncu` could collect metrics cleanly.
+
+The GB10 runs here were executed in the `vllm-node-tf5:latest` container, roughly like:
+
+```bash
+docker run --gpus all \
+  --cap-add=SYS_ADMIN \
+  --ipc=host \
+  --shm-size=16g \
+  --rm \
+  -v /home/ent/autoresearch-everywhere:/workspace/autoresearch-everywhere \
+  -v /home/ent/.cache/autoresearch:/root/.cache/autoresearch \
+  -w /workspace/autoresearch-everywhere \
+  vllm-node-tf5:latest ...
+```
 
 One practical note from the GB10 validation: newer Nsight Compute CSV exports can come back in a wide-table format instead of the older long `Metric Name` / `Metric Value` format. The CUDA lab now supports both, because the first real GB10 `deep-profile` surfaced exactly that parser mismatch.
 
