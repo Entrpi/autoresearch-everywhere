@@ -114,184 +114,60 @@ If you want more detail about the calibration logic beneath those defaults, see 
 
 ## Kernel Lab
 
-The repo now also has a top-level `kernel-lab.py` entrypoint for backend-specific kernel work.
+Kernel-lab is the safe workshop for low-level speedups that are too risky to drop straight into the main trainer.
 
-Kernel-lab is the workshop for trying low-level speedups safely.
+Its job is simple:
 
-Training spends time in lots of small repeated operations: norms, reshapes, rotary embedding, attention setup, loss-side reductions, and related path glue. Some of those are good candidates for custom kernels, but dropping kernel experiments straight into the main trainer is risky. A candidate can be correct but irrelevant, fast in isolation but useless end to end, or only beneficial on one machine.
+- find repeated backend-level operations that look worth optimizing
+- open a small mutable workspace for one target
+- prove the candidate in isolation with fixed bench and verify steps
+- gather real backend evidence
+- only then test it against the real trainer and decide whether it deserves promotion
 
-Kernel-lab exists to separate:
+That workflow is shared across backends even though the substrate changes:
 
-- "this looks like a promising low-level optimization"
-- "this is proven enough to earn a place in the real training path"
+- Metal kernels on Apple GPUs
+- Triton/CUDA kernels on NVIDIA
+- future ROCm or other accelerator-specific paths later
 
-So the flow is deliberately staged:
+If you already know tools like CUTLASS or Triton, the easiest framing is: those are implementation substrates; kernel-lab is the workflow layer above them that decides what is worth pursuing, how it is measured, and when it is strong enough to enter the real training path.
 
-- profile likely targets
-- create a small mutable workspace for one target
-- benchmark and verify it in isolation
-- capture a real backend trace when needed
-- then test it against the real trainer before considering promotion
+What it can do today:
 
-That workflow is meant to generalize across backends even though the kernel substrate changes. Metal kernels on Apple GPUs, Triton/CUDA kernels on NVIDIA, HIP/ROCm kernels on AMD, and future accelerator-specific paths can all plug into the same outer loop.
+- MLX:
+  - broad starter-target catalog
+  - workspace bench/verify flow
+  - Metal capture artifacts
+  - trainer-side integration A/B and promotion checks
+- CUDA:
+  - trace-first workflow with Nsight Systems and Nsight Compute
+  - starter Triton-backed workspaces for narrow target families
+  - real GB10 validation with installed FlashAttention via [FA4 PR](https://github.com/Dao-AILab/flash-attention/pull/2268)
+- Shared:
+  - one top-level entrypoint: `kernel-lab.py`
+  - persistent evidence ledger in `results/kernel_lab/ledger.jsonl`
+  - orchestration that reuses prior evidence instead of treating every target as a fresh idea
 
-If you already know tools like CUTLASS or Triton, the easiest framing is: those are implementation substrates; kernel-lab is the workflow layer above them that decides which kernel opportunities are worth pursuing, how they are benchmarked, how trace evidence is collected, and what it takes to promote them into the actual training engine.
+Typical MLX path:
 
-Today the lab is still MLX-deep first, but CUDA now has the first trace-first automation path:
+```bash
+uv run kernel-lab.py --engine mlx profile --preset m5-balanced --top-k 8 --output /tmp/mlx-profile.json
+uv run kernel-lab.py --engine mlx orchestrate --profile /tmp/mlx-profile.json --workspace-root /tmp/mlx-lab
+```
 
-- `uv run kernel-lab.py --engine mlx list-targets`
-- `uv run kernel-lab.py --engine mlx profile --preset m5-balanced --top-k 8 --output /tmp/mlx-profile.json`
-- `uv run kernel-lab.py --engine mlx orchestrate --profile /tmp/mlx-profile.json --workspace-root /tmp/mlx-lab`
-- `uv run kernel-lab.py --engine mlx evidence --target block_prelude --preset m5-balanced`
-- `uv run kernel-lab.py --engine mlx promotion-check --target block_prelude`
-- `uv run kernel-lab.py --engine mlx init --target rmsnorm --workspace /tmp/mlx-rmsnorm-lab`
-- `uv run kernel-lab.py --engine mlx bench --workspace /tmp/mlx-rmsnorm-lab`
-- `uv run kernel-lab.py --engine mlx verify --workspace /tmp/mlx-rmsnorm-lab --quick`
-- `uv run kernel-lab.py --engine mlx capture --workspace /tmp/mlx-rmsnorm-lab --output /tmp/mlx-rmsnorm-lab.gputrace --quick`
-- `uv run kernel-lab.py --engine mlx review-trace --workspace /tmp/mlx-rmsnorm-lab --metadata /tmp/mlx-rmsnorm-lab.metadata.json --relevance high`
-- `uv run kernel-lab.py --engine mlx integration-ab --workspace /tmp/mlx-rmsnorm-lab --time-budget 20 --benchmark-skip-eval --no-checkpoint`
+Typical CUDA path:
 
-CUDA now has the first trace-first automation path too, and a small first starter-workspace layer on top of it:
+```bash
+uv run kernel-lab.py --engine cuda capture --preset upstream --time-budget 20 --output /tmp/cuda-upstream-trace
+uv run kernel-lab.py --engine cuda trace-profile --metadata /tmp/cuda-upstream-trace.metadata.json --output /tmp/cuda-upstream-trace.profile.json
+```
 
-- `uv run kernel-lab.py --engine cuda list-targets`
-- `uv run kernel-lab.py --engine cuda capture --preset upstream --time-budget 20 --output /tmp/cuda-upstream-trace`
-- `uv run kernel-lab.py --engine cuda trace-profile --metadata /tmp/cuda-upstream-trace.metadata.json --output /tmp/cuda-upstream-trace.profile.json`
-- `uv run kernel-lab.py --engine cuda auto-review --trace-profile /tmp/cuda-upstream-trace.profile.json`
-- `uv run kernel-lab.py --engine cuda deep-profile --trace-profile /tmp/cuda-upstream-trace.profile.json --rank 1`
-- `uv run kernel-lab.py --engine cuda evidence --target launch_fusion --preset upstream`
-- `uv run kernel-lab.py --engine cuda orchestrate --trace-profile /tmp/cuda-upstream-trace.profile.json --workspace-root /tmp/cuda-lab`
-- `uv run kernel-lab.py --engine cuda promotion-check --target launch_fusion --preset upstream`
-- `uv run kernel-lab.py --engine cuda extract --profile /tmp/cuda-upstream-trace.profile.json --workspace /tmp/cuda-lab/launch_fusion --rank 1`
-- `uv run kernel-lab.py --engine cuda bench --workspace /tmp/cuda-lab/launch_fusion --device cuda --quick`
-- `uv run kernel-lab.py --engine cuda verify --workspace /tmp/cuda-lab/launch_fusion --device cuda --quick`
-- `uv run kernel-lab.py --engine cuda integration-ab --workspace /tmp/cuda-lab/norm --preset upstream --time-budget 20 --benchmark-skip-eval --no-checkpoint`
-- `uv run kernel-lab.py --engine cuda integration-suite --workspace /tmp/cuda-lab/norm --preset upstream --time-budget 20 --repeats 2 --benchmark-skip-eval --no-checkpoint`
+The practical difference between the backends today is:
 
-On a real GB10 system, that flow is now validated through:
+- MLX has the deeper workspace and trainer-integration loop
+- CUDA has the stronger automated trace-review path
 
-- real trainer smoke with installed FlashAttention on `blackwell-gb10` via [FA4 PR](https://github.com/Dao-AILab/flash-attention/pull/2268)
-- real Nsight Systems capture
-- real `trace-profile` / `auto-review`
-- real Nsight Compute `deep-profile` once host GPU counters are enabled
-- real CUDA workspace `bench` / `verify`
-
-The GB10 validation here used eugr's vLLM container image, tracked as the local March 1, 2026 snapshot of:
-
-- `vllm-node-tf5:latest`
-- image ID `sha256:c1ba011f841cacdfc234e5b754b1cb5e8120b8d4bd6b896c6703b28a44ba185a`
-- source repo: [`eugr/spark-vllm-docker`](https://github.com/eugr/spark-vllm-docker)
-- best available source pin for that build date: `8f11e7e5edd8c964f7a44fbd29f0c86a8df49a82` (the repo commit at HEAD before the local image creation timestamp)
-- NVIDIA PyTorch `26.01` image family (`com.nvidia.build.id=256811084`, `com.nvidia.build.ref=9fa5c48351cf93ac6e6972ca113a7e3c54675a76`)
-- PyTorch `2.10.0a0+a36e1d39eb.nv26.01.42222806`
-- CUDA runtime `13.1`
-
-with the repo mounted into the container and `--cap-add=SYS_ADMIN` enabled for full profiling.
-
-The first grounded GB10 trace currently says:
-
-- dominant issue: `sync-bound`
-- top ranked family: `launch_fusion` (`65.4%`)
-- second ranked family: `data_movement` (`34.6%`)
-
-And the first deeper CUDA diagnoses now work too:
-
-- `launch_fusion`: weak / mixed
-- `data_movement`: weak / mixed, with very low SM throughput and very high active-warp percentage
-
-So the current CUDA story is no longer hypothetical: the trace-first pipeline works on real Blackwell hardware, but it is still conservative about promotion when deeper evidence is weak.
-
-The lab now has two layers on purpose:
-
-- heuristic layer:
-  - `profile` ranks likely MLX kernel targets for a preset using model-aware heuristics
-  - `extract` turns a ranked profile result into a mutable workspace with saved context
-  - `orchestrate` emits the next ready command sequence for a selected target, and can now reuse an existing workspace when earlier verify/capture evidence already exists
-  - `verify` reruns the fixed harness as the promotion gate above a quick bench
-- trace layer:
-  - `capture` records a real MLX Metal trace and a metadata sidecar
-  - the `.gputrace` artifact is the truth source when a candidate starts making performance claims instead of just being an interesting idea
-  - `orchestrate --trace-metadata ...` can fold a real capture back into the next suggested workflow
-
-For CUDA, the split is similar but the trace side is more automatable:
-
-- `capture` wraps the real trainer under Nsight Systems and writes a `.nsys-rep` plus a metadata sidecar
-- `trace-profile` turns the exported Nsight reports into ranked kernel target families
-- `auto-review` classifies the run as launch-bound, sync-bound, copy-bound, kernel-dominated, or mixed
-- `deep-profile` optionally reruns the top trace-ranked family under Nsight Compute so the lab can record a more specific diagnosis such as compute-bound, bandwidth-bound, or under-occupied
-- a strong deeper diagnosis now increases rank/promotion confidence, while a weak or mixed one keeps the target in review instead of letting it drift toward promotion on timing share alone
-- `evidence` and `promotion-check` expose whether a target is still just trace-ranked, already trace-backed, ready for a starter workspace, or deprioritized by the automated review
-- `orchestrate` now consumes the trace profile plus accumulated evidence to pick the next CUDA target family to pursue, and for starter-ready families it emits real `extract` / `bench` / `verify` commands instead of just placeholder notes
-- starter CUDA workspaces currently exist for:
-  - `launch_fusion`
-  - `norm`
-  - `logits_softcap`
-  - `loss_prelude`
-- `data_movement`
-- `matmul_epilogue`
-- `attention_prelude`
-- `value_embed_gate`
-- `rope_qk_fused`
-- `fused_mlp`
-- the first Triton-backed CUDA workspace slice is intentionally narrow:
-  - `launch_fusion` now ships with an optional Triton residual-add kernel
-  - `norm` now ships with an optional Triton RMSNorm kernel
-  - `loss_prelude` now ships with an optional Triton row-wise cross-entropy-prelude kernel
-  - `logits_softcap` now ships with an optional Triton pointwise softcap kernel
-  - `value_embed_gate` now ships with an optional Triton pointwise gate-application kernel
-  - `rope_qk_fused` now ships with an optional Triton row-wise RoPE + RMSNorm kernel
-  - `fused_mlp` now ships with an optional Triton pointwise squared-ReLU activation kernel
-  - `attention_prelude` now ships with an optional Triton gate-application kernel inside the broader Q/K/V staging path
-  - `data_movement` now ships with an optional Triton copy/reshape kernel
-  - `matmul_epilogue` now ships with an optional Triton matmul+bias kernel
-  - the CUDA starter catalog is still intentionally narrow: each Triton-backed target accelerates one honest seam inside the larger path rather than pretending the whole surrounding block is already a Triton-native rewrite
-- `norm`, `logits_softcap`, `loss_prelude`, `matmul_epilogue`, `fused_mlp`, `attention_prelude`, `value_embed_gate`, `rope_qk_fused`, `launch_fusion`, and `data_movement` currently have direct CUDA trainer-side hooks, so they are the CUDA starter targets that can collect real `integration-ab` / `integration-suite` evidence today
-- on non-CUDA machines or machines without PyTorch/CUDA installed, those CUDA integration commands return structured `missing-runtime` results instead of pretending the target is promotable
-- the long-term goal is that CUDA trace review becomes automated-by-default, with GUI inspection as the escalation path rather than the first step
-
-For full CUDA profiling, the host also has to allow GPU performance counters. On Linux/NVIDIA hosts, that means enabling unrestricted profiling in the NVIDIA driver, then rebooting, and in our GB10 container setup it was safest to add `--cap-add=SYS_ADMIN` as well. Without that, `deep-profile` will fail with `ERR_NVGPUCTRPERM` even if `ncu` is installed.
-
-The lab also keeps a small evidence ledger at `results/kernel_lab/ledger.jsonl`. That lets later profiles and plans see whether a target is still unexplored, only verified, trace-backed, or ready for an integration A/B instead of treating every target as a fresh idea.
-
-The extra commands make that visible:
-
-- `evidence` summarizes the current ledger state for one target/preset or across presets
-- `promotion-check` says whether a target is still gathering evidence, ready for an end-to-end integration suite, mixed after repeated A/B runs, or already validated strongly enough to move toward a real trainer patch
-- if you omit `--preset`, `promotion-check`, `integration-ab`, and `integration-suite` use the calibrated platform default for the current device; only smoke or deliberately targeted tests should usually pin a different preset by hand
-- `review-trace` lets a human or agent record whether a trace showed strong, weak, or negligible end-to-end relevance, so ranking can move down as well as up
-- `integration-ab` now runs repeated balanced trainer-side comparisons for the subset of targets that already have direct MLX integration hooks, and promotion stays conservative until the effect is repeated and directionally stable
-- `integration-suite` takes that one step further by testing the calibrated point and the next stronger preset by default, so trainer-side evidence can survive beyond one operating point
-
-Only part of the MLX target catalog is directly wired into the trainer today. Small path targets like `logits_softcap`, `rotary_embedding`, `value_embed_gate`, `attention_prelude`, and `fused_mlp` can already run end-to-end A/B through `integration-ab` and `integration-suite`. Broader composed targets like `block_prelude` can still be profiled, verified, and traced, but they will report `needs-integration-adapter` until there is a direct training-path hook for them.
-
-That current lab exists to build the pattern, not to claim broad coverage yet. The current starter-ready MLX targets are:
-
-- `rmsnorm`
-- `layernorm`
-- `rmsnorm_backward`
-- `layernorm_backward`
-- `residual_blend`
-- `residual_rmsnorm`
-- `qk_rmsnorm`
-- `rope_qk_fused`
-- `logits_softcap`
-- `activation_pointwise`
-- `rotary_embedding`
-- `reduce`
-- `softmax`
-- `value_embed_gate`
-- `ve_lookup_reshape`
-- `attention_mask_local`
-- `proj_head_reshape`
-- `loss_logits_cast_softcap`
-- `cross_entropy_prelude`
-- `cross_entropy_full`
-- `attention_prelude`
-- `block_prelude`
-- `fused_mlp`
-
-`flash_attention` stays explicitly deferred as a first target. The long-term reason to keep the lab at the top level now is that the same outer workflow should later host Triton/CUDA, ROCm, and ANE labs without inventing a new orchestration tree each time.
-
-For the current design and scope, see [docs/kernel-lab.md](docs/kernel-lab.md).
+The detailed workflows, target catalogs, GB10 setup notes, and profiling requirements live in [docs/kernel-lab.md](docs/kernel-lab.md).
 
 ## Presets
 
@@ -400,9 +276,9 @@ Current project snapshot from [CHANGELOG.md](CHANGELOG.md):
 | Metric | Value |
 | --- | --- |
 | Mean autonomy score | `3.28 / 6` |
-| Mean complexity | `7.01 / commit` |
+| Mean complexity | `6.99 / commit` |
 | Mean score per top-level bullet | `3.34 / 6` |
-| History covered | `73` commits across `12` subsystems |
+| History covered | `74` commits across `12` subsystems |
 <!-- autonomy-golf-snapshot:end -->
 
 Refresh with:

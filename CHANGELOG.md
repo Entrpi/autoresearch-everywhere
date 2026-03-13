@@ -29,7 +29,34 @@ On this hardware, the default canonical matched benchmark window for optimizatio
 
 ## Latest
 
-### New commit — lab: validate CUDA deep-profile automation on GB10 — score `3` — complexity `5`
+### New commit — docs: tighten the kernel-lab front door — score `3` — complexity `5`
+
+**AI-identified within brief, human-shaped (3)**
+
+- Rewrite the README kernel-lab section around the user-facing workflow and capabilities story instead of the full command catalog.
+  - Meaning: the front door now explains what kernel-lab is for, what it can do on MLX and CUDA today, and how to start from it, while pushing the long command lists, GB10 setup notes, and deeper backend mechanics into the linked kernel-lab doc.
+  - Motivation: the old README section had become a detailed subsystem dump. It was accurate, but too long and too procedural for a front-door reader trying to understand whether kernel-lab is relevant to them.
+  - Purpose: make the top-level README better at selling the kernel-lab UX and current capability envelope without making users absorb the entire implementation story up front.
+  - Reframing the section around:
+    - safe kernel experimentation
+    - shared cross-backend workflow
+    - current MLX-vs-CUDA strengths
+    - one or two concrete starting commands
+  - Moving the detailed workflows and setup notes behind [docs/kernel-lab.md](/Users/ent/Codex/autoresearch/docs/kernel-lab.md).
+
+**Grounding**
+
+- Files:
+  - `CHANGELOG.md`
+  - `README.md`
+- Validation:
+  - `python3 tools/changelog_scores.py --group-by entry --format csv --include-latest --verify`
+- Measurements:
+  - No new runtime measurements; this was a documentation and framing cleanup.
+
+## Committed History
+
+### March 13, 2026 — `827b199` — docs: pin GB10 CUDA validation environment — score `3` — complexity `5`
 
 **AI-identified within brief, human-shaped (3)**
 
@@ -71,8 +98,6 @@ On this hardware, the default canonical matched benchmark window for optimizatio
     - `sm__throughput.avg.pct_of_peak_sustained_elapsed`: `1.59`
     - `smsp__warps_active.avg.pct_of_peak_sustained_active`: `91.88`
     - diagnosis: `mixed`
-
-## Committed History
 
 ### March 12, 2026 — `0f3d248` — lab: add Triton-backed CUDA attention prelude workspace — score `3` — complexity `5`
 
