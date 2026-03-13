@@ -32,12 +32,11 @@ But CUDA is still behind MLX on the core autoresearch loop itself.
 
 The largest remaining gaps are:
 
-1. no checkpoint minting or resume path through the shared engine boundary
-2. no checkpoint-backed eval calibration
-3. no runtime eval-policy ladder comparable to MLX cheap/reference/full
-4. no local-search path in platform bring-up
-5. no CUDA trainer integration evidence yet for kernel-lab targets
-6. no broad hardware validation matrix yet beyond GB10
+1. no checkpoint-backed eval calibration
+2. no runtime eval-policy ladder comparable to MLX cheap/reference/full
+3. no candidate-default promotion path through `calibrate.py --engine cuda`
+4. no CUDA trainer integration evidence yet for kernel-lab targets
+5. no broad hardware validation matrix yet beyond GB10
 
 So the shortest honest summary is:
 
@@ -120,9 +119,9 @@ These are the real parity gaps:
 
 | Area | MLX | CUDA | Gap |
 | --- | --- | --- | --- |
-| Platform bring-up | full | partial | CUDA still lacks local search, checkpoint minting, and eval calibration in the shared engine |
-| Checkpointing | full exact + async variants | none in shared engine | major gap |
-| Resume | full | none | major gap |
+| Platform bring-up | full | partial | CUDA now has local search and exact checkpoint minting/resume, but still lacks eval calibration and promoted defaults in the shared engine |
+| Checkpointing | full exact + async variants | exact sync | medium gap |
+| Resume | full | exact sync | medium gap |
 | Eval calibration | cheap/reference/full ladder | none | major gap |
 | Runtime eval policy | confidence/freshness-aware | none | major gap |
 | Local search in bring-up | yes | no | medium gap |
@@ -141,6 +140,8 @@ What is now grounded on GB10:
 
 - CUDA trainer runs successfully
 - FlashAttention 4 works from the SM120-support branch / PR
+- exact sync checkpoint minting works through the core CUDA trainer loop
+- exact resume works and restores loader position deterministically
 - `resolved_attention_backend` is correctly surfaced in trainer output
 - CUDA Nsight Systems trace capture works
 - CUDA Nsight Compute deeper profiling works when host counters are enabled
@@ -247,16 +248,13 @@ Goal:
 - get the CUDA engine to the same baseline operational posture as the pre-kernel-lab MLX path
 
 Work:
-- add local-search support to `autoresearch_platform/cuda_engine.py`
-- add checkpoint minting support through the shared engine boundary
-- add at least exact sync checkpoints first
-- add resume support
 - add train-vs-wall budget mode if CUDA still differs there
 - align summary fields where they meaningfully map
+- expose resume/checkpoint capabilities more explicitly through the shared engine boundary
 
 Exit criteria:
 - `calibrate.py --engine cuda --mode fast` can do more than one coarse fixed probe
-- CUDA can mint a checkpoint at the chosen point
+- CUDA can mint a checkpoint at the chosen point and resume it exactly from the shared workflow
 
 ### Phase 2: Port the eval calibration stack
 
@@ -383,7 +381,7 @@ The repo is ready for a serious CUDA parity push now.
 The order should be:
 
 1. shared-engine trainer parity
-2. checkpointing and eval calibration
+2. eval calibration and runtime policy
 3. real CUDA bring-up defaults on H100, A100, GB10, and B200
 4. CUDA trainer integration for kernel-lab
 5. only then push hard on whole attention backends like FlashAttention and SageAttention

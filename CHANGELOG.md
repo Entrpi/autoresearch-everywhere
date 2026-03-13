@@ -29,7 +29,53 @@ On this hardware, the default canonical matched benchmark window for optimizatio
 
 ## Latest
 
-### New commit — calibration: start CUDA engine parity with local search and runtime-safe bring-up — score `4` — complexity `7`
+### New commit — cuda: add exact checkpoint and resume support — score `3` — complexity `6`
+
+**AI-identified within brief, human-shaped (3)**
+
+- Add exact sync checkpoint minting and exact resume to the core CUDA trainer loop, then validate it on the real GB10 Blackwell system.
+  - Meaning: the CUDA trainer can now write a final exact checkpoint bundle containing model weights, optimizer state, run config, and training progress, and then resume from that bundle while restoring the same preset shape and replaying the train-loader position deterministically. Resumed runs interpret `--time-budget` as a new cumulative target, not an extra delta, and the trainer no longer counts the first resumed compile-heavy step against the resumed training budget.
+  - Motivation: the CUDA parity roadmap was no longer blocked on “can it run?” GB10 had already proven that. The next missing trainer-loop feature was exact resumability, because without it CUDA still could not match the baseline durability and checkpoint-backed workflow expected from the MLX path.
+  - Purpose: close the basic survivability gap in the CUDA core loop so later parity work can build on a trainer that can actually mint and reuse checkpoints instead of restarting every long run from scratch.
+  - Adding `autoresearch_cuda/checkpoints.py` for exact bundle save/load and metadata validation.
+  - Teaching `autoresearch_cuda/train.py` to support `--checkpoint-path`, `--resume-from`, cumulative resume budgets, and deterministic loader replay.
+  - Extending `autoresearch_platform/cuda_engine.py` so checkpoint minting works through the shared train-probe path.
+
+**Grounding**
+
+- Files:
+  - `CHANGELOG.md`
+  - `README.md`
+  - `docs/cuda-core-loop-parity.md`
+  - `autoresearch_cuda/checkpoints.py`
+  - `autoresearch_cuda/train.py`
+  - `autoresearch_platform/cuda_engine.py`
+- Validation:
+  - `python3 -m py_compile autoresearch_cuda/checkpoints.py autoresearch_cuda/train.py autoresearch_platform/cuda_engine.py tools/calibrate_platform.py`
+  - real GB10 checkpoint mint:
+    - `python train.py --engine cuda --preset upstream --time-budget 2 --seq-len 1024 --window-pattern SSSL --device-batch-size 32 --total-batch-size 65536 --benchmark-skip-eval --checkpoint-path ...`
+  - real GB10 resume:
+    - `python train.py --engine cuda --preset upstream --resume-from ... --time-budget 4 --benchmark-skip-eval`
+- Measurements:
+  - GB10 exact checkpoint mint:
+    - `training_seconds=2.0`
+    - `total_seconds=33.0`
+    - `peak_vram_mb=6148.7`
+    - `steady_state_tok_per_sec=130348.1`
+    - `num_steps=14`
+    - `resolved_attention_backend=torch-sdpa`
+  - GB10 exact resume after timing fix:
+    - `training_seconds=4.0`
+    - `total_seconds=26.0`
+    - `peak_vram_mb=6148.7`
+    - `steady_state_tok_per_sec=65388.2`
+    - `num_steps=18`
+    - `resolved_attention_backend=torch-sdpa`
+    - resumed from the saved checkpoint with deterministic loader replay (`loader_batches=28`)
+
+## Committed History
+
+### March 13, 2026 — `b8871fe` — calibration: start CUDA engine parity with local search and runtime-safe bring-up — score `4` — complexity `7`
 
 **Human-directed, AI-shaped (4)**
 
@@ -54,8 +100,6 @@ On this hardware, the default canonical matched benchmark window for optimizatio
   - remote GB10 container bring-up progressed through hardware fingerprinting into the first coarse CUDA trainer probe instead of failing immediately on MLX imports or missing repo-local kernels
 - Measurements:
   - No new stable trainer benchmark was recorded in this slice; the main grounded result is that the parity path now reaches real CUDA probing on GB10 instead of stopping on infrastructure mismatches.
-
-## Committed History
 
 ### March 13, 2026 — `69960ca` — docs: add CUDA core-loop parity roadmap — score `4` — complexity `5`
 

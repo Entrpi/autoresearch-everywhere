@@ -21,7 +21,7 @@ class CUDAEngine:
         supports_platform_bringup=True,
         supports_local_search=True,
         supports_eval_calibration=False,
-        supports_checkpoint_mint=False,
+        supports_checkpoint_mint=True,
         supports_runtime_eval_policy=False,
         mutable_axes=("seq_len", "window_pattern", "device_batch_size", "total_batch_size", "depth"),
     )
@@ -100,11 +100,6 @@ class CUDAEngine:
         total_batch_size: int | None = None,
         no_checkpoint: bool = True,
     ) -> ProbeResult:
-        if checkpoint_path is not None:
-            raise RuntimeError("CUDA engine does not support checkpoint minting through calibrate_platform yet.")
-        if not no_checkpoint:
-            raise RuntimeError("CUDA engine does not support checkpoint minting through calibrate_platform yet.")
-
         resolved = resolve_run_preset(
             preset,
             time_budget=time_budget,
@@ -145,6 +140,10 @@ class CUDAEngine:
         ]
         if benchmark_skip_eval:
             cmd.append("--benchmark-skip-eval")
+        if checkpoint_path is not None and not no_checkpoint:
+            cmd.extend(["--checkpoint-path", str(checkpoint_path)])
+        if no_checkpoint:
+            cmd.append("--no-checkpoint")
 
         label = self._command_label(
             [

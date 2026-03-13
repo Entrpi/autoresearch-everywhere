@@ -21,6 +21,11 @@ def build_parser():
         description="Autoresearch CUDA training script.",
     )
     parser.add_argument("--preset", choices=tuple(CUDA_PRESETS.keys()), default="upstream")
+    parser.add_argument(
+        "--resume-from",
+        type=str,
+        help="Directory containing a previously saved CUDA training checkpoint.",
+    )
     parser.add_argument("--time-budget", type=float, help="Training time budget in seconds.")
     parser.add_argument("--seq-len", type=int, help="Sequence length override.")
     parser.add_argument("--window-pattern", type=str, help="Window pattern override.")
@@ -32,19 +37,20 @@ def build_parser():
         action="store_true",
         help="Skip the final validation eval and only report training throughput.",
     )
+    parser.add_argument(
+        "--checkpoint-path",
+        type=str,
+        help="Directory to write a final training checkpoint into.",
+    )
+    parser.add_argument(
+        "--no-checkpoint",
+        action="store_true",
+        help="Disable checkpoint writing even if the runtime would otherwise request it.",
+    )
     return parser
 
 
 ARGS = build_parser().parse_args()
-RUN_PRESET = resolve_run_preset(
-    ARGS.preset,
-    time_budget=ARGS.time_budget,
-    seq_len=ARGS.seq_len,
-    window_pattern=ARGS.window_pattern,
-    total_batch_size=ARGS.total_batch_size,
-    depth=ARGS.depth,
-    device_batch_size=ARGS.device_batch_size,
-)
 
 import torch
 import torch.nn as nn
@@ -53,6 +59,77 @@ import torch.nn.functional as F
 from autoresearch_cuda.lab_integration import maybe_call_integration_target
 from autoresearch_cuda.runtime import detect_cuda_runtime_profile
 from autoresearch_cuda.prepare import Tokenizer, make_dataloader, evaluate_bpb
+from autoresearch_cuda.checkpoints import (
+    load_checkpoint_metadata,
+    load_training_checkpoint,
+    save_training_checkpoint,
+    validate_checkpoint_payload,
+)
+
+
+def _resolved_run_config_from_checkpoint(checkpoint_dir: str):
+    metadata = load_checkpoint_metadata(checkpoint_dir)
+    bundle = load_training_checkpoint(checkpoint_dir, map_location="cpu")
+    validate_checkpoint_payload(bundle)
+    if metadata.get("version") != bundle.get("version"):
+        raise ValueError(
+            f"Checkpoint metadata/version mismatch: metadata={metadata.get('version')!r}, "
+            f"bundle={bundle.get('version')!r}."
+        )
+    run_config = bundle["run_config"]
+    training_state = bundle["training_state"]
+    return metadata, bundle, run_config, training_state
+
+
+def _resolve_run_preset_with_resume(args):
+    if not args.resume_from:
+        return resolve_run_preset(
+            args.preset,
+            time_budget=args.time_budget,
+            seq_len=args.seq_len,
+            window_pattern=args.window_pattern,
+            total_batch_size=args.total_batch_size,
+            depth=args.depth,
+            device_batch_size=args.device_batch_size,
+        ), None, None
+
+    metadata, bundle, run_config, training_state = _resolved_run_config_from_checkpoint(args.resume_from)
+    checkpoint_preset = run_config["preset"]
+    if args.preset != checkpoint_preset:
+        raise ValueError(
+            f"--resume-from expects preset {checkpoint_preset!r}; received {args.preset!r}."
+        )
+
+    disallowed_overrides: list[str] = []
+    if args.seq_len is not None and args.seq_len != run_config["seq_len"]:
+        disallowed_overrides.append("--seq-len")
+    if args.window_pattern is not None and args.window_pattern != run_config["window_pattern"]:
+        disallowed_overrides.append("--window-pattern")
+    if args.total_batch_size is not None and args.total_batch_size != run_config["total_batch_size"]:
+        disallowed_overrides.append("--total-batch-size")
+    if args.depth is not None and args.depth != run_config["depth"]:
+        disallowed_overrides.append("--depth")
+    if args.device_batch_size is not None and args.device_batch_size != run_config["device_batch_size"]:
+        disallowed_overrides.append("--device-batch-size")
+    if disallowed_overrides:
+        raise ValueError(
+            "Resume does not allow shape-changing overrides: "
+            + ", ".join(disallowed_overrides)
+        )
+
+    resolved = resolve_run_preset(
+        checkpoint_preset,
+        time_budget=args.time_budget if args.time_budget is not None else run_config["time_budget"],
+        seq_len=run_config["seq_len"],
+        window_pattern=run_config["window_pattern"],
+        total_batch_size=run_config["total_batch_size"],
+        depth=run_config["depth"],
+        device_batch_size=run_config["device_batch_size"],
+    )
+    return resolved, bundle, training_state
+
+
+RUN_PRESET, RESUME_BUNDLE, RESUME_TRAINING_STATE = _resolve_run_preset_with_resume(ARGS)
 
 try:
     from kernels import get_kernel
@@ -640,6 +717,12 @@ print(f"CUDA runtime: {cuda_runtime.architecture_name}")
 print(f"CUDA reference family: {cuda_runtime.reference_family.family_name}")
 print(f"Preferred attention backend: {cuda_runtime.selected_attention_backend}")
 print(f"Resolved attention backend: {RESOLVED_ATTENTION_BACKEND}")
+if RESUME_TRAINING_STATE is not None and RESUME_TRAINING_STATE.get("hardware_key") not in (None, hardware_key):
+    print(
+        "Resume hardware note: "
+        f"checkpoint was created on {RESUME_TRAINING_STATE.get('hardware_key')}, "
+        f"current hardware is {hardware_key}"
+    )
 print(f"Preferred flash-attention repo: {cuda_runtime.selected_flash_attention_repo}")
 
 def build_model_config(depth):
@@ -686,8 +769,31 @@ model = torch.compile(model, dynamic=False)
 train_loader = make_dataloader(tokenizer, DEVICE_BATCH_SIZE, MAX_SEQ_LEN, "train")
 x, y, epoch = next(train_loader)  # prefetch first batch
 
+resumed_from = None
+if RESUME_BUNDLE is not None:
+    model.load_state_dict(RESUME_BUNDLE["model_state_dict"])
+    optimizer.load_state_dict(RESUME_BUNDLE["optimizer_state_dict"])
+    resumed_from = ARGS.resume_from
+    resume_step = int(RESUME_TRAINING_STATE["step"])
+    resume_epoch = int(RESUME_TRAINING_STATE["epoch"])
+    loader_advance_steps = resume_step * grad_accum_steps
+    if loader_advance_steps:
+        for _ in range(loader_advance_steps):
+            x, y, epoch = next(train_loader)
+    if epoch != resume_epoch:
+        raise RuntimeError(
+            f"Deterministic loader replay drifted: resumed epoch {epoch}, expected {resume_epoch}."
+        )
+
 print(f"Time budget: {TIME_BUDGET}s")
 print(f"Gradient accumulation steps: {grad_accum_steps}")
+if resumed_from is not None:
+    print(
+        "Resume checkpoint: "
+        f"{resumed_from} (step={RESUME_TRAINING_STATE['step']}, "
+        f"training_seconds={RESUME_TRAINING_STATE['total_training_time']:.1f}, "
+        f"loader_batches={loader_advance_steps})"
+    )
 
 # Schedules (all based on progress = training_time / TIME_BUDGET)
 
@@ -713,10 +819,19 @@ def get_weight_decay(progress):
 
 t_start_training = time.time()
 smooth_train_loss = 0
-total_training_time = 0
-step = 0
+total_training_time = float(RESUME_TRAINING_STATE["total_training_time"]) if RESUME_TRAINING_STATE is not None else 0.0
+step = int(RESUME_TRAINING_STATE["step"]) if RESUME_TRAINING_STATE is not None else 0
+timing_count_starts_after_step = 10 if RESUME_TRAINING_STATE is None else step
+
+if total_training_time >= TIME_BUDGET:
+    print(
+        f"Training budget already satisfied at resume point "
+        f"({total_training_time:.1f}s >= {TIME_BUDGET:.1f}s); skipping training loop."
+    )
 
 while True:
+    if total_training_time >= TIME_BUDGET:
+        break
     torch.cuda.synchronize()
     t0 = time.time()
     for micro_step in range(grad_accum_steps):
@@ -751,7 +866,7 @@ while True:
     t1 = time.time()
     dt = t1 - t0
 
-    if step > 10:
+    if step > timing_count_starts_after_step:
         total_training_time += dt
 
     # Logging
@@ -783,6 +898,34 @@ print()  # newline after \r training log
 
 total_tokens = step * TOTAL_BATCH_SIZE
 
+checkpoint_saved_to = None
+if ARGS.checkpoint_path and not ARGS.no_checkpoint:
+    checkpoint_saved_to = save_training_checkpoint(
+        ARGS.checkpoint_path,
+        run_config={
+            "preset": ARGS.preset,
+            "time_budget": RUN_PRESET.time_budget,
+            "seq_len": MAX_SEQ_LEN,
+            "depth": DEPTH,
+            "window_pattern": WINDOW_PATTERN,
+            "device_batch_size": DEVICE_BATCH_SIZE,
+            "total_batch_size": TOTAL_BATCH_SIZE,
+            "grad_accum_steps": grad_accum_steps,
+        },
+        training_state={
+            "step": step,
+            "total_training_time": total_training_time,
+            "total_tokens": total_tokens,
+            "epoch": epoch,
+            "hardware_key": hardware_key,
+            "accelerator_architecture": cuda_runtime.reference_family.family_key,
+            "accelerator_compute_capability": f"{cap[0]}.{cap[1]}",
+            "resolved_attention_backend": RESOLVED_ATTENTION_BACKEND,
+        },
+        model=model,
+        optimizer=optimizer,
+    )
+
 # Final eval
 val_bpb = None
 if not ARGS.benchmark_skip_eval:
@@ -793,9 +936,10 @@ if not ARGS.benchmark_skip_eval:
 # Final summary
 t_end = time.time()
 startup_time = t_start_training - t_start
-steady_state_mfu = 100 * num_flops_per_token * TOTAL_BATCH_SIZE * (step - 10) / total_training_time / H100_BF16_PEAK_FLOPS if total_training_time > 0 else 0
+timed_step_count = max(step - timing_count_starts_after_step, 0)
+steady_state_mfu = 100 * num_flops_per_token * TOTAL_BATCH_SIZE * timed_step_count / total_training_time / H100_BF16_PEAK_FLOPS if total_training_time > 0 else 0
 peak_vram_mb = torch.cuda.max_memory_allocated() / 1024 / 1024
-steady_state_tok_per_sec = (TOTAL_BATCH_SIZE * max(step - 10, 0) / total_training_time) if total_training_time > 0 else 0.0
+steady_state_tok_per_sec = (TOTAL_BATCH_SIZE * timed_step_count / total_training_time) if total_training_time > 0 else 0.0
 
 print("---")
 if val_bpb is not None:
@@ -817,3 +961,7 @@ if cuda_runtime.preferred_flash_attention_generation is not None:
     print(f"preferred_flash_attention_generation: {cuda_runtime.preferred_flash_attention_generation}")
 print(f"preferred_flash_attention_repo: {cuda_runtime.selected_flash_attention_repo}")
 print(f"resolved_attention_backend: {RESOLVED_ATTENTION_BACKEND}")
+if checkpoint_saved_to is not None:
+    print(f"checkpoint_path:  {checkpoint_saved_to}")
+if resumed_from is not None:
+    print(f"resumed_from:     {resumed_from}")
