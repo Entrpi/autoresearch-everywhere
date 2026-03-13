@@ -555,6 +555,8 @@ Success criterion:
 
 The immediate conclusion is: those are not “next tiny targets.” They belong to the backend-level phase, not the starter-kernel phase.
 
+For the broader CUDA trainer-loop parity picture that surrounds this kernel work, see [docs/cuda-core-loop-parity.md](cuda-core-loop-parity.md).
+
 The shortest honest path to them is:
 
 1. finish robust seam-level evidence

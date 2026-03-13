@@ -29,7 +29,31 @@ On this hardware, the default canonical matched benchmark window for optimizatio
 
 ## Latest
 
-### New commit — cuda: add GB10-compatible attention fallback and shared summary parsing — score `3` — complexity `5`
+### New commit — docs: add a CUDA core-loop parity roadmap — score `4` — complexity `5`
+
+**Human-directed, AI-shaped (4)**
+
+- Add a dedicated CUDA parity assessment that explains what already works, what is still missing from the shared trainer loop, and how GB10, A100, H100, and B200 should be used to close the gap.
+  - Meaning: the repo now has a standalone roadmap for CUDA trainer parity in `docs/cuda-core-loop-parity.md`. It defines what “parity” means here, separates already-strong CUDA areas from the remaining MLX-only features, documents what GB10 already proved, and lays out the phased path toward checkpointing, eval calibration, runtime policy, platform bring-up, kernel-lab trainer integration, and finally whole attention backend experiments such as FlashAttention and SageAttention.
+  - Motivation: the repo had enough real CUDA surface area and GB10 evidence that the next problem was no longer “can CUDA run?” It was “what exactly still separates CUDA from the MLX-first calibrated trainer loop, and what is the right order to close those gaps across the NVIDIA hardware matrix?”
+  - Purpose: make the CUDA path legible as a deliberate parity effort rather than a pile of independent runtime, lab, and hardware-specific improvements.
+  - Linking that roadmap from both the main README CUDA shortcut and the kernel-lab roadmap so it is part of the front-door story rather than an orphaned internal note.
+
+**Grounding**
+
+- Files:
+  - `CHANGELOG.md`
+  - `README.md`
+  - `docs/cuda-core-loop-parity.md`
+  - `docs/kernel-lab.md`
+- Validation:
+  - `python3 tools/changelog_scores.py --group-by entry --format csv --include-latest --verify`
+- Measurements:
+  - No new runtime measurements; this is a synthesis and planning document grounded in the existing GB10 validation and the current shared-engine code.
+
+## Committed History
+
+### March 13, 2026 — `71788a0` — cuda: add GB10-compatible attention fallback and shared summary parsing — score `3` — complexity `5`
 
 **AI-identified within brief, human-shaped (3)**
 
@@ -59,8 +83,6 @@ On this hardware, the default canonical matched benchmark window for optimizatio
     - `steady_state_tok_per_sec=245727`
     - `peak_vram_mb=45011.5`
     - `num_params_M=50.3`
-
-## Committed History
 
 ### March 13, 2026 — `fde764c` — docs: add a kernel-lab roadmap toward whole attention backends — score `4` — complexity `5`
 
