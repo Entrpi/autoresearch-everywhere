@@ -29,7 +29,40 @@ On this hardware, the default canonical matched benchmark window for optimizatio
 
 ## Latest
 
-### New commit — calibration: add truth-backed CUDA horizon projection to bring-up — score `3` — complexity `6`
+### New commit — calibration: add a secondary scaling-candidate pass above the strict 300s winner — score `3` — complexity `6`
+
+**AI-identified within brief, human-shaped (3)**
+
+- Add a second calibration layer that can surface a larger near-frontier model as a scaling candidate even when it does not beat the strict `300s` `val_bpb` winner.
+  - Meaning: the projection/reporting path now keeps one strict winner for the actual objective, but it can also report a larger family that stays very close to the lead at `300s` and projects as the more interesting longer-horizon scaling bet. This is exposed in the shared curve logic, the platform-calibration payload, and the generated Markdown report without changing how the default winner is chosen.
+  - Motivation: the completed GB10 truth corpus exposed a real near-frontier case that the old reports could not express honestly. `m5-balanced` is the strict `300s` winner, but `m5-xlarge db=16` finishes within `0.006955` BPB and remains close enough that longer-horizon users should see it called out separately instead of either hiding it or secretly weighting larger models higher.
+  - Purpose: preserve a hard objective-driven default while still surfacing the most plausible larger-family scaling path for deeper follow-up calibration.
+  - Adding `ScalingCandidate` and the truth-curve selection logic in `autoresearch_platform/curve_projection.py`.
+  - Extending `tools/calibrate_platform.py` so the platform report and JSON artifact include the secondary scaling candidate when one is supported by the truth corpus.
+  - Updating the front-door and platform-calibration docs so the report story now explicitly distinguishes the strict `300s` winner from the optional longer-horizon scaling candidate.
+
+**Grounding**
+
+- Files:
+  - `CHANGELOG.md`
+  - `README.md`
+  - `autoresearch_platform/curve_projection.py`
+  - `docs/platform-calibration.md`
+  - `tools/calibrate_platform.py`
+- Validation:
+  - `python3 -m py_compile autoresearch_platform/curve_projection.py tools/calibrate_platform.py`
+  - `python3 tools/changelog_scores.py --group-by entry --format csv --include-latest --verify`
+  - `python3 tools/render_autonomy_badge.py`
+- Measurements:
+  - on the completed GB10 `300s` truth corpus:
+    - strict winner: `m5-balanced` at `1.162382`
+    - closest larger near-frontier family: `m5-xlarge db=16` at `1.169337`
+    - gap at `300s`: `0.006955`
+  - the new scaling-candidate selector keeps `m5-balanced` as the only strict winner while surfacing `m5-xlarge` as the longer-horizon scaling candidate from the same truth set
+
+## Committed History
+
+### March 14, 2026 — `9614d95` — calibration: add truth-backed CUDA horizon projection to bring-up — score `3` — complexity `6`
 
 **AI-identified within brief, human-shaped (3)**
 
@@ -82,8 +115,6 @@ On this hardware, the default canonical matched benchmark window for optimizatio
     - `m5-large` -> projected `1.285034`
     - `m5-tiny` -> projected `1.465999`
   - this confirms the intended selector behavior: under the actual `300s val_bpb` objective, `m5-balanced` is the GB10 winner, while `m5-xlarge db=16` is the closest scaling candidate.
-
-## Committed History
 
 ### March 13, 2026 — `0eb3fc5` — cuda/checkpoints: finish FA4-backed GB10 bring-up and normalize compiled checkpoint keys — score `2`
 

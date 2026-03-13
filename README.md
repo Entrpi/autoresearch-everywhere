@@ -45,6 +45,7 @@ The report includes:
 - a candidate default for that hardware
 - lower / recommended / upper / reference zones
 - a comparison between your machine, what works best on an M5 laptop, and the H100-oriented starting point Karpathy hand-shaped in the upstream project
+- when the data supports it, a secondary scaling candidate: a larger near-frontier model that stays close enough to the strict `300s` winner to be interesting for longer horizons
 - machine-readable artifacts for later promotion or re-checking
 
 It also writes the candidate default into the local platform-default cache for that engine and hardware key. After that, real kernel-lab integration tests can use the calibrated point for the current device automatically instead of requiring a manual preset every time.
@@ -305,7 +306,7 @@ Current project snapshot from [CHANGELOG.md](CHANGELOG.md):
 | Mean autonomy score | `3.13 / 6` |
 | Mean complexity | `6.42 / commit` |
 | Mean score per top-level bullet | `3.20 / 6` |
-| History covered | `83` commits across `14` subsystems |
+| History covered | `84` commits across `14` subsystems |
 <!-- autonomy-golf-snapshot:end -->
 
 Refresh with:

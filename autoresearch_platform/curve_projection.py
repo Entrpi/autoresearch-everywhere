@@ -128,6 +128,28 @@ class ProjectionDecision:
     enough_signal: bool
 
 
+@dataclass(frozen=True)
+class ScalingCandidate:
+    target_seconds: float
+    scaling_target_seconds: float
+    strict_winner_preset: str
+    strict_winner_val_bpb: float
+    strict_winner_device_batch_size: int | None
+    strict_winner_total_batch_size: int | None
+    candidate_preset: str
+    candidate_val_bpb: float
+    candidate_device_batch_size: int | None
+    candidate_total_batch_size: int | None
+    candidate_gap_at_target: float
+    strict_projected_val_bpb: float | None
+    candidate_projected_val_bpb: float | None
+    projected_gap_at_scaling_target: float | None
+    strict_last_segment_gain: float | None
+    candidate_last_segment_gain: float | None
+    source: str
+    rationale: str
+
+
 def final_training_seconds(curve: CurveArtifact) -> float | None:
     final_eval = curve.final_eval or {}
     if final_eval.get("training_seconds") is not None:
@@ -137,6 +159,15 @@ def final_training_seconds(curve: CurveArtifact) -> float | None:
     raw_total = curve.raw_payload.get("curve_eval_total_seconds")
     if raw_total is not None:
         return float(raw_total)
+    return None
+
+
+def final_val_bpb(curve: CurveArtifact) -> float | None:
+    final_eval = curve.final_eval or {}
+    if final_eval.get("val_bpb") is not None:
+        return float(final_eval["val_bpb"])
+    if curve.curve_points:
+        return float(curve.curve_points[-1].val_bpb)
     return None
 
 
@@ -530,6 +561,43 @@ def _curve_distance_to_truth(curve: CurveArtifact, truth_curve: CurveArtifact) -
     return distance
 
 
+def _best_truth_curve_by_preset(
+    truth_curves: list[CurveArtifact],
+    *,
+    engine: str | None,
+    hardware_key: str | None,
+    target_seconds: float,
+) -> dict[str, CurveArtifact]:
+    best: dict[str, CurveArtifact] = {}
+    for curve in truth_curves:
+        if engine is not None and curve.engine is not None and curve.engine != engine:
+            continue
+        if hardware_key is not None and curve.hardware_key is not None and curve.hardware_key != hardware_key:
+            continue
+        horizon_seconds = final_training_seconds(curve)
+        if horizon_seconds is None or horizon_seconds < target_seconds:
+            continue
+        final_bpb = final_val_bpb(curve)
+        if final_bpb is None:
+            continue
+        current = best.get(curve.preset)
+        if current is None:
+            best[curve.preset] = curve
+            continue
+        current_bpb = final_val_bpb(current)
+        if current_bpb is None or final_bpb < current_bpb:
+            best[curve.preset] = curve
+    return best
+
+
+def _last_segment_gain(curve: CurveArtifact, *, target_seconds: float) -> float | None:
+    points = tuple(point for point in curve.curve_points if point.actual_training_seconds <= target_seconds + 1e-9)
+    if len(points) < 2:
+        return None
+    left, right = points[-2], points[-1]
+    return left.val_bpb - right.val_bpb
+
+
 def estimate_from_matching_truth(
     curve: CurveArtifact,
     *,
@@ -561,6 +629,90 @@ def estimate_from_matching_truth(
     if len(finals) == 1:
         std = max(std, 0.01 + distances[0])
     return center, std, len(finals)
+
+
+def select_scaling_candidate(
+    estimates: list[ProjectedCurveEstimate],
+    *,
+    truth_curves: list[CurveArtifact],
+    preset_order: list[str],
+    target_seconds: float,
+    scaling_target_seconds: float,
+    max_gap_at_target: float = 0.01,
+) -> ScalingCandidate | None:
+    if not estimates or not preset_order:
+        return None
+
+    strict_winner = estimates[0]
+    try:
+        strict_index = preset_order.index(strict_winner.summary.preset)
+    except ValueError:
+        return None
+
+    truth_by_preset = _best_truth_curve_by_preset(
+        truth_curves,
+        engine=strict_winner.summary.engine,
+        hardware_key=strict_winner.summary.hardware_key,
+        target_seconds=target_seconds,
+    )
+    strict_truth = truth_by_preset.get(strict_winner.summary.preset)
+    if strict_truth is None:
+        return None
+
+    strict_long = project_curve(strict_truth, target_seconds=scaling_target_seconds)
+    strict_last_gain = _last_segment_gain(strict_truth, target_seconds=target_seconds)
+    estimates_by_preset = {item.summary.preset: item for item in estimates}
+
+    best_candidate: ScalingCandidate | None = None
+    best_key: tuple[float, float, float] | None = None
+    for preset in preset_order[strict_index + 1 :]:
+        candidate = estimates_by_preset.get(preset)
+        if candidate is None:
+            continue
+        candidate_gap = candidate.corrected_val_bpb - strict_winner.corrected_val_bpb
+        if candidate_gap > max_gap_at_target:
+            continue
+        candidate_truth = truth_by_preset.get(preset)
+        if candidate_truth is None:
+            continue
+        candidate_long = project_curve(candidate_truth, target_seconds=scaling_target_seconds)
+        if candidate_long is None or strict_long is None:
+            continue
+        projected_gap = candidate_long.projected_val_bpb - strict_long.projected_val_bpb
+        candidate_last_gain = _last_segment_gain(candidate_truth, target_seconds=target_seconds)
+        if projected_gap > candidate_gap and projected_gap > max_gap_at_target:
+            continue
+        candidate_record = ScalingCandidate(
+            target_seconds=target_seconds,
+            scaling_target_seconds=scaling_target_seconds,
+            strict_winner_preset=strict_winner.summary.preset,
+            strict_winner_val_bpb=strict_winner.corrected_val_bpb,
+            strict_winner_device_batch_size=strict_truth.device_batch_size,
+            strict_winner_total_batch_size=strict_truth.total_batch_size,
+            candidate_preset=preset,
+            candidate_val_bpb=candidate.corrected_val_bpb,
+            candidate_device_batch_size=candidate_truth.device_batch_size,
+            candidate_total_batch_size=candidate_truth.total_batch_size,
+            candidate_gap_at_target=candidate_gap,
+            strict_projected_val_bpb=strict_long.projected_val_bpb,
+            candidate_projected_val_bpb=candidate_long.projected_val_bpb,
+            projected_gap_at_scaling_target=projected_gap,
+            strict_last_segment_gain=strict_last_gain,
+            candidate_last_segment_gain=candidate_last_gain,
+            source="truth-curves",
+            rationale="larger-near-frontier",
+        )
+        improvement_advantage = (candidate_last_gain or 0.0) - (strict_last_gain or 0.0)
+        ranking_key = (
+            projected_gap,
+            candidate_gap,
+            -improvement_advantage,
+        )
+        if best_key is None or ranking_key < best_key:
+            best_key = ranking_key
+            best_candidate = candidate_record
+
+    return best_candidate
 
 
 def estimate_projected_curve(

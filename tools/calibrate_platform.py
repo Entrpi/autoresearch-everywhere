@@ -29,6 +29,7 @@ from autoresearch_platform.curve_projection import (  # noqa: E402
     compare_projected_curves,
     load_curve_artifact,
     load_curve_artifacts_from_dir,
+    select_scaling_candidate,
 )
 
 try:  # noqa: E402
@@ -48,6 +49,7 @@ PLATFORM_CALIBRATION_SCHEMA_VERSION = 5
 PLATEAU_FRACTION = 0.99
 SHARP_EDGE_DROP_FRACTION = 0.95
 PROJECTION_TARGET_SECONDS = 300.0
+SCALING_TARGET_SECONDS = 900.0
 
 MODE_FAST = "fast"
 MODE_FULL = "full"
@@ -1184,6 +1186,7 @@ def write_report(path: Path, *, payload: dict) -> None:
     finalist_rows = finalist_payload["rows"] if isinstance(finalist_payload, dict) else None
     local_rows = payload["local_search"]["rows"]
     candidate_default = payload["candidate_default"]
+    scaling_candidate = payload.get("scaling_candidate")
     promotion_bundle = payload["promotion_bundle"]
     eval_rows = payload["eval_calibration"]["rows"]
     zones = payload["zones"]
@@ -1214,6 +1217,14 @@ def write_report(path: Path, *, payload: dict) -> None:
         f"- Family relation to M5 default: `{candidate_default['family_relation_to_m5']}`",
         f"- Selection confidence: `{candidate_default['selection_confidence']['eval_calibration_effective_confidence']}`",
         f"- Upstream-style reference zone: `{payload['reference_comparison']['upstream_style']['upstream_zone']}`",
+        (
+            f"- Secondary scaling candidate: `{scaling_candidate['candidate_preset']}` "
+            f"(gap at `300s`: `{scaling_candidate['candidate_gap_at_target']:.6f}`, "
+            f"projected gap at `{int(scaling_candidate['scaling_target_seconds'])}s`: "
+            f"`{scaling_candidate['projected_gap_at_scaling_target']:.6f}`)"
+            if isinstance(scaling_candidate, dict)
+            else "- Secondary scaling candidate: `none`"
+        ),
         "",
         "## Hardware Fingerprint",
         "",
@@ -1327,6 +1338,35 @@ def write_report(path: Path, *, payload: dict) -> None:
                         ("calibration_horizon_seconds", "Truth horizon"),
                         ("projection_source", "Projection source"),
                         ("matched_truth_count", "Truth matches"),
+                    ],
+                ),
+                "",
+            ]
+        )
+    if isinstance(scaling_candidate, dict):
+        report.extend(
+            [
+                "## Scaling Candidate",
+                "",
+                "The strict winner above remains the only thing that decides the default. This secondary pass looks for a larger near-frontier family whose completed truth curves stay close enough at `300s` that it may be the better long-horizon scaling bet.",
+                "",
+                markdown_table(
+                    [scaling_candidate],
+                    [
+                        ("strict_winner_preset", "Strict winner"),
+                        ("candidate_preset", "Scaling candidate"),
+                        ("candidate_device_batch_size", "Candidate device batch"),
+                        ("candidate_total_batch_size", "Candidate total batch"),
+                        ("strict_winner_val_bpb", "Winner 300s val_bpb"),
+                        ("candidate_val_bpb", "Candidate 300s val_bpb"),
+                        ("candidate_gap_at_target", "Gap at 300s"),
+                        ("strict_projected_val_bpb", "Winner projected longer"),
+                        ("candidate_projected_val_bpb", "Candidate projected longer"),
+                        ("projected_gap_at_scaling_target", "Projected gap"),
+                        ("strict_last_segment_gain", "Winner late gain"),
+                        ("candidate_last_segment_gain", "Candidate late gain"),
+                        ("source", "Source"),
+                        ("rationale", "Rationale"),
                     ],
                 ),
                 "",
@@ -1662,13 +1702,17 @@ def run_platform_calibration(args) -> dict:
         ranking_rows = projection_probe_rows
         ranked_candidates = projection_ranked_metadata
         ranking_winner = projection_ranked_metadata[0]
-    projection_rows = projection_phase["payload"]["rows"]
-    projection_winner = projection_rows[0] if projection_rows else None
-    projection_decision = (
-        projection_phase["payload"].get("decision")
-        if isinstance(projection_phase["payload"].get("decision"), dict)
-        else None
+    projection_curves = load_probe_curve_artifacts(projection_probe_rows)
+    projection_estimates, projection_decision = compare_projected_curves(
+        projection_curves,
+        target_seconds=PROJECTION_TARGET_SECONDS,
+        calibration=projection_calibration,
+        truth_curves=truth_curves,
+        winner_probability_threshold=args.winner_probability_threshold,
+        projected_margin_threshold=args.projected_margin_threshold,
     )
+    projection_rows = [projected_row_to_dict(item) for item in projection_estimates]
+    projection_winner = projection_rows[0] if projection_rows else None
     projected_presets = [row["preset"] for row in projection_rows]
     projection_probe_metadata_by_preset = {item.probe.preset: item for item in projection_ranked_metadata}
 
@@ -1716,7 +1760,7 @@ def run_platform_calibration(args) -> dict:
                 for preset in finalist_presets
             ]
             finalist_curves = load_probe_curve_artifacts(finalist_probe_rows)
-            finalist_projected_rows, finalist_decision = compare_projected_curves(
+            finalist_estimates, finalist_decision = compare_projected_curves(
                 finalist_curves,
                 target_seconds=PROJECTION_TARGET_SECONDS,
                 calibration=projection_calibration,
@@ -1741,11 +1785,10 @@ def run_platform_calibration(args) -> dict:
                     "probe_rows": [asdict(row) for row in finalist_probe_rows],
                     "ranked_rows": [ranked_probe_to_dict(item) for item in finalist_candidates],
                     "decision": None if finalist_decision is None else asdict(finalist_decision),
-                    "rows": [projected_row_to_dict(item) for item in finalist_projected_rows],
-                    "winner": projected_row_to_dict(finalist_projected_rows[0]) if finalist_projected_rows else None,
+                    "rows": [projected_row_to_dict(item) for item in finalist_estimates],
+                    "winner": projected_row_to_dict(finalist_estimates[0]) if finalist_estimates else None,
                 },
             )
-        finalist_rows = finalist_phase["payload"]["rows"]
         finalist_probe_rows = [
             probe_from_dict(row)
             for row in finalist_phase["payload"].get("probe_rows", [])
@@ -1759,14 +1802,32 @@ def run_platform_calibration(args) -> dict:
             hardware=hardware,
             ranking_time_budget=finalist_time_budget,
         )
+        finalist_curves = load_probe_curve_artifacts(finalist_probe_rows)
+        finalist_estimates, finalist_decision = compare_projected_curves(
+            finalist_curves,
+            target_seconds=PROJECTION_TARGET_SECONDS,
+            calibration=projection_calibration,
+            truth_curves=truth_curves,
+            winner_probability_threshold=args.winner_probability_threshold,
+            projected_margin_threshold=args.projected_margin_threshold,
+        )
+        finalist_rows = [projected_row_to_dict(item) for item in finalist_estimates]
         finalist_probe_metadata_by_preset = {item.probe.preset: item for item in finalist_candidates}
-        finalist_winner = finalist_phase["payload"]["winner"]
+        finalist_winner = finalist_rows[0] if finalist_rows else None
         if isinstance(finalist_winner, dict):
             candidate_family = finalist_probe_metadata_by_preset[finalist_winner["preset"]]
     if candidate_family is None:
         if projection_winner is None:
             raise RuntimeError("Projection ranking produced no winner.")
         candidate_family = projection_probe_metadata_by_preset[projection_winner["preset"]]
+
+    scaling_candidate = select_scaling_candidate(
+        projection_estimates,
+        truth_curves=truth_curves,
+        preset_order=presets,
+        target_seconds=PROJECTION_TARGET_SECONDS,
+        scaling_target_seconds=SCALING_TARGET_SECONDS,
+    )
 
     if engine.capabilities.supports_local_search:
         local_seq_lens = args.local_seq_lens or default_local_seq_lens(engine, candidate_family.probe.preset, mode=mode)
@@ -2036,6 +2097,7 @@ def run_platform_calibration(args) -> dict:
         },
         "candidate_checkpoint": asdict(checkpoint_probe),
         "candidate_default": candidate_default,
+        "scaling_candidate": None if scaling_candidate is None else asdict(scaling_candidate),
         "promotion_bundle": promotion_bundle,
         "zones": zones,
         "eval_calibration": eval_payload,

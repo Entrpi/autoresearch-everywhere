@@ -197,6 +197,15 @@ The final output should include both Markdown and JSON.
 
 The Markdown report should read like a bring-up memo. The JSON should be structured enough to support future automation and dashboards.
 
+It should also be able to report two different kinds of recommendation without conflating them:
+
+- `strict winner`
+  - the preset / operating point with the best measured or truth-matched `val_bpb` at the canonical `300s` target
+- `scaling candidate`
+  - an optional larger near-frontier family that remains close enough to the strict winner, and keeps improving strongly enough late in the run, that it is worth calling out as the more interesting longer-horizon scaling bet
+
+The strict winner is the only thing that should decide the default. The scaling candidate exists to preserve useful longer-horizon signal without corrupting the main objective.
+
 ## Bounding Zones
 
 The report should classify results into four zones.
