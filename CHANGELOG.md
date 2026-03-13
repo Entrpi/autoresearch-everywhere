@@ -29,7 +29,29 @@ On this hardware, the default canonical matched benchmark window for optimizatio
 
 ## Latest
 
-### New commit — docs: fold CUDA into the front-door README story — score `4` — complexity `6`
+### New commit — docs: add a kernel-lab roadmap toward whole attention backends — score `4` — complexity `5`
+
+**Human-directed, AI-shaped (4)**
+
+- Add a roadmap section to `docs/kernel-lab.md` that evaluates the current lab state and lays out the path from seam-level kernels to whole attention backends such as FlashAttention and SageAttention.
+  - Meaning: the kernel-lab doc no longer stops at describing the current workflows. It now ends with an explicit assessment of where the lab is strong today, where it is still weak, and the staged path from starter seams to composed-path work, backend-level adapters, whole attention backend experiments, and eventual cross-backend parity.
+  - Motivation: the lab has grown beyond a starter-kernel catalog, but the docs did not yet explain how the current MLX and CUDA systems fit into a larger plan. Without that roadmap, it is easy to either overread the current maturity or jump too quickly from seam-level wins to backend-sized ambitions like FlashAttention or SageAttention.
+  - Purpose: make the next steps legible, so kernel-lab reads as a growing subsystem with a deliberate direction rather than an accumulation of isolated targets and commands.
+  - Refreshing the top of `docs/kernel-lab.md` at the same time so it no longer understates CUDA by calling Triton workspaces purely future work.
+
+**Grounding**
+
+- Files:
+  - `CHANGELOG.md`
+  - `docs/kernel-lab.md`
+- Validation:
+  - `python3 tools/changelog_scores.py --group-by entry --format csv --include-latest --verify`
+- Measurements:
+  - No new runtime measurements; this was a documentation and planning update.
+
+## Committed History
+
+### March 13, 2026 — `0c5657b` — docs: fold CUDA into the main README flow — score `4` — complexity `6`
 
 **Human-directed, AI-shaped (4)**
 
@@ -49,8 +71,6 @@ On this hardware, the default canonical matched benchmark window for optimizatio
   - `python3 tools/changelog_scores.py --group-by entry --format csv --include-latest --verify`
 - Measurements:
   - No new runtime measurements; this was a documentation and framing cleanup.
-
-## Committed History
 
 ### March 13, 2026 — `b74bff3` — docs: tighten the kernel-lab front door — score `3` — complexity `5`
 

@@ -26,8 +26,8 @@ The current shape is intentionally modest:
 - top-level entrypoint: `kernel-lab.py`
 - shared boundary: `autoresearch_lab/`
 - first deep implementation: MLX under `autoresearch_mlx/`
-- first non-MLX expansion: CUDA trace automation under `autoresearch_cuda/`
-- future implementations: Triton workspaces on CUDA, ROCm, ANE
+- first non-MLX expansion: CUDA trace automation plus Triton-backed starter workspaces under `autoresearch_cuda/`
+- future implementations: broader CUDA workspaces and integrations, ROCm, ANE
 
 The pattern comes from the same idea behind `autokernel`, but adapted to this repo:
 
@@ -396,3 +396,170 @@ The goal is to give them the same outer workflow:
 - capture trace artifacts when the backend supports them
 
 That is why the current shared package is `autoresearch_lab/`, while the actual kernel mechanics stay backend-specific.
+
+## Roadmap
+
+Kernel-lab is now far enough along that the next steps should be driven by a clear picture of what exists, what is still missing, and what it would take to reach whole-backend experiments such as FlashAttention or SageAttention.
+
+### Where The Lab Is Today
+
+The current system is strong at:
+
+- shared workflow shape across backends
+- fixed mutable workspaces with reproducible benches
+- persistent evidence in `results/kernel_lab/ledger.jsonl`
+- MLX workspace depth
+- CUDA trace automation depth
+
+The current system is still weak at:
+
+- MLX trace interpretation, which is still fundamentally manual and Xcode-shaped
+- CUDA trainer-side integration evidence, which is much thinner than the trace side
+- automatic promotion from “validated target” to a real trainer patch
+- whole-backend experiments, where the unit of work is larger than one seam
+
+So the lab is no longer just a catalog of starter kernels, but it is also not yet a full “backend R&D factory.” It is best described as:
+
+- mature enough to drive seam-level work productively
+- partially mature for composed-path work
+- early for whole-backend replacement work
+
+### The Next Major Goal
+
+The next major goal is to move from optimizing isolated seams to building and testing whole attention backends.
+
+In practice, that means being able to answer questions like:
+
+- should this CUDA path use PyTorch SDPA, FlashAttention, or SageAttention?
+- does a whole attention backend improve real trainer throughput on one hardware family but regress another?
+- how much of an attention stack should be swapped at once before the evidence stops being trustworthy?
+
+This is a different class of problem from a pointwise or row-wise kernel workspace. A whole attention backend touches:
+
+- frontend API and masking semantics
+- local-window behavior
+- RoPE / QK normalization seams
+- backward behavior
+- dtype support
+- architecture-family constraints
+- real trainer integration, not just microbench performance
+
+So the roadmap has to step up in layers rather than jumping straight from starter kernels to “replace attention.”
+
+### Phase 1: Finish The Seam-Level Foundation
+
+This phase is about making the current lab genuinely robust before stretching the unit of work.
+
+Priorities:
+
+- make MLX trace review more structured and easier to compare across runs
+- deepen CUDA trainer-side integration evidence so it catches up with the trace side
+- improve negative evidence handling so weak targets are demoted faster
+- add richer evidence summaries and promotion reports for both backends
+
+Success criterion:
+
+- seam-level targets can be promoted or rejected with repeated, trace-aware, trainer-side evidence instead of one encouraging run
+
+### Phase 2: Add Composed-Path Targets
+
+Before whole-backend work, the lab needs a better middle tier: targets larger than one seam, but smaller than a full backend.
+
+That means composed targets such as:
+
+- broader attention-prelude paths
+- fuller loss/logits paths
+- composed MLP paths
+- block-local fused paths
+
+These targets matter because they test whether the lab can manage:
+
+- more realistic integration surfaces
+- larger correctness envelopes
+- more complicated regression modes
+
+Success criterion:
+
+- the lab can promote or reject multi-op composed targets with the same evidence discipline it now applies to starter seams
+
+### Phase 3: Introduce Backend-Level Attention Adapters
+
+Only after the composed-path layer is healthy should the lab start treating attention backends as first-class experimental objects.
+
+The first useful abstraction here is not “one more kernel target.” It is an attention-backend adapter interface inside the trainer that can switch between:
+
+- baseline SDPA paths
+- FlashAttention-family paths
+- SageAttention-family paths
+- future backend-specific attention variants
+
+That adapter layer should make it possible to:
+
+- benchmark a whole backend under the trainer
+- trace it end to end
+- compare it against the existing backend on the same preset/hardware
+- keep the workspace experiments and the trainer experiments connected
+
+Success criterion:
+
+- the trainer can swap whole attention backends behind a controlled interface without special-casing each experiment by hand
+
+### Phase 4: Whole-Backend Labs
+
+Once the adapter exists, kernel-lab can grow from seam-level and composed-path work into whole-backend experiments.
+
+At that point, the lab should support:
+
+- trace-first backend selection
+- backend-level `integration-ab`
+- backend-level `integration-suite`
+- promotion criteria for whole attention backends
+
+For CUDA, that is where FlashAttention and SageAttention become real lab targets rather than external libraries mentioned in docs.
+
+For MLX, the equivalent long-term direction is not “rebuild FlashAttention in Metal” by default. It is:
+
+- identify the largest backend-sized attention substitutions that are realistic for Apple tooling
+- evaluate them under the same workflow and evidence rules
+
+Success criterion:
+
+- a whole attention backend can be treated as a lab candidate with the same lifecycle as a seam target:
+  - profile
+  - extract/init
+  - bench/verify where meaningful
+  - trace
+  - trainer integration
+  - promotion or rejection
+
+### Phase 5: Cross-Backend Kernel-Lab Parity
+
+Right now the shared lab boundary is real, but MLX and CUDA are still strong in different halves:
+
+- MLX is stronger on workspaces and trainer integration
+- CUDA is stronger on automated trace review
+
+The long-term ideal is for the shared lab boundary to be proven by multiple deep implementations, not just one deep implementation plus one promising second system.
+
+That means:
+
+- deeper CUDA trainer integration
+- eventual ROCm adoption
+- possibly ANE or other accelerator-specific labs where appropriate
+
+Success criterion:
+
+- the same outer workflow feels natural across at least two backends with genuinely different kernel substrates
+
+### What This Means For FlashAttention And SageAttention
+
+The immediate conclusion is: those are not “next tiny targets.” They belong to the backend-level phase, not the starter-kernel phase.
+
+The shortest honest path to them is:
+
+1. finish robust seam-level evidence
+2. strengthen composed-path targets
+3. add attention-backend adapters to the trainer
+4. then let kernel-lab evaluate whole attention backends under real trainer evidence
+
+That path is slower than “just wire in FlashAttention,” but it is the one that preserves the point of kernel-lab: making backend work measurable, comparable, and promotable under one shared discipline.
