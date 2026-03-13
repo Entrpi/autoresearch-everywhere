@@ -178,6 +178,46 @@ Artifacts:
 
 One nuance: this exact rung-validation pass ran in the minimal `vllm-node-tf5:latest` container plus the extra tokenizer/data dependencies needed for eval-only mode, so it resolved `torch-sdpa` rather than the separately validated FlashAttention 4 path. That still proves the rung runner and engine flow; it just should not be confused with the earlier FA4-enabled trainer smoke.
 
+### GB10 FA4 fast bring-up snapshot
+
+After the FA4/SM120 path was installed from the FlashAttention PR branch and the compiled-checkpoint key mismatch was fixed, the full fast bring-up flow completed end to end on GB10 in the FA4-enabled container.
+
+Final candidate default:
+
+| Field | Value |
+| --- | --- |
+| Preset | `m5-small` |
+| `seq_len` | `512` |
+| `window_pattern` | `L` |
+| `device_batch_size` | `32` |
+| `total_batch_size` | `32768` |
+| `grad_accum_steps` | `2` |
+| ranking `val_bpb` | `1.291656` |
+| ranking steady tok/s | `541924.6` |
+
+Measured zones:
+
+- `m5-tiny`: lower
+- `m5-small`: recommended
+- `m5-balanced`: upper
+- `m5-large`: upper
+- `m5-xlarge`: upper
+
+The completed fast bring-up also finished its reduced eval-rung pass on the candidate checkpoint:
+
+| Rung | Seq len | Batch | Eval tokens | `val_bpb` | Eval seconds |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| `cheap` | `2048` | `32` | `262144` | `1.282243` | `0.8` |
+| `reference` | `2048` | `32` | `1572864` | `1.253053` | `4.5` |
+
+Artifacts:
+
+- `/home/ent/autoresearch-everywhere-sync/results/analysis/cuda_fast_ladder_fa4/report.json`
+- `/home/ent/autoresearch-everywhere-sync/results/analysis/cuda_fast_ladder_fa4/report.md`
+- `/home/ent/autoresearch-everywhere-sync/results/analysis/cuda_fast_ladder_fa4/promotion/platform_default.json`
+
+The promotion bundle still marks eval calibration as not yet promotable, because fast mode ran `cheap` and `reference` but not `full`. Even so, the important platform-default result is now grounded: on GB10 with FA4, the shared CUDA ladder wants to start at `m5-small`, not `m5-tiny`.
+
 ## Why We Need A100, H100, and B200
 
 GB10 alone is not enough.

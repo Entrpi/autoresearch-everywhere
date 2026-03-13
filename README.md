@@ -90,6 +90,15 @@ That gives you:
 
 MLX currently goes further on automatic eval calibration and default promotion. CUDA currently goes further on automated backend trace review.
 
+The first full FA4-backed fast bring-up on a real GB10 system selected `m5-small` as the recommended CUDA starting point, with:
+
+- `seq_len=512`
+- `window_pattern=L`
+- `device_batch_size=32`
+- `total_batch_size=32768`
+
+That is a useful concrete anchor: GB10 is not a `m5-tiny` machine.
+
 ## How It Is Organized
 
 The repo now has a simple top-level surface:
@@ -293,10 +302,10 @@ Current project snapshot from [CHANGELOG.md](CHANGELOG.md):
 
 | Metric | Value |
 | --- | --- |
-| Mean autonomy score | `3.16 / 6` |
-| Mean complexity | `6.56 / commit` |
-| Mean score per top-level bullet | `3.23 / 6` |
-| History covered | `81` commits across `13` subsystems |
+| Mean autonomy score | `3.13 / 6` |
+| Mean complexity | `6.43 / commit` |
+| Mean score per top-level bullet | `3.20 / 6` |
+| History covered | `82` commits across `14` subsystems |
 <!-- autonomy-golf-snapshot:end -->
 
 Refresh with:

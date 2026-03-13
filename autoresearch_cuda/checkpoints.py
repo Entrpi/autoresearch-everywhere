@@ -27,6 +27,21 @@ def _write_json(path: Path, payload: dict[str, Any]) -> None:
     temp.replace(path)
 
 
+def normalize_model_state_dict_keys(state_dict: dict[str, Any]) -> dict[str, Any]:
+    """Strip torch.compile wrapper prefixes from serialized model weights."""
+    prefix = "_orig_mod."
+    if not state_dict:
+        return state_dict
+    if not all(isinstance(key, str) for key in state_dict):
+        return state_dict
+    if not any(key.startswith(prefix) for key in state_dict):
+        return state_dict
+    return {
+        (key[len(prefix):] if key.startswith(prefix) else key): value
+        for key, value in state_dict.items()
+    }
+
+
 def save_training_checkpoint(
     checkpoint_dir: str | Path,
     *,
@@ -44,7 +59,7 @@ def save_training_checkpoint(
             "version": CHECKPOINT_VERSION,
             "run_config": run_config,
             "training_state": training_state,
-            "model_state_dict": model.state_dict(),
+            "model_state_dict": normalize_model_state_dict_keys(model.state_dict()),
             "optimizer_state_dict": optimizer.state_dict(),
         },
         temp_bundle,
@@ -69,7 +84,10 @@ def load_checkpoint_metadata(checkpoint_dir: str | Path) -> dict[str, Any]:
 
 def load_training_checkpoint(checkpoint_dir: str | Path, *, map_location: str | torch.device = "cpu") -> dict[str, Any]:
     paths = _checkpoint_paths(checkpoint_dir)
-    return torch.load(paths["bundle"], map_location=map_location)
+    payload = torch.load(paths["bundle"], map_location=map_location)
+    if isinstance(payload, dict) and "model_state_dict" in payload:
+        payload["model_state_dict"] = normalize_model_state_dict_keys(payload["model_state_dict"])
+    return payload
 
 
 def validate_checkpoint_payload(payload: dict[str, Any]) -> None:

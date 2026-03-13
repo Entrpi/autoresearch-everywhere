@@ -29,9 +29,49 @@ On this hardware, the default canonical matched benchmark window for optimizatio
 
 ## Latest
 
-### New commit — calibration: align CUDA bring-up with the shared ladder and validate checkpoint-backed eval calibration on GB10 — score `3` — complexity `8`
+### New commit — cuda/checkpoints: finish FA4-backed GB10 bring-up and normalize compiled checkpoint keys — score `2`
 
-**AI-identified within brief, human-shaped (3)**
+**AI-identified within brief, human-approved (2)**
+
+- Fix CUDA checkpoint save/load so compiled-model checkpoints can be reused cleanly for eval calibration and resumed bring-up runs, then rerun the FA4-backed GB10 fast calibration to completion.
+  - Meaning: CUDA checkpoints now strip the `_orig_mod.` prefix from compiled model state dict keys on save and normalize it again on load, so the exact checkpoint produced by a compiled trainer run can be resumed into an eager eval-only model. That removes the failure that previously stopped the FA4-backed GB10 fast bring-up after checkpoint minting and lets the full report, eval-rung bundle, and promotion artifacts complete.
+  - Motivation: the first FA4-backed GB10 fast run had already proved that Blackwell should scale above `m5-tiny`, but the run died in the eval-calibration phase because the checkpoint was saved from a compiled model and then loaded into an eager model. That meant the actual platform-default result was present in partial artifacts but not cleanly promotable or documented.
+  - Purpose: finish the real GB10/FA4 bring-up loop, ground the CUDA default on that machine, and remove a checkpoint-format mismatch that would otherwise keep biting compiled CUDA paths during calibration and resume workflows.
+  - Updating the GB10 docs to record the completed FA4-backed result: `m5-small` is the recommended CUDA starting point on that system, with `seq_len=512`, `window_pattern=L`, `device_batch_size=32`, and `total_batch_size=32768`.
+
+**Grounding**
+
+- Files:
+  - `CHANGELOG.md`
+  - `README.md`
+  - `docs/cuda-core-loop-parity.md`
+  - `autoresearch_cuda/checkpoints.py`
+- Validation:
+  - `python3 -m py_compile autoresearch_cuda/checkpoints.py`
+  - real GB10 eval-only rerun against the previously failing candidate checkpoint:
+    - `python train.py --engine cuda --preset m5-small --resume-from ... --eval-only --eval-seq-len 2048 --eval-tokens 262144 --eval-batch-size 32 --no-compile`
+  - resumed FA4-backed fast bring-up on GB10 without `--force`, reusing the already completed earlier phases:
+    - `python calibrate.py --engine cuda --mode fast --output-dir .../cuda_fast_ladder_fa4`
+- Measurements:
+  - the direct resumed eval-only check now succeeds against the compiled checkpoint:
+    - `cheap` rung `val_bpb=1.282243`
+    - `eval_seconds=0.8`
+    - `resolved_attention_backend=installed:flash_attn.flash_attn_interface`
+  - the completed FA4-backed GB10 fast bring-up selected:
+    - candidate default preset `m5-small`
+    - tuned point `seq_len=512`, `window_pattern=L`, `device_batch_size=32`, `total_batch_size=32768`, `grad_accum_steps=2`
+    - ranking `val_bpb=1.291656`
+    - ranking steady throughput `541924.6 tok/s`
+  - completed reduced eval rung table from the FA4-backed fast bring-up:
+    - `cheap`: `val_bpb=1.282243`, `eval_seconds=0.8`
+    - `reference`: `val_bpb=1.253053`, `eval_seconds=4.5`
+  - full bundle written under `/home/ent/autoresearch-everywhere-sync/results/analysis/cuda_fast_ladder_fa4/`, including `report.json`, `report.md`, and `promotion/platform_default.json`
+
+## Committed History
+
+### March 13, 2026 — `d152d06` — calibration: align CUDA bring-up with the shared ladder and validate checkpoint-backed eval calibration on GB10 — score `2`
+
+**AI-identified within brief, human-approved (2)**
 
 - Add and validate the next CUDA parity slice: shared-ladder bring-up plus checkpoint-backed eval-only rung execution through the shared engine on a real GB10 box.
   - Meaning: the CUDA path now uses the same named model-scale ladder as the MLX side (`m5-tiny` through `m5-xlarge`) for platform bring-up, with bounded short-probe batch shapes that keep Blackwell calibration runs practical. The CUDA trainer can also resume from an exact checkpoint in an `--eval-only` mode, override eval sequence length / token budget / batch size, and emit structured eval-only summaries. The shared CUDA engine can call that path repeatedly to build `cheap` / `reference` / `full` rung reports against a saved checkpoint instead of only talking about future parity in the abstract.
@@ -62,7 +102,7 @@ On this hardware, the default canonical matched benchmark window for optimizatio
   - real GB10 shared-engine rung calibration:
     - `CUDAEngine.run_eval_calibration(..., rungs=["cheap", "reference", "full"], ...)`
 - Measurements:
-  - GB10 fast-mode bring-up on the minimal CUDA container completed end to end through `report.json` / `promotion/` and selected:
+  - GB10 fast-mode bring-up on the minimal CUDA container completed end to end through checkpoint mint and local search and initially selected:
     - candidate default preset `m5-tiny`
     - tuned point `seq_len=256`, `device_batch_size=16`, `total_batch_size=8192`, `grad_accum_steps=2`
   - GB10 full rung table from the shared engine:
@@ -71,8 +111,6 @@ On this hardware, the default canonical matched benchmark window for optimizatio
     - `full`: `val_bpb=2.174130`, `eval_seconds=72.2`
   - markdown artifact written successfully at `/home/ent/autoresearch-everywhere/results/analysis/gb10_eval_calibration.md`
   - the validated rung run resolved `torch-sdpa` in the minimal GB10 container, so these numbers prove the calibration path itself rather than the separately validated FA4-enabled path
-
-## Committed History
 
 ### March 13, 2026 — `54c574a` — cuda: add exact checkpoint and resume support — score `2`
 
