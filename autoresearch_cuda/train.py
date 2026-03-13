@@ -90,6 +90,14 @@ from autoresearch_cuda.prepare import (
     evaluate_bpb,
     evaluate_bpb_configured,
 )
+from autoresearch_cuda.eval_policy import (
+    EVAL_POLICY_VERSION,
+    choose_runtime_eval,
+    current_eval_semantics_signature,
+    current_runtime_shape_signature,
+    find_calibration,
+    has_calibration_for_preset,
+)
 from autoresearch_cuda.checkpoints import (
     load_checkpoint_metadata,
     load_training_checkpoint,
@@ -199,6 +207,111 @@ def _resolve_flash_attention_interface():
 
 
 FLASH_ATTN_INTERFACE, RESOLVED_ATTENTION_BACKEND = _resolve_flash_attention_interface()
+
+
+def _runtime_eval_plan():
+    if ARGS.eval_only:
+        return {
+            "rung": "manual",
+            "status": "manual",
+            "effective_confidence": None,
+            "freshness": None,
+            "policy_version": EVAL_POLICY_VERSION,
+            "limited_by": None,
+            "seq_len": ARGS.eval_seq_len or MAX_SEQ_LEN,
+            "eval_tokens": ARGS.eval_tokens or CUDA_EVAL_TOKENS,
+            "batch_size": ARGS.eval_batch_size or DEVICE_BATCH_SIZE,
+            "reason": "eval-only override",
+        }
+    if ARGS.eval_seq_len is not None or ARGS.eval_tokens is not None or ARGS.eval_batch_size is not None:
+        return {
+            "rung": "manual",
+            "status": "manual",
+            "effective_confidence": None,
+            "freshness": None,
+            "policy_version": EVAL_POLICY_VERSION,
+            "limited_by": None,
+            "seq_len": ARGS.eval_seq_len or MAX_SEQ_LEN,
+            "eval_tokens": ARGS.eval_tokens or CUDA_EVAL_TOKENS,
+            "batch_size": ARGS.eval_batch_size or DEVICE_BATCH_SIZE,
+            "reason": "manual eval override",
+        }
+
+    calibration = find_calibration(preset=ARGS.preset, hardware_key=hardware_key)
+    if calibration is None:
+        status = "missing-calibration" if has_calibration_for_preset(preset=ARGS.preset) else "hardware-unmatched"
+        return {
+            "rung": "default",
+            "status": status,
+            "effective_confidence": None,
+            "freshness": None,
+            "policy_version": EVAL_POLICY_VERSION,
+            "limited_by": None,
+            "seq_len": MAX_SEQ_LEN,
+            "eval_tokens": CUDA_EVAL_TOKENS,
+            "batch_size": DEVICE_BATCH_SIZE,
+            "reason": status,
+        }
+
+    if calibration.policy_version != EVAL_POLICY_VERSION:
+        return {
+            "rung": "default",
+            "status": "stale-policy",
+            "effective_confidence": calibration.confidence,
+            "freshness": None,
+            "policy_version": EVAL_POLICY_VERSION,
+            "limited_by": None,
+            "seq_len": MAX_SEQ_LEN,
+            "eval_tokens": CUDA_EVAL_TOKENS,
+            "batch_size": DEVICE_BATCH_SIZE,
+            "reason": "stale policy version",
+        }
+
+    if calibration.eval_semantics_signature != current_eval_semantics_signature() or calibration.runtime_shape_signature != current_runtime_shape_signature():
+        return {
+            "rung": "default",
+            "status": "signature-mismatch",
+            "effective_confidence": calibration.confidence,
+            "freshness": None,
+            "policy_version": EVAL_POLICY_VERSION,
+            "limited_by": None,
+            "seq_len": MAX_SEQ_LEN,
+            "eval_tokens": CUDA_EVAL_TOKENS,
+            "batch_size": DEVICE_BATCH_SIZE,
+            "reason": "signature mismatch",
+        }
+
+    if (
+        calibration.seq_len != MAX_SEQ_LEN
+        or calibration.depth != DEPTH
+        or calibration.window_pattern != WINDOW_PATTERN
+    ):
+        return {
+            "rung": "default",
+            "status": "shape-fallback",
+            "effective_confidence": calibration.confidence,
+            "freshness": None,
+            "policy_version": EVAL_POLICY_VERSION,
+            "limited_by": None,
+            "seq_len": MAX_SEQ_LEN,
+            "eval_tokens": CUDA_EVAL_TOKENS,
+            "batch_size": DEVICE_BATCH_SIZE,
+            "reason": "shape fallback",
+        }
+
+    decision = choose_runtime_eval(calibration=calibration, time_budget=TIME_BUDGET)
+    return {
+        "rung": decision.rung_key,
+        "status": "calibrated" if decision.limited_by is None else "calibrated-limited",
+        "effective_confidence": decision.effective_confidence,
+        "freshness": decision.freshness,
+        "policy_version": EVAL_POLICY_VERSION,
+        "limited_by": decision.limited_by,
+        "seq_len": decision.rung.spec.seq_len,
+        "eval_tokens": decision.rung.spec.eval_tokens,
+        "batch_size": decision.rung.spec.batch_size,
+        "reason": f"{decision.rung_key} rung from {decision.calibration.label}",
+    }
 
 
 def _build_local_causal_mask(seq_len: int, window_size: tuple[int, int], device: torch.device):
@@ -766,6 +879,15 @@ if RESUME_TRAINING_STATE is not None and RESUME_TRAINING_STATE.get("hardware_key
         f"current hardware is {hardware_key}"
     )
 print(f"Preferred flash-attention repo: {cuda_runtime.selected_flash_attention_repo}")
+RUNTIME_EVAL_PLAN = _runtime_eval_plan()
+print(
+    "Runtime eval: "
+    f"status={RUNTIME_EVAL_PLAN['status']}, "
+    f"rung={RUNTIME_EVAL_PLAN['rung']}, "
+    f"seq_len={RUNTIME_EVAL_PLAN['seq_len']}, "
+    f"eval_tokens={RUNTIME_EVAL_PLAN['eval_tokens']}, "
+    f"batch_size={RUNTIME_EVAL_PLAN['batch_size']}"
+)
 
 def build_model_config(depth):
     base_dim = depth * ASPECT_RATIO
@@ -902,55 +1024,59 @@ def get_weight_decay(progress):
 
 
 def run_validation_eval(model, tokenizer):
-    eval_seq_len = ARGS.eval_seq_len or MAX_SEQ_LEN
-    eval_tokens = ARGS.eval_tokens or CUDA_EVAL_TOKENS
-    eval_batch_size = ARGS.eval_batch_size or DEVICE_BATCH_SIZE
-
-    eval_only = ARGS.eval_only
-    if eval_only or ARGS.eval_seq_len is not None or ARGS.eval_tokens is not None or ARGS.eval_batch_size is not None:
-        model.eval()
-        with autocast_ctx:
-            # Warm one step so compile/setup does not dominate the measured rung time.
-            warmup_tokens = max(eval_batch_size * eval_seq_len, eval_seq_len)
-            evaluate_bpb_configured(
-                model,
-                tokenizer,
-                eval_batch_size,
-                seq_len=eval_seq_len,
-                eval_tokens=warmup_tokens,
-            )
-            torch.cuda.synchronize()
-            t0 = time.perf_counter()
-            val_bpb = evaluate_bpb_configured(
-                model,
-                tokenizer,
-                eval_batch_size,
-                seq_len=eval_seq_len,
-                eval_tokens=eval_tokens,
-            )
-            torch.cuda.synchronize()
-            eval_seconds = time.perf_counter() - t0
-        return {
-            "val_bpb": val_bpb,
-            "eval_seconds": eval_seconds,
-            "eval_seq_len": eval_seq_len,
-            "eval_tokens": eval_tokens,
-            "eval_batch_size": eval_batch_size,
+    if ARGS.eval_only or ARGS.eval_seq_len is not None or ARGS.eval_tokens is not None or ARGS.eval_batch_size is not None:
+        eval_plan = {
+            "rung": "manual",
+            "status": "manual",
+            "effective_confidence": None,
+            "freshness": None,
+            "policy_version": EVAL_POLICY_VERSION,
+            "limited_by": None,
+            "seq_len": ARGS.eval_seq_len or MAX_SEQ_LEN,
+            "eval_tokens": ARGS.eval_tokens or CUDA_EVAL_TOKENS,
+            "batch_size": ARGS.eval_batch_size or DEVICE_BATCH_SIZE,
         }
+    else:
+        eval_plan = RUNTIME_EVAL_PLAN
+
+    eval_seq_len = eval_plan["seq_len"]
+    eval_tokens = eval_plan["eval_tokens"]
+    eval_batch_size = eval_plan["batch_size"]
 
     model.eval()
     with autocast_ctx:
+        # Warm one step so compile/setup does not dominate the measured rung time.
+        warmup_tokens = max(eval_batch_size * eval_seq_len, eval_seq_len)
+        evaluate_bpb_configured(
+            model,
+            tokenizer,
+            eval_batch_size,
+            seq_len=eval_seq_len,
+            eval_tokens=warmup_tokens,
+        )
         torch.cuda.synchronize()
         t0 = time.perf_counter()
-        val_bpb = evaluate_bpb(model, tokenizer, DEVICE_BATCH_SIZE)
+        val_bpb = evaluate_bpb_configured(
+            model,
+            tokenizer,
+            eval_batch_size,
+            seq_len=eval_seq_len,
+            eval_tokens=eval_tokens,
+        )
         torch.cuda.synchronize()
         eval_seconds = time.perf_counter() - t0
     return {
         "val_bpb": val_bpb,
         "eval_seconds": eval_seconds,
-        "eval_seq_len": MAX_SEQ_LEN,
-        "eval_tokens": None,
-        "eval_batch_size": DEVICE_BATCH_SIZE,
+        "eval_seq_len": eval_seq_len,
+        "eval_tokens": eval_tokens,
+        "eval_batch_size": eval_batch_size,
+        "canonical_rung": eval_plan["rung"],
+        "eval_calibration_status": eval_plan["status"],
+        "eval_calibration_effective_confidence": eval_plan["effective_confidence"],
+        "eval_calibration_freshness": eval_plan["freshness"],
+        "eval_calibration_limited_by": eval_plan["limited_by"],
+        "eval_policy_version": eval_plan["policy_version"],
     }
 
 # ---------------------------------------------------------------------------
@@ -1064,6 +1190,12 @@ eval_seconds = None
 eval_seq_len = None
 eval_tokens = None
 eval_batch_size = None
+canonical_rung = None
+eval_calibration_status = None
+eval_calibration_effective_confidence = None
+eval_calibration_freshness = None
+eval_calibration_limited_by = None
+eval_policy_version = None
 if ARGS.eval_only or not ARGS.benchmark_skip_eval:
     eval_result = run_validation_eval(model, tokenizer)
     val_bpb = eval_result["val_bpb"]
@@ -1071,6 +1203,12 @@ if ARGS.eval_only or not ARGS.benchmark_skip_eval:
     eval_seq_len = eval_result["eval_seq_len"]
     eval_tokens = eval_result["eval_tokens"]
     eval_batch_size = eval_result["eval_batch_size"]
+    canonical_rung = eval_result["canonical_rung"]
+    eval_calibration_status = eval_result["eval_calibration_status"]
+    eval_calibration_effective_confidence = eval_result["eval_calibration_effective_confidence"]
+    eval_calibration_freshness = eval_result["eval_calibration_freshness"]
+    eval_calibration_limited_by = eval_result["eval_calibration_limited_by"]
+    eval_policy_version = eval_result["eval_policy_version"]
 
 # Final summary
 t_end = time.time()
@@ -1104,6 +1242,18 @@ if eval_tokens is not None:
     print(f"eval_tokens:      {eval_tokens}")
 if eval_batch_size is not None:
     print(f"eval_batch_size:  {eval_batch_size}")
+if canonical_rung is not None:
+    print(f"canonical_rung:   {canonical_rung}")
+if eval_calibration_status is not None:
+    print(f"eval_calibration_status: {eval_calibration_status}")
+if eval_calibration_effective_confidence is not None:
+    print(f"eval_calibration_effective_confidence: {eval_calibration_effective_confidence}")
+if eval_calibration_freshness is not None:
+    print(f"eval_calibration_freshness: {eval_calibration_freshness}")
+if eval_calibration_limited_by is not None:
+    print(f"eval_calibration_limited_by: {eval_calibration_limited_by}")
+if eval_policy_version is not None:
+    print(f"eval_policy_version: {eval_policy_version}")
 print(f"eval_only:        {str(ARGS.eval_only).lower()}")
 print(f"training_seconds: {total_training_time:.1f}")
 print(f"total_seconds:    {t_end - t_start:.1f}")

@@ -8,6 +8,7 @@ from pathlib import Path
 
 from autoresearch_cuda.checkpoints import load_checkpoint_metadata
 from autoresearch_cuda.config import CUDA_PRESETS, resolve_run_preset
+from autoresearch_cuda.eval_policy import current_eval_semantics_signature, current_runtime_shape_signature
 from autoresearch_cuda.runtime import detect_cuda_runtime_profile, query_nvidia_driver_version
 from autoresearch_platform.summary import parse_summary
 
@@ -35,7 +36,7 @@ class CUDAEngine:
         supports_local_search=True,
         supports_eval_calibration=True,
         supports_checkpoint_mint=True,
-        supports_runtime_eval_policy=False,
+        supports_runtime_eval_policy=True,
         mutable_axes=("seq_len", "window_pattern", "device_batch_size", "total_batch_size", "depth"),
     )
 
@@ -234,6 +235,14 @@ class CUDAEngine:
             peak_vram_mb=self._get_float(summary, "peak_vram_mb"),
             training_seconds=self._get_float(summary, "training_seconds"),
             total_seconds=self._get_float(summary, "total_seconds"),
+            canonical_rung=self._get_str(summary, "canonical_rung"),
+            canonical_seq_len=self._get_int(summary, "canonical_eval_seq_len") or self._get_int(summary, "eval_seq_len"),
+            canonical_tokens=self._get_int(summary, "canonical_eval_tokens") or self._get_int(summary, "eval_tokens"),
+            canonical_batch=self._get_int(summary, "canonical_eval_batch_size") or self._get_int(summary, "eval_batch_size"),
+            eval_calibration_status=self._get_str(summary, "eval_calibration_status"),
+            eval_calibration_effective_confidence=self._get_str(summary, "eval_calibration_effective_confidence"),
+            eval_calibration_freshness=self._get_str(summary, "eval_calibration_freshness"),
+            eval_calibration_limited_by=self._get_str(summary, "eval_calibration_limited_by"),
             error_tail=error_tail,
         )
 
@@ -274,8 +283,8 @@ class CUDAEngine:
 
     def calibration_signatures(self) -> dict[str, str | None]:
         return {
-            "eval_semantics_signature": None,
-            "runtime_shape_signature": None,
+            "eval_semantics_signature": current_eval_semantics_signature(),
+            "runtime_shape_signature": current_runtime_shape_signature(),
         }
 
     def run_eval_calibration(
@@ -384,8 +393,8 @@ class CUDAEngine:
             "preset": preset,
             "hardware_key": hardware_key,
             "checkpoint": str(checkpoint_dir),
-            "eval_semantics_signature": None,
-            "runtime_shape_signature": None,
+            "eval_semantics_signature": current_eval_semantics_signature(),
+            "runtime_shape_signature": current_runtime_shape_signature(),
             "rows": rows,
         }
         if markdown_path is not None:
@@ -457,6 +466,13 @@ class CUDAEngine:
             return int(value)
         except (TypeError, ValueError):
             return None
+
+    @staticmethod
+    def _get_str(summary: dict, key: str) -> str | None:
+        value = summary.get(key)
+        if value is None:
+            return None
+        return str(value)
 
     @staticmethod
     def _default_eval_batch_size(device_batch_size: int) -> int:

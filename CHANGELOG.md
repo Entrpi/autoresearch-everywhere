@@ -29,7 +29,41 @@ On this hardware, the default canonical matched benchmark window for optimizatio
 
 ## Latest
 
-### New commit — cuda/checkpoints: finish FA4-backed GB10 bring-up and normalize compiled checkpoint keys — score `2`
+### New commit — cuda/eval: trust CUDA runtime eval calibration across tuned batch shapes — score `2`
+
+**AI-identified within brief, human-approved (2)**
+
+- Relax CUDA runtime eval-policy trust so it keys off model shape on known hardware instead of rejecting a calibration row just because local search picked a different training batch split.
+  - Meaning: CUDA runtime eval policy now treats `seq_len`, `depth`, and `window_pattern` as the compatibility boundary for a preset family, while ignoring `device_batch_size` and `total_batch_size` differences that only affect how the same model family is scheduled. That allows a tuned platform default like the GB10 `m5-small` candidate to reuse the seeded CUDA eval ladder even though the shipped preset batch is still different.
+  - Motivation: after the GB10 FA4 bring-up completed, real trainer runs were still falling back to `shape-fallback` because the runtime demanded exact training-batch equality with the seeded calibration row. That was too strict for the actual question the eval ladder is trying to answer and would have kept CUDA eval policy permanently brittle around local-search results.
+  - Purpose: make CUDA runtime eval selection behave like a real platform-calibration system by trusting the calibrated eval ladder for the same model family on the same hardware, even when batch tuning evolves separately.
+
+**Grounding**
+
+- Files:
+  - `CHANGELOG.md`
+  - `autoresearch_cuda/eval_policy.py`
+  - `autoresearch_cuda/train.py`
+  - `autoresearch_platform/cuda_engine.py`
+- Validation:
+  - `python3 -m py_compile autoresearch_cuda/train.py autoresearch_cuda/eval_policy.py autoresearch_platform/cuda_engine.py`
+  - real GB10 FA4-backed trainer probe:
+    - `python train.py --engine cuda --preset m5-small --time-budget 5 --no-checkpoint --no-compile`
+- Measurements:
+  - on real GB10 + FA4, `m5-small` now resolves:
+    - `eval_calibration_status=calibrated-limited`
+    - `canonical_rung=cheap`
+    - `eval_calibration_effective_confidence=seed-single-checkpoint`
+    - `eval_calibration_limited_by=confidence`
+  - same run completed with:
+    - `val_bpb=2.248036`
+    - `eval_seconds=0.8`
+    - `steady_state_tok_per_sec=138262.9`
+    - `resolved_attention_backend=installed:flash_attn.flash_attn_interface`
+
+## Committed History
+
+### March 13, 2026 — `0eb3fc5` — cuda/checkpoints: finish FA4-backed GB10 bring-up and normalize compiled checkpoint keys — score `2`
 
 **AI-identified within brief, human-approved (2)**
 
@@ -66,8 +100,6 @@ On this hardware, the default canonical matched benchmark window for optimizatio
     - `cheap`: `val_bpb=1.282243`, `eval_seconds=0.8`
     - `reference`: `val_bpb=1.253053`, `eval_seconds=4.5`
   - full bundle written under `/home/ent/autoresearch-everywhere-sync/results/analysis/cuda_fast_ladder_fa4/`, including `report.json`, `report.md`, and `promotion/platform_default.json`
-
-## Committed History
 
 ### March 13, 2026 — `d152d06` — calibration: align CUDA bring-up with the shared ladder and validate checkpoint-backed eval calibration on GB10 — score `2`
 
