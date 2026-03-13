@@ -32,15 +32,15 @@ But CUDA is still behind MLX on the core autoresearch loop itself.
 
 The largest remaining gaps are:
 
-1. no checkpoint-backed eval calibration
-2. no runtime eval-policy ladder comparable to MLX cheap/reference/full
-3. no candidate-default promotion path through `calibrate.py --engine cuda`
-4. no CUDA trainer integration evidence yet for kernel-lab targets
-5. no broad hardware validation matrix yet beyond GB10
+1. no runtime eval-policy ladder comparable to MLX cheap/reference/full
+2. no candidate-default promotion path through `calibrate.py --engine cuda`
+3. no CUDA trainer integration evidence yet for kernel-lab targets
+4. no broad hardware validation matrix yet beyond GB10
 
 So the shortest honest summary is:
 
 - CUDA is already a serious training engine and a serious kernel-lab backend
+- CUDA now has exact checkpoints, exact resume, and checkpoint-backed rung evaluation on GB10
 - CUDA is not yet at MLX parity for the full calibrated autoresearch loop
 
 ## What "Parity" Means Here
@@ -119,12 +119,12 @@ These are the real parity gaps:
 
 | Area | MLX | CUDA | Gap |
 | --- | --- | --- | --- |
-| Platform bring-up | full | partial | CUDA now has local search and exact checkpoint minting/resume, but still lacks eval calibration and promoted defaults in the shared engine |
+| Platform bring-up | full | partial | CUDA now has local search, exact checkpoint minting/resume, and checkpoint-backed eval calibration, but still lacks promoted defaults in the shared engine |
 | Checkpointing | full exact + async variants | exact sync | medium gap |
 | Resume | full | exact sync | medium gap |
-| Eval calibration | cheap/reference/full ladder | none | major gap |
+| Eval calibration | cheap/reference/full ladder plus runtime auto-selection | checkpoint-backed rung runner validated on GB10 | medium gap |
 | Runtime eval policy | confidence/freshness-aware | none | major gap |
-| Local search in bring-up | yes | no | medium gap |
+| Local search in bring-up | yes | yes | low gap |
 | Train/wall benchmarking sophistication | high | lower | medium gap |
 | Kernel-lab trace review | manual on MLX, but real | automated on CUDA | CUDA is actually ahead here |
 | Kernel-lab trainer integration | partial on MLX | not yet real on CUDA | major gap |
@@ -142,6 +142,7 @@ What is now grounded on GB10:
 - FlashAttention 4 works from the SM120-support branch / PR
 - exact sync checkpoint minting works through the core CUDA trainer loop
 - exact resume works and restores loader position deterministically
+- checkpoint-backed eval calibration works through the shared CUDA engine
 - `resolved_attention_backend` is correctly surfaced in trainer output
 - CUDA Nsight Systems trace capture works
 - CUDA Nsight Compute deeper profiling works when host counters are enabled
@@ -152,13 +153,30 @@ What GB10 tells us:
 
 - the shared engine/lab design is real enough to survive contact with actual NVIDIA hardware
 - CUDA is not blocked on architecture awareness anymore
-- the remaining parity work is mostly trainer-loop depth, not "bring-up impossibility"
+- the remaining parity work is mostly runtime policy, default promotion, and trainer-loop depth, not "bring-up impossibility"
 
 What GB10 does **not** yet prove:
 
 - parity on upstream/H100-style throughput or quality
-- parity on checkpointing or eval calibration
+- parity on runtime eval-policy auto-selection
 - parity across the broader NVIDIA fleet
+
+### GB10 eval calibration snapshot
+
+The first real checkpoint-backed CUDA eval ladder on GB10 was run against an exact sync checkpoint from the `upstream` preset using the shared `CUDAEngine.run_eval_calibration(...)` path. The rung results were:
+
+| Rung | Seq len | Batch | Eval tokens | `val_bpb` | Eval seconds | Abs error vs full |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| `cheap` | `2048` | `32` | `262144` | `2.212186` | `1.0` | `0.038056` |
+| `reference` | `2048` | `32` | `1572864` | `2.161972` | `5.5` | `0.012158` |
+| `full` | `2048` | `32` | `20971520` | `2.174130` | `72.2` | `0.000000` |
+
+Artifacts:
+
+- markdown report: `/home/ent/autoresearch-everywhere/results/analysis/gb10_eval_calibration.md`
+- per-rung logs under `/home/ent/autoresearch-everywhere/results/analysis/cuda_resume_smoke/eval_calibration_logs/`
+
+One nuance: this exact rung-validation pass ran in the minimal `vllm-node-tf5:latest` container plus the extra tokenizer/data dependencies needed for eval-only mode, so it resolved `torch-sdpa` rather than the separately validated FlashAttention 4 path. That still proves the rung runner and engine flow; it just should not be confused with the earlier FA4-enabled trainer smoke.
 
 ## Why We Need A100, H100, and B200
 
@@ -256,10 +274,10 @@ Exit criteria:
 - `calibrate.py --engine cuda --mode fast` can do more than one coarse fixed probe
 - CUDA can mint a checkpoint at the chosen point and resume it exactly from the shared workflow
 
-### Phase 2: Port the eval calibration stack
+### Phase 2: Finish the eval-policy stack
 
 Goal:
-- make CUDA participate in the same cheap/reference/full eval policy story
+- turn the now-working checkpoint-backed rung runner into a real cheap/reference/full runtime policy story
 
 Work:
 - build CUDA `eval-batch` calibration

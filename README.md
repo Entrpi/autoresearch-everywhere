@@ -84,7 +84,7 @@ That gives you:
 
 - the same top-level `prepare.py`, `train.py`, `calibrate.py`, and `kernel-lab.py` entrypoints as MLX
 - a CUDA runtime layer that distinguishes major families such as A100-class Ampere, Ada, Hopper, and Blackwell variants including GB10
-- exact sync checkpoints and resume support in the core CUDA trainer loop
+- exact sync checkpoints, resume, and checkpoint-backed eval calibration in the core CUDA trainer loop
 - a first-class kernel-lab tracing workflow with Nsight Systems and Nsight Compute
 - a deeper parity and rollout assessment in [docs/cuda-core-loop-parity.md](docs/cuda-core-loop-parity.md)
 
@@ -293,10 +293,10 @@ Current project snapshot from [CHANGELOG.md](CHANGELOG.md):
 
 | Metric | Value |
 | --- | --- |
-| Mean autonomy score | `3.31 / 6` |
-| Mean complexity | `6.89 / commit` |
-| Mean score per top-level bullet | `3.36 / 6` |
-| History covered | `80` commits across `13` subsystems |
+| Mean autonomy score | `3.16 / 6` |
+| Mean complexity | `6.56 / commit` |
+| Mean score per top-level bullet | `3.23 / 6` |
+| History covered | `81` commits across `13` subsystems |
 <!-- autonomy-golf-snapshot:end -->
 
 Refresh with:

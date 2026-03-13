@@ -47,6 +47,31 @@ def build_parser():
         action="store_true",
         help="Disable checkpoint writing even if the runtime would otherwise request it.",
     )
+    parser.add_argument(
+        "--eval-only",
+        action="store_true",
+        help="Skip training and evaluate a resumed checkpoint with the configured eval settings.",
+    )
+    parser.add_argument(
+        "--eval-seq-len",
+        type=int,
+        help="Sequence length for eval-only validation.",
+    )
+    parser.add_argument(
+        "--eval-tokens",
+        type=int,
+        help="Token budget for eval-only validation.",
+    )
+    parser.add_argument(
+        "--eval-batch-size",
+        type=int,
+        help="Batch size for eval-only validation.",
+    )
+    parser.add_argument(
+        "--no-compile",
+        action="store_true",
+        help="Disable torch.compile for short probes and debugging runs.",
+    )
     return parser
 
 
@@ -58,7 +83,13 @@ import torch.nn.functional as F
 
 from autoresearch_cuda.lab_integration import maybe_call_integration_target
 from autoresearch_cuda.runtime import detect_cuda_runtime_profile
-from autoresearch_cuda.prepare import Tokenizer, make_dataloader, evaluate_bpb
+from autoresearch_cuda.prepare import (
+    EVAL_TOKENS as CUDA_EVAL_TOKENS,
+    Tokenizer,
+    make_dataloader,
+    evaluate_bpb,
+    evaluate_bpb_configured,
+)
 from autoresearch_cuda.checkpoints import (
     load_checkpoint_metadata,
     load_training_checkpoint,
@@ -130,6 +161,11 @@ def _resolve_run_preset_with_resume(args):
 
 
 RUN_PRESET, RESUME_BUNDLE, RESUME_TRAINING_STATE = _resolve_run_preset_with_resume(ARGS)
+
+if ARGS.eval_only and ARGS.benchmark_skip_eval:
+    raise ValueError("--eval-only cannot be combined with --benchmark-skip-eval.")
+if ARGS.eval_only and RESUME_BUNDLE is None:
+    raise ValueError("--eval-only requires --resume-from.")
 
 try:
     from kernels import get_kernel
@@ -545,8 +581,7 @@ polar_express_coeffs = [
     (2.3465413258596377, -1.7097828382687081, 0.42323551169305323),
 ]
 
-@torch.compile(dynamic=False, fullgraph=True)
-def adamw_step_fused(p, grad, exp_avg, exp_avg_sq, step_t, lr_t, beta1_t, beta2_t, eps_t, wd_t):
+def _adamw_step_fused_impl(p, grad, exp_avg, exp_avg_sq, step_t, lr_t, beta1_t, beta2_t, eps_t, wd_t):
     p.mul_(1 - lr_t * wd_t)
     exp_avg.lerp_(grad, 1 - beta1_t)
     exp_avg_sq.lerp_(grad.square(), 1 - beta2_t)
@@ -556,9 +591,8 @@ def adamw_step_fused(p, grad, exp_avg, exp_avg_sq, step_t, lr_t, beta1_t, beta2_
     step_size = lr_t / bias1
     p.add_(exp_avg / denom, alpha=-step_size)
 
-@torch.compile(dynamic=False, fullgraph=True)
-def muon_step_fused(stacked_grads, stacked_params, momentum_buffer, second_momentum_buffer,
-                    momentum_t, lr_t, wd_t, beta2_t, ns_steps, red_dim):
+def _muon_step_fused_impl(stacked_grads, stacked_params, momentum_buffer, second_momentum_buffer,
+                         momentum_t, lr_t, wd_t, beta2_t, ns_steps, red_dim):
     # Nesterov momentum
     momentum = momentum_t.to(stacked_grads.dtype)
     momentum_buffer.lerp_(stacked_grads, 1 - momentum)
@@ -594,6 +628,14 @@ def muon_step_fused(stacked_grads, stacked_params, momentum_buffer, second_momen
     wd = wd_t.to(g.dtype)
     mask = (g * stacked_params) >= 0
     stacked_params.sub_(lr * g + lr * wd * stacked_params * mask)
+
+
+if ARGS.no_compile:
+    adamw_step_fused = _adamw_step_fused_impl
+    muon_step_fused = _muon_step_fused_impl
+else:
+    adamw_step_fused = torch.compile(_adamw_step_fused_impl, dynamic=False, fullgraph=True)
+    muon_step_fused = torch.compile(_muon_step_fused_impl, dynamic=False, fullgraph=True)
 
 
 class MuonAdamW(torch.optim.Optimizer):
@@ -755,45 +797,90 @@ tokens_per_fwdbwd = DEVICE_BATCH_SIZE * MAX_SEQ_LEN
 assert TOTAL_BATCH_SIZE % tokens_per_fwdbwd == 0
 grad_accum_steps = TOTAL_BATCH_SIZE // tokens_per_fwdbwd
 
-optimizer = model.setup_optimizer(
-    unembedding_lr=UNEMBEDDING_LR,
-    embedding_lr=EMBEDDING_LR,
-    scalar_lr=SCALAR_LR,
-    adam_betas=ADAM_BETAS,
-    matrix_lr=MATRIX_LR,
-    weight_decay=WEIGHT_DECAY,
+if not ARGS.no_compile:
+    model = torch.compile(model, dynamic=False)
+optimizer = None
+train_loader = None
+x = y = None
+epoch = 1
+loader_advance_steps = 0
+checkpoint_saved_to = None
+t_start_training = time.time()
+smooth_train_loss = 0.0
+total_training_time = float(RESUME_TRAINING_STATE["total_training_time"]) if RESUME_TRAINING_STATE is not None else 0.0
+steady_state_training_time = (
+    float(RESUME_TRAINING_STATE.get("steady_state_training_time", 0.0))
+    if RESUME_TRAINING_STATE is not None
+    else 0.0
 )
-
-model = torch.compile(model, dynamic=False)
-
-train_loader = make_dataloader(tokenizer, DEVICE_BATCH_SIZE, MAX_SEQ_LEN, "train")
-x, y, epoch = next(train_loader)  # prefetch first batch
+step = int(RESUME_TRAINING_STATE["step"]) if RESUME_TRAINING_STATE is not None else 0
+total_tokens = int(RESUME_TRAINING_STATE["total_tokens"]) if RESUME_TRAINING_STATE is not None else 0
+steady_state_step_count = (
+    int(RESUME_TRAINING_STATE.get("steady_state_step_count", 0))
+    if RESUME_TRAINING_STATE is not None
+    else 0
+)
+timing_count_starts_after_step = 10 if RESUME_TRAINING_STATE is None else step
 
 resumed_from = None
-if RESUME_BUNDLE is not None:
-    model.load_state_dict(RESUME_BUNDLE["model_state_dict"])
-    optimizer.load_state_dict(RESUME_BUNDLE["optimizer_state_dict"])
-    resumed_from = ARGS.resume_from
-    resume_step = int(RESUME_TRAINING_STATE["step"])
-    resume_epoch = int(RESUME_TRAINING_STATE["epoch"])
-    loader_advance_steps = resume_step * grad_accum_steps
-    if loader_advance_steps:
-        for _ in range(loader_advance_steps):
-            x, y, epoch = next(train_loader)
-    if epoch != resume_epoch:
-        raise RuntimeError(
-            f"Deterministic loader replay drifted: resumed epoch {epoch}, expected {resume_epoch}."
-        )
-
-print(f"Time budget: {TIME_BUDGET}s")
-print(f"Gradient accumulation steps: {grad_accum_steps}")
-if resumed_from is not None:
+if ARGS.eval_only:
+    if RESUME_BUNDLE is not None:
+        model.load_state_dict(RESUME_BUNDLE["model_state_dict"])
+        resumed_from = ARGS.resume_from
+        epoch = int(RESUME_TRAINING_STATE["epoch"])
+    print(f"Time budget: {TIME_BUDGET}s")
+    print(f"Gradient accumulation steps: {grad_accum_steps}")
+    print(f"Compile enabled: {str(not ARGS.no_compile).lower()}")
     print(
-        "Resume checkpoint: "
-        f"{resumed_from} (step={RESUME_TRAINING_STATE['step']}, "
-        f"training_seconds={RESUME_TRAINING_STATE['total_training_time']:.1f}, "
-        f"loader_batches={loader_advance_steps})"
+        "Eval only: "
+        f"seq_len={ARGS.eval_seq_len or MAX_SEQ_LEN}, "
+        f"eval_tokens={ARGS.eval_tokens or CUDA_EVAL_TOKENS}, "
+        f"batch_size={ARGS.eval_batch_size or DEVICE_BATCH_SIZE}"
     )
+    if resumed_from is not None:
+        print(
+            "Resume checkpoint: "
+            f"{resumed_from} (step={RESUME_TRAINING_STATE['step']}, "
+            f"training_seconds={RESUME_TRAINING_STATE['total_training_time']:.1f})"
+        )
+else:
+    optimizer = model.setup_optimizer(
+        unembedding_lr=UNEMBEDDING_LR,
+        embedding_lr=EMBEDDING_LR,
+        scalar_lr=SCALAR_LR,
+        adam_betas=ADAM_BETAS,
+        matrix_lr=MATRIX_LR,
+        weight_decay=WEIGHT_DECAY,
+    )
+
+    train_loader = make_dataloader(tokenizer, DEVICE_BATCH_SIZE, MAX_SEQ_LEN, "train")
+    x, y, epoch = next(train_loader)  # prefetch first batch
+
+    if RESUME_BUNDLE is not None:
+        model.load_state_dict(RESUME_BUNDLE["model_state_dict"])
+        optimizer.load_state_dict(RESUME_BUNDLE["optimizer_state_dict"])
+        resumed_from = ARGS.resume_from
+        resume_step = int(RESUME_TRAINING_STATE["step"])
+        resume_epoch = int(RESUME_TRAINING_STATE["epoch"])
+        loader_advance_steps = resume_step * grad_accum_steps
+        if loader_advance_steps:
+            for _ in range(loader_advance_steps):
+                x, y, epoch = next(train_loader)
+        if epoch != resume_epoch:
+            raise RuntimeError(
+                f"Deterministic loader replay drifted: resumed epoch {epoch}, expected {resume_epoch}."
+            )
+
+    print(f"Time budget: {TIME_BUDGET}s")
+    print(f"Gradient accumulation steps: {grad_accum_steps}")
+    print(f"Compile enabled: {str(not ARGS.no_compile).lower()}")
+    if resumed_from is not None:
+        print(
+            "Resume checkpoint: "
+            f"{resumed_from} (step={RESUME_TRAINING_STATE['step']}, "
+            f"training_seconds={RESUME_TRAINING_STATE['total_training_time']:.1f}, "
+            f"loader_batches={loader_advance_steps})"
+        )
 
 # Schedules (all based on progress = training_time / TIME_BUDGET)
 
@@ -813,137 +900,211 @@ def get_muon_momentum(step):
 def get_weight_decay(progress):
     return WEIGHT_DECAY * (1 - progress)
 
+
+def run_validation_eval(model, tokenizer):
+    eval_seq_len = ARGS.eval_seq_len or MAX_SEQ_LEN
+    eval_tokens = ARGS.eval_tokens or CUDA_EVAL_TOKENS
+    eval_batch_size = ARGS.eval_batch_size or DEVICE_BATCH_SIZE
+
+    eval_only = ARGS.eval_only
+    if eval_only or ARGS.eval_seq_len is not None or ARGS.eval_tokens is not None or ARGS.eval_batch_size is not None:
+        model.eval()
+        with autocast_ctx:
+            # Warm one step so compile/setup does not dominate the measured rung time.
+            warmup_tokens = max(eval_batch_size * eval_seq_len, eval_seq_len)
+            evaluate_bpb_configured(
+                model,
+                tokenizer,
+                eval_batch_size,
+                seq_len=eval_seq_len,
+                eval_tokens=warmup_tokens,
+            )
+            torch.cuda.synchronize()
+            t0 = time.perf_counter()
+            val_bpb = evaluate_bpb_configured(
+                model,
+                tokenizer,
+                eval_batch_size,
+                seq_len=eval_seq_len,
+                eval_tokens=eval_tokens,
+            )
+            torch.cuda.synchronize()
+            eval_seconds = time.perf_counter() - t0
+        return {
+            "val_bpb": val_bpb,
+            "eval_seconds": eval_seconds,
+            "eval_seq_len": eval_seq_len,
+            "eval_tokens": eval_tokens,
+            "eval_batch_size": eval_batch_size,
+        }
+
+    model.eval()
+    with autocast_ctx:
+        torch.cuda.synchronize()
+        t0 = time.perf_counter()
+        val_bpb = evaluate_bpb(model, tokenizer, DEVICE_BATCH_SIZE)
+        torch.cuda.synchronize()
+        eval_seconds = time.perf_counter() - t0
+    return {
+        "val_bpb": val_bpb,
+        "eval_seconds": eval_seconds,
+        "eval_seq_len": MAX_SEQ_LEN,
+        "eval_tokens": None,
+        "eval_batch_size": DEVICE_BATCH_SIZE,
+    }
+
 # ---------------------------------------------------------------------------
 # Training loop
 # ---------------------------------------------------------------------------
 
-t_start_training = time.time()
-smooth_train_loss = 0
-total_training_time = float(RESUME_TRAINING_STATE["total_training_time"]) if RESUME_TRAINING_STATE is not None else 0.0
-step = int(RESUME_TRAINING_STATE["step"]) if RESUME_TRAINING_STATE is not None else 0
-timing_count_starts_after_step = 10 if RESUME_TRAINING_STATE is None else step
-
-if total_training_time >= TIME_BUDGET:
-    print(
-        f"Training budget already satisfied at resume point "
-        f"({total_training_time:.1f}s >= {TIME_BUDGET:.1f}s); skipping training loop."
-    )
-
-while True:
+if not ARGS.eval_only:
     if total_training_time >= TIME_BUDGET:
-        break
-    torch.cuda.synchronize()
-    t0 = time.time()
-    for micro_step in range(grad_accum_steps):
-        with autocast_ctx:
-            loss = model(x, y)
-        train_loss = loss.detach()
-        loss = loss / grad_accum_steps
-        loss.backward()
-        x, y, epoch = next(train_loader)
+        print(
+            f"Training budget already satisfied at resume point "
+            f"({total_training_time:.1f}s >= {TIME_BUDGET:.1f}s); skipping training loop."
+        )
 
-    # Progress and schedules
-    progress = min(total_training_time / TIME_BUDGET, 1.0)
-    lrm = get_lr_multiplier(progress)
-    muon_momentum = get_muon_momentum(step)
-    muon_weight_decay = get_weight_decay(progress)
-    for group in optimizer.param_groups:
-        group["lr"] = group["initial_lr"] * lrm
-        if group['kind'] == 'muon':
-            group["momentum"] = muon_momentum
-            group["weight_decay"] = muon_weight_decay
-    optimizer.step()
-    model.zero_grad(set_to_none=True)
+    while True:
+        if total_training_time >= TIME_BUDGET:
+            break
+        torch.cuda.synchronize()
+        t0 = time.time()
+        for _micro_step in range(grad_accum_steps):
+            with autocast_ctx:
+                loss = model(x, y)
+            train_loss = loss.detach()
+            loss = loss / grad_accum_steps
+            loss.backward()
+            x, y, epoch = next(train_loader)
 
-    train_loss_f = train_loss.item()
+        progress = min(total_training_time / TIME_BUDGET, 1.0)
+        lrm = get_lr_multiplier(progress)
+        muon_momentum = get_muon_momentum(step)
+        muon_weight_decay = get_weight_decay(progress)
+        for group in optimizer.param_groups:
+            group["lr"] = group["initial_lr"] * lrm
+            if group['kind'] == 'muon':
+                group["momentum"] = muon_momentum
+                group["weight_decay"] = muon_weight_decay
+        optimizer.step()
+        model.zero_grad(set_to_none=True)
 
-    # Fast fail: abort if loss is exploding
-    if train_loss_f > 100:
-        print("FAIL")
-        exit(1)
+        train_loss_f = train_loss.item()
+        if train_loss_f > 100:
+            print("FAIL")
+            exit(1)
 
-    torch.cuda.synchronize()
-    t1 = time.time()
-    dt = t1 - t0
+        torch.cuda.synchronize()
+        t1 = time.time()
+        dt = t1 - t0
 
-    if step > timing_count_starts_after_step:
         total_training_time += dt
+        if step > timing_count_starts_after_step:
+            steady_state_training_time += dt
+            steady_state_step_count += 1
 
-    # Logging
-    ema_beta = 0.9
-    smooth_train_loss = ema_beta * smooth_train_loss + (1 - ema_beta) * train_loss_f
-    debiased_smooth_loss = smooth_train_loss / (1 - ema_beta**(step + 1))
-    pct_done = 100 * progress
-    tok_per_sec = int(TOTAL_BATCH_SIZE / dt)
-    mfu = 100 * num_flops_per_token * TOTAL_BATCH_SIZE / dt / H100_BF16_PEAK_FLOPS
-    remaining = max(0, TIME_BUDGET - total_training_time)
+        ema_beta = 0.9
+        smooth_train_loss = ema_beta * smooth_train_loss + (1 - ema_beta) * train_loss_f
+        debiased_smooth_loss = smooth_train_loss / (1 - ema_beta**(step + 1))
+        pct_done = 100 * progress
+        tok_per_sec = int(TOTAL_BATCH_SIZE / dt)
+        mfu = 100 * num_flops_per_token * TOTAL_BATCH_SIZE / dt / H100_BF16_PEAK_FLOPS
+        remaining = max(0, TIME_BUDGET - total_training_time)
 
-    print(f"\rstep {step:05d} ({pct_done:.1f}%) | loss: {debiased_smooth_loss:.6f} | lrm: {lrm:.2f} | dt: {dt*1000:.0f}ms | tok/sec: {tok_per_sec:,} | mfu: {mfu:.1f}% | epoch: {epoch} | remaining: {remaining:.0f}s    ", end="", flush=True)
+        print(f"\rstep {step:05d} ({pct_done:.1f}%) | loss: {debiased_smooth_loss:.6f} | lrm: {lrm:.2f} | dt: {dt*1000:.0f}ms | tok/sec: {tok_per_sec:,} | mfu: {mfu:.1f}% | epoch: {epoch} | remaining: {remaining:.0f}s    ", end="", flush=True)
 
-    # GC management (Python's GC causes ~500ms stalls)
-    if step == 0:
-        gc.collect()
-        gc.freeze()
-        gc.disable()
-    elif (step + 1) % 5000 == 0:
-        gc.collect()
+        if step == 0:
+            gc.collect()
+            gc.freeze()
+            gc.disable()
+        elif (step + 1) % 5000 == 0:
+            gc.collect()
 
-    step += 1
+        step += 1
 
-    # Time's up — but only stop after warmup steps so we don't count compilation
-    if step > 10 and total_training_time >= TIME_BUDGET:
-        break
+        if total_training_time >= TIME_BUDGET:
+            break
 
-print()  # newline after \r training log
+    print()  # newline after \r training log
 
-total_tokens = step * TOTAL_BATCH_SIZE
+    total_tokens = step * TOTAL_BATCH_SIZE
 
-checkpoint_saved_to = None
-if ARGS.checkpoint_path and not ARGS.no_checkpoint:
-    checkpoint_saved_to = save_training_checkpoint(
-        ARGS.checkpoint_path,
-        run_config={
-            "preset": ARGS.preset,
-            "time_budget": RUN_PRESET.time_budget,
-            "seq_len": MAX_SEQ_LEN,
-            "depth": DEPTH,
-            "window_pattern": WINDOW_PATTERN,
-            "device_batch_size": DEVICE_BATCH_SIZE,
-            "total_batch_size": TOTAL_BATCH_SIZE,
-            "grad_accum_steps": grad_accum_steps,
-        },
-        training_state={
-            "step": step,
-            "total_training_time": total_training_time,
-            "total_tokens": total_tokens,
-            "epoch": epoch,
-            "hardware_key": hardware_key,
-            "accelerator_architecture": cuda_runtime.reference_family.family_key,
-            "accelerator_compute_capability": f"{cap[0]}.{cap[1]}",
-            "resolved_attention_backend": RESOLVED_ATTENTION_BACKEND,
-        },
-        model=model,
-        optimizer=optimizer,
-    )
+    if ARGS.checkpoint_path and not ARGS.no_checkpoint:
+        checkpoint_saved_to = save_training_checkpoint(
+            ARGS.checkpoint_path,
+            run_config={
+                "preset": ARGS.preset,
+                "time_budget": RUN_PRESET.time_budget,
+                "seq_len": MAX_SEQ_LEN,
+                "depth": DEPTH,
+                "window_pattern": WINDOW_PATTERN,
+                "device_batch_size": DEVICE_BATCH_SIZE,
+                "total_batch_size": TOTAL_BATCH_SIZE,
+                "grad_accum_steps": grad_accum_steps,
+            },
+            training_state={
+                "step": step,
+                "total_training_time": total_training_time,
+                "steady_state_training_time": steady_state_training_time,
+                "steady_state_step_count": steady_state_step_count,
+                "total_tokens": total_tokens,
+                "epoch": epoch,
+                "hardware_key": hardware_key,
+                "accelerator_architecture": cuda_runtime.reference_family.family_key,
+                "accelerator_compute_capability": f"{cap[0]}.{cap[1]}",
+                "resolved_attention_backend": RESOLVED_ATTENTION_BACKEND,
+            },
+            model=model,
+            optimizer=optimizer,
+        )
 
 # Final eval
 val_bpb = None
-if not ARGS.benchmark_skip_eval:
-    model.eval()
-    with autocast_ctx:
-        val_bpb = evaluate_bpb(model, tokenizer, DEVICE_BATCH_SIZE)
+eval_seconds = None
+eval_seq_len = None
+eval_tokens = None
+eval_batch_size = None
+if ARGS.eval_only or not ARGS.benchmark_skip_eval:
+    eval_result = run_validation_eval(model, tokenizer)
+    val_bpb = eval_result["val_bpb"]
+    eval_seconds = eval_result["eval_seconds"]
+    eval_seq_len = eval_result["eval_seq_len"]
+    eval_tokens = eval_result["eval_tokens"]
+    eval_batch_size = eval_result["eval_batch_size"]
 
 # Final summary
 t_end = time.time()
-startup_time = t_start_training - t_start
-timed_step_count = max(step - timing_count_starts_after_step, 0)
-steady_state_mfu = 100 * num_flops_per_token * TOTAL_BATCH_SIZE * timed_step_count / total_training_time / H100_BF16_PEAK_FLOPS if total_training_time > 0 else 0
+effective_steady_time = steady_state_training_time if steady_state_training_time > 0 else total_training_time
+effective_steady_steps = steady_state_step_count if steady_state_step_count > 0 else step
+steady_state_mfu = (
+    100
+    * num_flops_per_token
+    * TOTAL_BATCH_SIZE
+    * effective_steady_steps
+    / effective_steady_time
+    / H100_BF16_PEAK_FLOPS
+    if effective_steady_time > 0
+    else 0
+)
 peak_vram_mb = torch.cuda.max_memory_allocated() / 1024 / 1024
-steady_state_tok_per_sec = (TOTAL_BATCH_SIZE * timed_step_count / total_training_time) if total_training_time > 0 else 0.0
+steady_state_tok_per_sec = (
+    TOTAL_BATCH_SIZE * effective_steady_steps / effective_steady_time
+    if effective_steady_time > 0
+    else 0.0
+)
 
 print("---")
 if val_bpb is not None:
     print(f"val_bpb:          {val_bpb:.6f}")
+if eval_seconds is not None:
+    print(f"eval_seconds:     {eval_seconds:.1f}")
+if eval_seq_len is not None:
+    print(f"eval_seq_len:     {eval_seq_len}")
+if eval_tokens is not None:
+    print(f"eval_tokens:      {eval_tokens}")
+if eval_batch_size is not None:
+    print(f"eval_batch_size:  {eval_batch_size}")
+print(f"eval_only:        {str(ARGS.eval_only).lower()}")
 print(f"training_seconds: {total_training_time:.1f}")
 print(f"total_seconds:    {t_end - t_start:.1f}")
 print(f"peak_vram_mb:     {peak_vram_mb:.1f}")

@@ -29,9 +29,54 @@ On this hardware, the default canonical matched benchmark window for optimizatio
 
 ## Latest
 
-### New commit — cuda: add exact checkpoint and resume support — score `3` — complexity `6`
+### New commit — calibration: align CUDA bring-up with the shared ladder and validate checkpoint-backed eval calibration on GB10 — score `3` — complexity `8`
 
 **AI-identified within brief, human-shaped (3)**
+
+- Add and validate the next CUDA parity slice: shared-ladder bring-up plus checkpoint-backed eval-only rung execution through the shared engine on a real GB10 box.
+  - Meaning: the CUDA path now uses the same named model-scale ladder as the MLX side (`m5-tiny` through `m5-xlarge`) for platform bring-up, with bounded short-probe batch shapes that keep Blackwell calibration runs practical. The CUDA trainer can also resume from an exact checkpoint in an `--eval-only` mode, override eval sequence length / token budget / batch size, and emit structured eval-only summaries. The shared CUDA engine can call that path repeatedly to build `cheap` / `reference` / `full` rung reports against a saved checkpoint instead of only talking about future parity in the abstract.
+  - Motivation: exact checkpoint/resume was already landed, but the parity roadmap still honestly said CUDA had no real eval-calibration story, and the bring-up path was still anchored to CUDA-specific shapes rather than the shared preset ladder. The next thing worth proving was not more theory; it was whether the shared engine could use the common scale ladder, drive rung evaluation on the real GB10 system, and return useful candidate-default artifacts.
+  - Purpose: move CUDA from “trainer can resume” to “trainer can participate in the same checkpoint-backed calibration workflow shape as MLX,” while also making `calibrate.py --engine cuda` behave like a real shared-platform bring-up instead of a special-case CUDA probe.
+  - Defining a CUDA-side `m5-tiny` → `m5-xlarge` ladder in `autoresearch_cuda/config.py`.
+  - Extending `autoresearch_cuda/train.py` with configurable `--eval-only`, `--eval-seq-len`, `--eval-tokens`, and `--eval-batch-size`.
+  - Extending `autoresearch_platform/cuda_engine.py` with `run_eval_calibration(...)`.
+  - Teaching the shared CUDA engine to use bounded short-probe batch shapes and complete fast-mode bring-up through checkpoint mint, local search, and eval calibration.
+  - Fixing markdown artifact creation so eval-calibration reports can be written into fresh result directories.
+
+**Grounding**
+
+- Files:
+  - `CHANGELOG.md`
+  - `README.md`
+  - `docs/cuda-core-loop-parity.md`
+  - `autoresearch_cuda/config.py`
+  - `autoresearch_cuda/prepare.py`
+  - `autoresearch_cuda/train.py`
+  - `autoresearch_platform/cuda_engine.py`
+- Validation:
+  - `python3 -m py_compile autoresearch_cuda/config.py autoresearch_cuda/prepare.py autoresearch_cuda/train.py autoresearch_platform/cuda_engine.py`
+  - real GB10 fast bring-up:
+    - `python calibrate.py --engine cuda --mode fast ...`
+  - real GB10 eval-only rung:
+    - `python train.py --engine cuda --preset upstream --resume-from ... --eval-only --eval-seq-len 2048 --eval-tokens 262144 --eval-batch-size 32 --no-checkpoint`
+  - real GB10 shared-engine rung calibration:
+    - `CUDAEngine.run_eval_calibration(..., rungs=["cheap", "reference", "full"], ...)`
+- Measurements:
+  - GB10 fast-mode bring-up on the minimal CUDA container completed end to end through `report.json` / `promotion/` and selected:
+    - candidate default preset `m5-tiny`
+    - tuned point `seq_len=256`, `device_batch_size=16`, `total_batch_size=8192`, `grad_accum_steps=2`
+  - GB10 full rung table from the shared engine:
+    - `cheap`: `val_bpb=2.212186`, `eval_seconds=1.0`, `abs_error_vs_full=0.038056`
+    - `reference`: `val_bpb=2.161972`, `eval_seconds=5.5`, `abs_error_vs_full=0.012158`
+    - `full`: `val_bpb=2.174130`, `eval_seconds=72.2`
+  - markdown artifact written successfully at `/home/ent/autoresearch-everywhere/results/analysis/gb10_eval_calibration.md`
+  - the validated rung run resolved `torch-sdpa` in the minimal GB10 container, so these numbers prove the calibration path itself rather than the separately validated FA4-enabled path
+
+## Committed History
+
+### March 13, 2026 — `54c574a` — cuda: add exact checkpoint and resume support — score `2`
+
+**AI-identified within brief, human-approved (2)**
 
 - Add exact sync checkpoint minting and exact resume to the core CUDA trainer loop, then validate it on the real GB10 Blackwell system.
   - Meaning: the CUDA trainer can now write a final exact checkpoint bundle containing model weights, optimizer state, run config, and training progress, and then resume from that bundle while restoring the same preset shape and replaying the train-loader position deterministically. Resumed runs interpret `--time-budget` as a new cumulative target, not an extra delta, and the trainer no longer counts the first resumed compile-heavy step against the resumed training budget.
@@ -73,11 +118,9 @@ On this hardware, the default canonical matched benchmark window for optimizatio
     - `resolved_attention_backend=torch-sdpa`
     - resumed from the saved checkpoint with deterministic loader replay (`loader_batches=28`)
 
-## Committed History
+### March 13, 2026 — `b8871fe` — calibration: start CUDA engine parity with local search and runtime-safe bring-up — score `2`
 
-### March 13, 2026 — `b8871fe` — calibration: start CUDA engine parity with local search and runtime-safe bring-up — score `4` — complexity `7`
-
-**Human-directed, AI-shaped (4)**
+**AI-identified within brief, human-approved (2)**
 
 - Start the first real CUDA core-loop parity slice by making the shared CUDA engine participate in local search and by removing MLX-specific import assumptions that were breaking CUDA-only bring-up environments.
   - Meaning: the CUDA engine now advertises and implements local search through the shared engine boundary, with real sequence-length, window-pattern, and batch-shape candidates instead of a single fixed upstream point. `calibrate_platform.py` also no longer hard-imports MLX eval-policy modules at startup, so `calibrate.py --engine cuda` can run in a CUDA-only environment without `mlx` installed. The CUDA trainer now treats the repo-local `kernels` package as optional instead of a mandatory import, which keeps GB10-class environments that rely on installed FlashAttention packages from failing before training even begins.
@@ -101,9 +144,9 @@ On this hardware, the default canonical matched benchmark window for optimizatio
 - Measurements:
   - No new stable trainer benchmark was recorded in this slice; the main grounded result is that the parity path now reaches real CUDA probing on GB10 instead of stopping on infrastructure mismatches.
 
-### March 13, 2026 — `69960ca` — docs: add CUDA core-loop parity roadmap — score `4` — complexity `5`
+### March 13, 2026 — `69960ca` — docs: add CUDA core-loop parity roadmap — score `2`
 
-**Human-directed, AI-shaped (4)**
+**AI-identified within brief, human-approved (2)**
 
 - Add a dedicated CUDA parity assessment that explains what already works, what is still missing from the shared trainer loop, and how GB10, A100, H100, and B200 should be used to close the gap.
   - Meaning: the repo now has a standalone roadmap for CUDA trainer parity in `docs/cuda-core-loop-parity.md`. It defines what “parity” means here, separates already-strong CUDA areas from the remaining MLX-only features, documents what GB10 already proved, and lays out the phased path toward checkpointing, eval calibration, runtime policy, platform bring-up, kernel-lab trainer integration, and finally whole attention backend experiments such as FlashAttention and SageAttention.
@@ -123,9 +166,9 @@ On this hardware, the default canonical matched benchmark window for optimizatio
 - Measurements:
   - No new runtime measurements; this is a synthesis and planning document grounded in the existing GB10 validation and the current shared-engine code.
 
-### March 13, 2026 — `71788a0` — cuda: add GB10-compatible attention fallback and shared summary parsing — score `3` — complexity `5`
+### March 13, 2026 — `71788a0` — cuda: add GB10-compatible attention fallback and shared summary parsing — score `2`
 
-**AI-identified within brief, human-shaped (3)**
+**AI-identified within brief, human-approved (2)**
 
 - Make the CUDA trainer resolve real FlashAttention implementations more flexibly and fall back cleanly when they are unavailable, while moving trainer-summary parsing into one shared module.
   - Meaning: the CUDA trainer no longer assumes a single packaged FlashAttention path. It now tries the installed `flash_attn.flash_attn_interface` path first, then the older `hopper.flash_attn_interface`, then the repo-local `kernels` package, and finally falls back to PyTorch SDPA with a local-window causal mask. At the same time, the `parse_summary` helper is no longer duplicated inside the eval-calibration tooling; it now lives in `autoresearch_platform/summary.py` and is reused by both MLX and CUDA platform code.
@@ -154,9 +197,9 @@ On this hardware, the default canonical matched benchmark window for optimizatio
     - `peak_vram_mb=45011.5`
     - `num_params_M=50.3`
 
-### March 13, 2026 — `fde764c` — docs: add a kernel-lab roadmap toward whole attention backends — score `4` — complexity `5`
+### March 13, 2026 — `fde764c` — docs: add a kernel-lab roadmap toward whole attention backends — score `2`
 
-**Human-directed, AI-shaped (4)**
+**AI-identified within brief, human-approved (2)**
 
 - Add a roadmap section to `docs/kernel-lab.md` that evaluates the current lab state and lays out the path from seam-level kernels to whole attention backends such as FlashAttention and SageAttention.
   - Meaning: the kernel-lab doc no longer stops at describing the current workflows. It now ends with an explicit assessment of where the lab is strong today, where it is still weak, and the staged path from starter seams to composed-path work, backend-level adapters, whole attention backend experiments, and eventual cross-backend parity.
@@ -174,9 +217,9 @@ On this hardware, the default canonical matched benchmark window for optimizatio
 - Measurements:
   - No new runtime measurements; this was a documentation and planning update.
 
-### March 13, 2026 — `0c5657b` — docs: fold CUDA into the main README flow — score `4` — complexity `6`
+### March 13, 2026 — `0c5657b` — docs: fold CUDA into the main README flow — score `2`
 
-**Human-directed, AI-shaped (4)**
+**AI-identified within brief, human-approved (2)**
 
 - Fold CUDA into the main README start-here story instead of leaving it in an appendix, and keep the workstation sweep section framed around its actual user story.
   - Meaning: the README now presents CUDA as a first-class engine behind the same `prepare.py`, `train.py`, `calibrate.py`, and `kernel-lab.py` front doors, with a dedicated NVIDIA shortcut under `Start Here`, instead of treating it as a side note after the main story. The sweep tooling section also stays framed as `Manual Longer Sweeps`, which is the real user-facing job it does.
@@ -195,9 +238,9 @@ On this hardware, the default canonical matched benchmark window for optimizatio
 - Measurements:
   - No new runtime measurements; this was a documentation and framing cleanup.
 
-### March 13, 2026 — `b74bff3` — docs: tighten the kernel-lab front door — score `3` — complexity `5`
+### March 13, 2026 — `b74bff3` — docs: tighten the kernel-lab front door — score `2`
 
-**AI-identified within brief, human-shaped (3)**
+**AI-identified within brief, human-approved (2)**
 
 - Rewrite the README kernel-lab section around the user-facing workflow and capabilities story instead of the full command catalog.
   - Meaning: the front door now explains what kernel-lab is for, what it can do on MLX and CUDA today, and how to start from it, while pushing the long command lists, GB10 setup notes, and deeper backend mechanics into the linked kernel-lab doc.
@@ -210,9 +253,9 @@ On this hardware, the default canonical matched benchmark window for optimizatio
     - one or two concrete starting commands
   - Moving the detailed workflows and setup notes behind [docs/kernel-lab.md](/Users/ent/Codex/autoresearch/docs/kernel-lab.md).
 
-### March 13, 2026 — `827b199` — docs: pin GB10 CUDA validation environment — score `3` — complexity `5`
+### March 13, 2026 — `827b199` — docs: pin GB10 CUDA validation environment — score `2`
 
-**AI-identified within brief, human-shaped (3)**
+**AI-identified within brief, human-approved (2)**
 
 - Tighten CUDA trace-family parsing and document the first real GB10 deep-profile results and setup requirements.
   - Meaning: the CUDA lab is no longer only synthetically trace-capable. It now has a real Blackwell GB10 validation path where `capture`, `trace-profile`, `auto-review`, and `deep-profile` all run successfully, and the lab’s family ranking is corrected against actual Nsight Systems output instead of the earlier false-positive `matmul_epilogue` mapping.
