@@ -29,9 +29,9 @@ On this hardware, the default canonical matched benchmark window for optimizatio
 
 ## Latest
 
-### New commit — calibration: add multi-horizon truth-backed projection gating — score `2`
+### New commit — calibration: add multi-horizon truth-backed projection gating — score `3` — complexity `11`
 
-**AI-identified within brief, human-approved (2)**
+**AI-identified within brief, human-shaped (3)**
 
 - Add a multi-horizon projection gate that compares shorter and longer finalist curves against the same `300s` truth target before declaring that there is enough signal to stop.
   - Meaning: the shared curve layer now reasons across two observed horizons instead of trusting a single partial curve snapshot. The calibration flow compares the shorter finalist projections with the longer finalist projections, measures whether the winner stays stable as more real training time is observed, and only carries the `enough_signal` decision forward when the longer-horizon result is both strong enough and stable enough.
@@ -39,17 +39,27 @@ On this hardware, the default canonical matched benchmark window for optimizatio
   - Purpose: make the horizon model trustworthy enough to guide early stopping decisions in `calibrate.py` without pretending that one short curve can stand in for the real `300s` objective.
   - Adding `MultiHorizonProjectionDiagnostics` and `MultiHorizonProjectionDecision` plus the shared `compare_multi_horizon_curves(...)` helper in `autoresearch_platform/curve_projection.py`.
   - Updating `tools/calibrate_platform.py` so the finalist stage compares the `30s` finalist curves against the earlier projection curves, records per-preset stability diagnostics, and gates `enough_signal` on that multi-horizon check instead of reading the long-horizon decision directly.
+  - Generalizing `tools/curve_report.py` into a shared front end that can ingest arbitrary short-horizon and longer-horizon curve artifacts from files or directories, then emit one confidence-bearing projection table using the same shared projection logic as `calibrate.py`.
+  - Preserving `truth-match` metadata through the winner-probability enrichment step in `autoresearch_platform/curve_projection.py`, so real multi-horizon reports keep their actual projection source and matched-truth count instead of silently degrading to `generic-projection`.
+  - Switching the calibration and stability math from horizon-seconds to horizon-tokens where it matters, so truth-curve matching, calibration-point selection, and multi-horizon diagnostics all operate in the same token-accounted domain that the projector already used for its core fit.
+  - Bringing over the remaining useful LR-style control diagnostics into the shared multi-horizon layer: minimum fit quality across horizons, effective damping, explicit horizon correction, projected gap, projected sigma, and projected SNR now sit alongside `alpha` and the older stability fields instead of being implicit inside the stop/go decision.
+  - Extending the shared curve-report output to emit observed tokens, target tokens, calibration-token horizons, and token-based horizon diagnostics across arbitrary requested targets such as `60s`, `120s`, `300s`, and `900s`.
+  - Wiring those same LR-style diagnostics through the calibration report path in `tools/calibrate_platform.py`, so the finalist diagnostics table and horizon tables expose the same fit-quality and correction signals as the standalone `curve_report.py` tool.
 
 **Grounding**
 
 - Files:
   - `CHANGELOG.md`
   - `autoresearch_platform/curve_projection.py`
+  - `tools/curve_report.py`
   - `tools/calibrate_platform.py`
 - Validation:
   - `python3 -m py_compile autoresearch_platform/curve_projection.py tools/calibrate_platform.py`
   - synthetic positive multi-horizon projection check using `/tmp/test_multi_horizon.py`
   - synthetic stability-path probe using `/tmp/test_multi_horizon_unstable.py`
+  - `python3 -m py_compile autoresearch_platform/curve_projection.py tools/curve_report.py tools/cuda_curve_report.py`
+  - `python3 tools/curve_report.py /tmp/gb10_curve_runs/gb10_m5small_curve60.json /tmp/gb10_curve_runs/gb10_m5balanced_curve60.json --truth-curves-dir /tmp/gb10_curve_runs --horizons 60,120,300,900`
+  - `python3 tools/curve_report.py /tmp/gb10_curve_runs/gb10_m5small_curve60.json /tmp/gb10_curve_runs/gb10_m5balanced_curve60.json --truth-curves-dir /tmp/gb10_curve_runs --json --horizons 60,120,300,900`
   - `python3 tools/changelog_scores.py --group-by entry --format csv --include-latest --verify`
   - `python3 tools/render_autonomy_badge.py`
 - Measurements:
@@ -60,6 +70,10 @@ On this hardware, the default canonical matched benchmark window for optimizatio
     - `m5-large` at `1.285034`
     - `m5-tiny` at `1.465999`
   - the synthetic positive check confirmed that a winner can remain `enough_signal=true` when the shorter and longer horizons agree closely on the projected target outcome
+  - the shared token-accounted horizon table on the real GB10 `m5-small` vs `m5-balanced` `60s` curves now reports:
+    - `60s`, `120s`, and `300s` as `truth-match`
+    - `900s` as `calibrated-projection`
+    - winner `m5-balanced` with projected winner-token counts of `10.9M`, `27.1M`, `75.5M`, and `236.9M` respectively
 
 ## Committed History
 

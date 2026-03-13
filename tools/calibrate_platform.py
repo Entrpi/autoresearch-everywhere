@@ -25,6 +25,7 @@ from autoresearch_platform.engines import (  # noqa: E402
 )
 from autoresearch_platform.platform_defaults import write_platform_default_cache  # noqa: E402
 from autoresearch_platform.curve_projection import (  # noqa: E402
+    build_horizon_projection_table,
     build_projection_calibration,
     compare_projected_curves,
     compare_multi_horizon_curves,
@@ -51,6 +52,7 @@ PLATEAU_FRACTION = 0.99
 SHARP_EDGE_DROP_FRACTION = 0.95
 PROJECTION_TARGET_SECONDS = 300.0
 SCALING_TARGET_SECONDS = 900.0
+REPORT_HORIZONS = (60.0, 120.0, PROJECTION_TARGET_SECONDS, SCALING_TARGET_SECONDS)
 
 MODE_FAST = "fast"
 MODE_FULL = "full"
@@ -570,13 +572,20 @@ def projected_row_to_dict(item) -> dict:
         {
             "projected_final_bpb": item.corrected_val_bpb,
             "projection_std": item.projection_std,
+            "fit_r2": item.fit_r2,
+            "fit_sigma": item.fit_sigma,
             "calibration_horizon_seconds": item.calibration_horizon_seconds,
+            "calibration_horizon_tokens": item.calibration_horizon_tokens,
             "calibration_sample_count": item.calibration_sample_count,
             "correction_mean": item.correction_mean,
             "projection_source": item.projection_source,
             "matched_truth_count": item.matched_truth_count,
             "winner_probability": item.winner_probability,
             "enough_signal": item.enough_signal,
+            "confidence_reason": item.confidence_reason,
+            "truth_anchor_seconds": item.truth_anchor_seconds,
+            "truth_anchor_tokens": item.truth_anchor_tokens,
+            "extrapolation_ratio": item.extrapolation_ratio,
         }
     )
     return payload
@@ -1185,14 +1194,61 @@ def format_cell(value) -> str:
     return str(value)
 
 
+def horizon_rows_for_report(rows: list[dict]) -> list[dict]:
+    formatted = []
+    for row in rows:
+        item = dict(row)
+        low = item.get("interval_low")
+        high = item.get("interval_high")
+        item["confidence_interval"] = (
+            f"[{low:.6f}, {high:.6f}]"
+            if isinstance(low, (int, float)) and isinstance(high, (int, float))
+            else ""
+        )
+        fit_r2 = item.get("fit_r2")
+        item["fit_r2_display"] = f"{fit_r2:.3f}" if isinstance(fit_r2, (int, float)) else "n/a"
+        fit_sigma = item.get("fit_sigma")
+        item["fit_sigma_display"] = f"{fit_sigma:.6f}" if isinstance(fit_sigma, (int, float)) else "n/a"
+        correction = item.get("correction_mean")
+        item["correction_display"] = f"{correction:.6f}" if isinstance(correction, (int, float)) else "n/a"
+        ratio = item.get("extrapolation_ratio")
+        item["extrapolation_ratio_display"] = f"{ratio:.3f}" if isinstance(ratio, (int, float)) else "n/a"
+        fit_quality_min = item.get("fit_quality_min")
+        item["fit_quality_min_display"] = f"{fit_quality_min:.3f}" if isinstance(fit_quality_min, (int, float)) else "n/a"
+        effective_damping = item.get("effective_damping")
+        item["effective_damping_display"] = (
+            f"{effective_damping:.3f}" if isinstance(effective_damping, (int, float)) else "n/a"
+        )
+        horizon_correction = item.get("horizon_correction")
+        item["horizon_correction_display"] = (
+            f"{horizon_correction:.6f}" if isinstance(horizon_correction, (int, float)) else "n/a"
+        )
+        projection_delta = item.get("projection_delta")
+        item["projection_delta_display"] = (
+            f"{projection_delta:.6f}" if isinstance(projection_delta, (int, float)) else "n/a"
+        )
+        projection_sigma = item.get("projection_sigma")
+        item["projection_sigma_display"] = (
+            f"{projection_sigma:.6f}" if isinstance(projection_sigma, (int, float)) else "n/a"
+        )
+        projection_snr = item.get("projection_snr")
+        item["projection_snr_display"] = (
+            f"{projection_snr:.3f}" if isinstance(projection_snr, (int, float)) else "n/a"
+        )
+        formatted.append(item)
+    return formatted
+
+
 def write_report(path: Path, *, payload: dict) -> None:
     fingerprint = payload["hardware_fingerprint"]
     coarse_rows = payload["coarse_envelope"]["rows"]
     ranking_rows = payload["candidate_ranking"]["rows"]
     projection_payload = payload.get("projection_ranking")
     projection_rows = projection_payload["rows"] if isinstance(projection_payload, dict) else None
+    projection_horizon_rows = projection_payload["horizon_rows"] if isinstance(projection_payload, dict) else None
     finalist_payload = payload.get("finalist_projection")
     finalist_rows = finalist_payload["rows"] if isinstance(finalist_payload, dict) else None
+    finalist_horizon_rows = finalist_payload["horizon_rows"] if isinstance(finalist_payload, dict) else None
     local_rows = payload["local_search"]["rows"]
     candidate_default = payload["candidate_default"]
     scaling_candidate = payload.get("scaling_candidate")
@@ -1300,6 +1356,32 @@ def write_report(path: Path, *, payload: dict) -> None:
         ),
         "",
     ]
+    if isinstance(projection_payload, dict) and isinstance(projection_payload.get("decision"), dict):
+        report.extend(
+            [
+                "### Projection Decision",
+                "",
+                f"- Winner probability threshold met: `{projection_payload['decision'].get('enough_signal')}`",
+                f"- Stability reason: `{projection_payload['decision'].get('stability_reason') or projection_payload['decision'].get('confidence_reason')}`",
+                f"- Winner probability: `{projection_payload['decision'].get('top_winner_probability')}`",
+                f"- Margin to second: `{projection_payload['decision'].get('top_margin_to_second')}`",
+                f"- Margin SNR: `{projection_payload['decision'].get('top_margin_snr')}`",
+                "",
+            ]
+        )
+    if isinstance(finalist_payload, dict) and isinstance(finalist_payload.get("decision"), dict):
+        report.extend(
+            [
+                "### Finalist Decision",
+                "",
+                f"- Winner probability threshold met: `{finalist_payload['decision'].get('enough_signal')}`",
+                f"- Stability reason: `{finalist_payload['decision'].get('stability_reason') or finalist_payload['decision'].get('confidence_reason')}`",
+                f"- Winner probability: `{finalist_payload['decision'].get('top_winner_probability')}`",
+                f"- Margin to second: `{finalist_payload['decision'].get('top_margin_to_second')}`",
+                f"- Margin SNR: `{finalist_payload['decision'].get('top_margin_snr')}`",
+                "",
+            ]
+        )
     if projection_rows:
         report.extend(
             [
@@ -1315,12 +1397,54 @@ def write_report(path: Path, *, payload: dict) -> None:
                         ("total_batch_size", "Total batch"),
                         ("curve_points", "Curve points"),
                         ("projected_final_bpb", "Projected 300s val_bpb"),
+                        ("correction_mean", "Correction"),
                         ("projection_std", "Projection std"),
+                        ("fit_r2", "Fit R²"),
+                        ("fit_sigma", "Fit σ"),
                         ("winner_probability", "Winner p"),
+                        ("confidence_reason", "Reason"),
                         ("final_val_bpb", "Observed val_bpb"),
                         ("calibration_horizon_seconds", "Truth horizon"),
+                        ("calibration_horizon_tokens", "Truth tokens"),
+                        ("truth_anchor_seconds", "Anchor sec"),
+                        ("truth_anchor_tokens", "Anchor tokens"),
+                        ("extrapolation_ratio", "Ratio"),
                         ("projection_source", "Projection source"),
                         ("matched_truth_count", "Truth matches"),
+                    ],
+                ),
+                "",
+            ]
+        )
+    if projection_horizon_rows:
+        report.extend(
+            [
+                "### Projection Horizon Table",
+                "",
+                "These rows use the same shared projection logic as the standalone `curve_report.py` tool. They show how the current candidate family curves project across multiple horizons, including confidence intervals and whether each horizon is backed by truth curves or only calibrated projection.",
+                "",
+                markdown_table(
+                    horizon_rows_for_report(projection_horizon_rows),
+                    [
+                        ("target_seconds", "Horizon"),
+                        ("preset", "Preset"),
+                        ("device_batch_size", "Device batch"),
+                        ("total_batch_size", "Total batch"),
+                        ("observed_tokens", "Observed tokens"),
+                        ("target_tokens", "Target tokens"),
+                        ("corrected_val_bpb", "Projected val_bpb"),
+                        ("correction_display", "Correction"),
+                        ("confidence_interval", "95% CI"),
+                        ("fit_r2_display", "Fit R²"),
+                        ("fit_sigma_display", "Fit σ"),
+                        ("winner_probability", "Winner p"),
+                        ("confidence_reason", "Reason"),
+                        ("truth_anchor_seconds", "Anchor sec"),
+                        ("truth_anchor_tokens", "Anchor tokens"),
+                        ("extrapolation_ratio_display", "Ratio"),
+                        ("projection_source", "Source"),
+                        ("matched_truth_count", "Truth"),
+                        ("confidence_label", "Confidence"),
                     ],
                 ),
                 "",
@@ -1341,12 +1465,91 @@ def write_report(path: Path, *, payload: dict) -> None:
                         ("total_batch_size", "Total batch"),
                         ("curve_points", "Curve points"),
                         ("projected_final_bpb", "Projected 300s val_bpb"),
+                        ("correction_mean", "Correction"),
                         ("projection_std", "Projection std"),
+                        ("fit_r2", "Fit R²"),
+                        ("fit_sigma", "Fit σ"),
                         ("winner_probability", "Winner p"),
+                        ("confidence_reason", "Reason"),
                         ("final_val_bpb", "Observed val_bpb"),
                         ("calibration_horizon_seconds", "Truth horizon"),
+                        ("calibration_horizon_tokens", "Truth tokens"),
+                        ("truth_anchor_seconds", "Anchor sec"),
+                        ("truth_anchor_tokens", "Anchor tokens"),
+                        ("extrapolation_ratio", "Ratio"),
                         ("projection_source", "Projection source"),
                         ("matched_truth_count", "Truth matches"),
+                    ],
+                ),
+                "",
+            ]
+        )
+    if finalist_horizon_rows:
+        report.extend(
+            [
+                "### Finalist Horizon Table",
+                "",
+                "These rows use the same shared projection logic as the standalone `curve_report.py` tool, but against the longer finalist curves. This is the deepest calibration view used before the winner is promoted into local search and checkpoint-backed eval calibration.",
+                "",
+                markdown_table(
+                    horizon_rows_for_report(finalist_horizon_rows),
+                    [
+                        ("target_seconds", "Horizon"),
+                        ("preset", "Preset"),
+                        ("device_batch_size", "Device batch"),
+                        ("total_batch_size", "Total batch"),
+                        ("observed_tokens", "Observed tokens"),
+                        ("target_tokens", "Target tokens"),
+                        ("corrected_val_bpb", "Projected val_bpb"),
+                        ("correction_display", "Correction"),
+                        ("confidence_interval", "95% CI"),
+                        ("fit_r2_display", "Fit R²"),
+                        ("fit_sigma_display", "Fit σ"),
+                        ("winner_probability", "Winner p"),
+                        ("confidence_reason", "Reason"),
+                        ("truth_anchor_seconds", "Anchor sec"),
+                        ("truth_anchor_tokens", "Anchor tokens"),
+                        ("extrapolation_ratio_display", "Ratio"),
+                        ("projection_source", "Source"),
+                        ("matched_truth_count", "Truth"),
+                        ("confidence_label", "Confidence"),
+                    ],
+                ),
+                "",
+            ]
+        )
+    if isinstance(finalist_payload, dict) and finalist_payload.get("diagnostics"):
+        report.extend(
+            [
+                "### Finalist Stability Diagnostics",
+                "",
+                "These rows compare the earlier and later finalist curves for the same preset family. They are the calibration-side equivalent of the LR finder drift checks: if short and long horizons disagree too much, the finalist decision should not be trusted yet.",
+                "",
+                markdown_table(
+                    finalist_payload["diagnostics"],
+                    [
+                        ("preset", "Preset"),
+                        ("short_observed_seconds", "Short sec"),
+                        ("long_observed_seconds", "Long sec"),
+                        ("short_observed_tokens", "Short tokens"),
+                        ("long_observed_tokens", "Long tokens"),
+                        ("short_projected_val_bpb", "Short proj"),
+                        ("long_projected_val_bpb", "Long proj"),
+                        ("short_fit_r2", "Short R²"),
+                        ("long_fit_r2", "Long R²"),
+                        ("fit_quality_min", "Min R²"),
+                        ("short_fit_sigma", "Short σ"),
+                        ("long_fit_sigma", "Long σ"),
+                        ("horizon_alpha", "Alpha"),
+                        ("effective_damping", "Damp"),
+                        ("horizon_correction", "Corr"),
+                        ("projection_delta", "Proj Δ"),
+                        ("projection_sigma", "Proj σ"),
+                        ("projection_snr", "Proj SNR"),
+                        ("stability_gap", "Gap"),
+                        ("stability_snr", "SNR"),
+                        ("stable_projection", "Stable"),
+                        ("stability_reason", "Reason"),
                     ],
                 ),
                 "",
@@ -1644,6 +1847,14 @@ def run_platform_calibration(args) -> dict:
             winner_probability_threshold=args.winner_probability_threshold,
             projected_margin_threshold=args.projected_margin_threshold,
         )
+        projection_horizon_rows, projection_horizon_decisions = build_horizon_projection_table(
+            projection_curves,
+            horizons_seconds=REPORT_HORIZONS,
+            calibration=projection_calibration,
+            truth_curves=truth_curves,
+            winner_probability_threshold=args.winner_probability_threshold,
+            projected_margin_threshold=args.projected_margin_threshold,
+        )
         projection_ranked_metadata = rank_candidate_families(
             projection_probe_rows,
             engine=engine,
@@ -1687,6 +1898,8 @@ def run_platform_calibration(args) -> dict:
                 "probe_rows": [asdict(row) for row in projection_probe_rows],
                 "decision": None if projection_decision is None else asdict(projection_decision),
                 "rows": [projected_row_to_dict(item) for item in projected_rows],
+                "horizon_rows": [asdict(row) for row in projection_horizon_rows],
+                "horizon_decisions": [asdict(item) for item in projection_horizon_decisions],
                 "winner": projected_row_to_dict(projected_rows[0]) if projected_rows else None,
             },
         )
@@ -1720,6 +1933,14 @@ def run_platform_calibration(args) -> dict:
         winner_probability_threshold=args.winner_probability_threshold,
         projected_margin_threshold=args.projected_margin_threshold,
     )
+    projection_horizon_rows, projection_horizon_decisions = build_horizon_projection_table(
+        projection_curves,
+        horizons_seconds=REPORT_HORIZONS,
+        calibration=projection_calibration,
+        truth_curves=truth_curves,
+        winner_probability_threshold=args.winner_probability_threshold,
+        projected_margin_threshold=args.projected_margin_threshold,
+    )
     projection_rows = [projected_row_to_dict(item) for item in projection_estimates]
     projection_winner = projection_rows[0] if projection_rows else None
     projected_presets = [row["preset"] for row in projection_rows]
@@ -1727,6 +1948,8 @@ def run_platform_calibration(args) -> dict:
 
     finalist_phase: dict | None = None
     finalist_candidates = []
+    finalist_horizon_rows = []
+    finalist_horizon_decisions = []
     finalist_presets = projected_presets[: max(1, finalist_count)]
     candidate_family = None
     if projection_decision is not None and decision_enough_signal(projection_decision) and projection_winner is not None:
@@ -1779,6 +2002,14 @@ def run_platform_calibration(args) -> dict:
                 winner_probability_threshold=args.winner_probability_threshold,
                 projected_margin_threshold=args.projected_margin_threshold,
             )
+            finalist_horizon_rows, finalist_horizon_decisions = build_horizon_projection_table(
+                finalist_curves,
+                horizons_seconds=REPORT_HORIZONS,
+                calibration=projection_calibration,
+                truth_curves=truth_curves,
+                winner_probability_threshold=args.winner_probability_threshold,
+                projected_margin_threshold=args.projected_margin_threshold,
+            )
             finalist_candidates = rank_candidate_families(
                 finalist_probe_rows,
                 engine=engine,
@@ -1798,6 +2029,8 @@ def run_platform_calibration(args) -> dict:
                     "decision": None if finalist_decision is None else asdict(finalist_decision),
                     "diagnostics": [asdict(item) for item in finalist_diagnostics],
                     "rows": [projected_row_to_dict(item) for item in finalist_estimates],
+                    "horizon_rows": [asdict(row) for row in finalist_horizon_rows],
+                    "horizon_decisions": [asdict(item) for item in finalist_horizon_decisions],
                     "winner": projected_row_to_dict(finalist_estimates[0]) if finalist_estimates else None,
                 },
             )
@@ -1819,6 +2052,14 @@ def run_platform_calibration(args) -> dict:
             projection_curves,
             finalist_curves,
             target_seconds=PROJECTION_TARGET_SECONDS,
+            calibration=projection_calibration,
+            truth_curves=truth_curves,
+            winner_probability_threshold=args.winner_probability_threshold,
+            projected_margin_threshold=args.projected_margin_threshold,
+        )
+        finalist_horizon_rows, finalist_horizon_decisions = build_horizon_projection_table(
+            finalist_curves,
+            horizons_seconds=REPORT_HORIZONS,
             calibration=projection_calibration,
             truth_curves=truth_curves,
             winner_probability_threshold=args.winner_probability_threshold,
@@ -2060,6 +2301,8 @@ def run_platform_calibration(args) -> dict:
             "time_budget": projection_time_budget,
             "target_seconds": PROJECTION_TARGET_SECONDS,
             "rows": projection_rows,
+            "horizon_rows": [asdict(row) for row in projection_horizon_rows],
+            "horizon_decisions": [asdict(item) for item in projection_horizon_decisions],
             "winner": projection_winner,
             "decision": projection_decision,
         },
@@ -2068,6 +2311,8 @@ def run_platform_calibration(args) -> dict:
                 "time_budget": finalist_time_budget,
                 "target_seconds": PROJECTION_TARGET_SECONDS,
                 "rows": finalist_phase["payload"]["rows"],
+                "horizon_rows": [asdict(row) for row in finalist_horizon_rows],
+                "horizon_decisions": [asdict(item) for item in finalist_horizon_decisions],
                 "winner": finalist_phase["payload"]["winner"],
                 "decision": finalist_phase["payload"].get("decision"),
                 "diagnostics": finalist_phase["payload"].get("diagnostics", []),

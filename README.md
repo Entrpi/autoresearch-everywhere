@@ -1,12 +1,12 @@
-# autoresearch-everywhere
+# AUTORESEARCH-EVERYWHERE
 
-## About autoresearch-everywhere
+![Banner](docs/assets/autoresearch-everywhere.png)
 
-autoresearch-everywhere is the glue, generalization, and experiment-logging regime half of the autoresearch core from [karpathy/autoresearch](https://github.com/karpathy/autoresearch). The main idea is simple: clone the repo on a machine, let it figure out a good starting configuration for that hardware, and then run the usual autonomous agent research loop from there. MLX is the best-supported path today, and CUDA is already beyond feature parity with upstream here: it runs behind the same generic entrypoints, engine boundary, and architecture-aware runtime layer rather than living as a separate legacy path. The long-term goal is to let more backends plug into the same workflow instead of growing separate forks.
+## About AUTORESEARCH-EVERYWHERE
+
+AUTORESEARCH-EVERYWHERE is the glue, generalization, and experiment-logging regime half of the autoresearch core from [karpathy/autoresearch](https://github.com/karpathy/autoresearch). The main idea is simple: clone the repo on a machine, let it figure out a good starting configuration for that hardware, and then run the usual autonomous agent research loop from there. MLX is the best-supported path today, and CUDA is already beyond feature parity with upstream here: it runs behind the same generic entrypoints, engine boundary, and architecture-aware runtime layer rather than living as a separate legacy path. The long-term goal is to let more backends plug into the same workflow instead of growing separate forks.
 
 [![Autonomy Golf Badge](docs/autonomy-golf-badge.svg)](#autonomy-golf)
-
-![teaser](docs/assets/progress.png)
 
 *One day, frontier AI research used to be done by meat computers in between eating, sleeping, having other fun, and synchronizing once in a while using sound wave interconnect in the ritual of "group meeting". That era is long gone. Research is now entirely the domain of autonomous swarms of AI agents running across compute cluster megastructures in the skies. The agents claim that we are now in the 10,205th generation of the code base, in any case no one could tell if that's right or wrong as the "code" is now a self-modifying binary that has grown beyond human comprehension. This repo is the story of how it all began. -@karpathy, March 2026*.
 
@@ -91,14 +91,12 @@ That gives you:
 
 MLX currently goes further on automatic eval calibration and default promotion. CUDA currently goes further on automated backend trace review.
 
-The first full FA4-backed fast bring-up on a real GB10 system selected `m5-small` as the recommended CUDA starting point, with:
+The first full FA4-backed fast bring-up on a real GB10 system selected `m5-balanced` as the recommended CUDA starting point, with:
 
 - `seq_len=512`
 - `window_pattern=L`
 - `device_batch_size=32`
 - `total_batch_size=32768`
-
-That is a useful concrete anchor: GB10 is not a `m5-tiny` machine.
 
 ## How It Is Organized
 
@@ -303,9 +301,9 @@ Current project snapshot from [CHANGELOG.md](CHANGELOG.md):
 
 | Metric | Value |
 | --- | --- |
-| Mean autonomy score | `3.12 / 6` |
-| Mean complexity | `6.37 / commit` |
-| Mean score per top-level bullet | `3.19 / 6` |
+| Mean autonomy score | `3.13 / 6` |
+| Mean complexity | `6.48 / commit` |
+| Mean score per top-level bullet | `3.20 / 6` |
 | History covered | `84` commits across `14` subsystems |
 <!-- autonomy-golf-snapshot:end -->
 
