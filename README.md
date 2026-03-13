@@ -19,7 +19,7 @@ Because this project targets broad platform support, the first step is to find t
 
 Initial development was validated against an M5 MacBook Pro, so there are ready-to-use M5 presets you can jump into immediately. More presets should follow with broader adoption and further testing. If this is a new machine, do bring-up first. If this is a base M4 or M5 machine, you can usually skip straight to training.
 
-**Default path requirements:** Apple Silicon, macOS, Python 3.10+, and [uv](https://docs.astral.sh/uv/). That is the full MLX bring-up path described below. CUDA is also supported behind `--engine cuda`, but with a different hardware/runtime envelope.
+**Default path requirements:** Apple Silicon, macOS, Python 3.10+, and [uv](https://docs.astral.sh/uv/). That is the deepest bring-up path today. NVIDIA CUDA is also a first-class path behind the same top-level commands, with a different hardware/runtime envelope.
 
 ### New Hardware Bring-Up
 
@@ -50,7 +50,7 @@ The report includes:
 It also writes the candidate default into the local platform-default cache for that engine and hardware key. After that, real kernel-lab integration tests can use the calibrated point for the current device automatically instead of requiring a manual preset every time.
 
 By default, the bring-up sweep only considers the practical MLX preset families (`m5-tiny`, `m5-small`, `m5-balanced`, `m5-large`, and `m5-xlarge`). Add `--presets ...,upstream` only when you explicitly want the slower upstream-style reference included in the same run.
-On Apple Silicon, `prepare.py`, `train.py`, and `calibrate.py` default to the MLX engine automatically. `--engine cuda` is available too. CUDA already exceeds the original upstream path in structure and runtime-awareness here, but MLX is still the only engine with the full evaluation-calibration and default-promotion flow today.
+On Apple Silicon, `prepare.py`, `train.py`, and `calibrate.py` default to the MLX engine automatically. On NVIDIA, use the same commands with `--engine cuda`. MLX currently has the deepest local eval-calibration and default-promotion flow. CUDA already runs as a first-class engine with the same front-door commands, architecture-aware runtime behavior, and the stronger automated trace-review path in kernel-lab.
 
 For the actual implementation details, see [docs/platform-calibration.md](docs/platform-calibration.md).
 
@@ -69,6 +69,25 @@ uv run train.py
 
 The current MLX port and shipped defaults were developed on and tested against an Apple M5 MacBook Pro with 32 GB unified memory and a 10-core GPU. They are a calibrated starting point for that workstation class, not a promise of universal optimality across the whole M5 family.
 
+### CUDA / NVIDIA Shortcut
+
+If you are on a single NVIDIA GPU, use the same front-door commands, just select the CUDA engine:
+
+```bash
+uv sync
+uv run prepare.py --engine cuda
+uv run train.py --engine cuda --smoke
+uv run calibrate.py --engine cuda --mode fast
+```
+
+That gives you:
+
+- the same top-level `prepare.py`, `train.py`, `calibrate.py`, and `kernel-lab.py` entrypoints as MLX
+- a CUDA runtime layer that distinguishes major families such as A100-class Ampere, Ada, Hopper, and Blackwell variants including GB10
+- a first-class kernel-lab tracing workflow with Nsight Systems and Nsight Compute
+
+MLX currently goes further on automatic eval calibration and default promotion. CUDA currently goes further on automated backend trace review.
+
 ## How It Is Organized
 
 The repo now has a simple top-level surface:
@@ -85,7 +104,7 @@ Under that, the code is split by role:
 - `autoresearch_cuda/` contains the CUDA path
 - `autoresearch_platform/` contains the shared engine boundary
 - `autoresearch_lab/` contains the shared kernel-lab boundary
-- `tools/` contains calibration and optional workstation tooling
+- `tools/` contains calibration and manual workstation sweep tooling
 - `docs/` contains architecture and workflow notes
 
 The important shift is that the repo is no longer just “an MLX port of `train.py`.” It is now trying to be a small research platform that can bring up a new machine, pick sane defaults, and keep those choices inspectable as the codebase evolves.
@@ -142,7 +161,7 @@ What it can do today:
 - CUDA:
   - trace-first workflow with Nsight Systems and Nsight Compute
   - starter Triton-backed workspaces for narrow target families
-  - real GB10 validation with installed FlashAttention via [FA4 PR](https://github.com/Dao-AILab/flash-attention/pull/2268)
+  - tested against GB10 (DGX Spark, Blackwell) with FlashAttention via [FA4 PR](https://github.com/Dao-AILab/flash-attention/pull/2268)
 - Shared:
   - one top-level entrypoint: `kernel-lab.py`
   - persistent evidence ledger in `results/kernel_lab/ledger.jsonl`
@@ -162,7 +181,7 @@ uv run kernel-lab.py --engine cuda capture --preset upstream --time-budget 20 --
 uv run kernel-lab.py --engine cuda trace-profile --metadata /tmp/cuda-upstream-trace.metadata.json --output /tmp/cuda-upstream-trace.profile.json
 ```
 
-The practical difference between the backends today is:
+The practical difference between the backends is:
 
 - MLX has the deeper workspace and trainer-integration loop
 - CUDA has the stronger automated trace-review path
@@ -187,14 +206,14 @@ If you are on an M4 Pro, M4 Max, M5 Pro, M5 Max, or anything outside that refere
 
 ### Preset Reference (metrics are results from an M5 Mac)
 
-| Preset          | Best first use              | Seq len  | Depth / d_model / heads | Params    | Batch (device / total tokens) | Window   | Approx. tok/sec | 5-min steps | Approx. peak memory | 5-min `val_bpb` | 5-min last loss |
-| --------------- | --------------------------- | -------- | ----------------------- | --------- | ----------------------------- | -------- | ---------------- | ------------ | ------------------- | ---------------- | --------------- |
-| `m5-tiny`       | Fast iteration              | `256`    | `2 / 128 / 1`           | `3.5M`    | `4 / 12288`                  | `L`      | `~103k`          | `2516`       | `~282 MB`           | `1.715180`       | `4.134272`      |
-| `m5-small`      | Default starting point      | `512`    | `4 / 256 / 2`           | `11.5M`   | `4 / 12288`                  | `L`      | `~46k`           | `1066`       | `~1.01 GB`          | `1.441619`       | `3.939787`      |
-| `m5-balanced`   | Best validation target      | `1024`   | `6 / 384 / 3`           | `26.3M`   | `4 / 12288`                  | `SSSSL`  | `~18.2k`         | `444`        | `~2.77 GB`          | `1.428708`       | `4.162026`      |
-| `m5-large`      | Upstream-leaning bridge run | `512`    | `8 / 512 / 4`           | `50.3M`   | `4 / 16384`                  | `SSSSL`  | `~13.5k`         | `250`        | `~2.66 GB`          | `1.606594`       | `4.521518`      |
-| `m5-xlarge`     | Largest practical local run | `2048`   | `8 / 512 / 4`           | `50.3M`   | `4 / 16384`                  | `L`      | `~8.8k`          | `162`        | `~7.44 GB`          | `1.748045`       | `4.933070`      |
-| `upstream`      | Too heavy for laptops, abysmally slow | `2048`   | `8 / 512 / 4`           | `50.3M`   | `8 / 65536`                  | `SSSL`   | `n/a`            | `n/a`        | `n/a`               | `n/a`            | `n/a`           |
+| Preset          | Best first use                        | Seq len  | Depth / d_model / heads | Params    | Batch (device / total tokens) | Window    | Approx. tok/sec | 5-min steps | Approx. peak memory | 5-min `val_bpb` | 5-min last loss |
+| --------------- | ------------------------------------- | -------- | ----------------------- | --------- | ----------------------------- | --------- | --------------- | ----------- | ------------------- | ----------------- | --------------- |
+| `m5-tiny`     | Fast iteration                        | `256`  | `2 / 128 / 1`         | `3.5M`  | `4 / 12288`                 | `L`     | `~103k`       | `2516`    | `~282 MB`         | `1.715180`      | `4.134272`    |
+| `m5-small`    | Default starting point                | `512`  | `4 / 256 / 2`         | `11.5M` | `4 / 12288`                 | `L`     | `~46k`        | `1066`    | `~1.01 GB`        | `1.441619`      | `3.939787`    |
+| `m5-balanced` | Best validation target                | `1024` | `6 / 384 / 3`         | `26.3M` | `4 / 12288`                 | `SSSSL` | `~18.2k`      | `444`     | `~2.77 GB`        | `1.428708`      | `4.162026`    |
+| `m5-large`    | Upstream-leaning bridge run           | `512`  | `8 / 512 / 4`         | `50.3M` | `4 / 16384`                 | `SSSSL` | `~13.5k`      | `250`     | `~2.66 GB`        | `1.606594`      | `4.521518`    |
+| `m5-xlarge`   | Largest practical local run           | `2048` | `8 / 512 / 4`         | `50.3M` | `4 / 16384`                 | `L`     | `~8.8k`       | `162`     | `~7.44 GB`        | `1.748045`      | `4.933070`    |
+| `upstream`    | Too heavy for laptops, abysmally slow | `2048` | `8 / 512 / 4`         | `50.3M` | `8 / 65536`                 | `SSSL`  | `n/a`         | `n/a`     | `n/a`             | `n/a`           | `n/a`         |
 
 Window legend: `L` = full causal attention at that layer; `S` = local sliding-window attention; patterns such as `SSSL` repeat across layers with the last layer forced to `L`.
 
@@ -215,9 +234,9 @@ The throughput figures above are approximate session-average numbers from fresh 
 
 `m5-xlarge` is the practical way to test the upstream-scale `50.3M` / `2048` model on this machine. `upstream` is kept as the literal reference port, including the H100-shaped batch and `SSSL` attention pattern Karpathy chose upstream, so it is useful for comparison but usually not the right first thing to run.
 
-## Optional Local Tooling
+## Manual Longer Sweeps
 
-This repo also includes optional local automation under `tools/` for slower Apple Silicon machines. It is not part of the core MLX port, but it can be useful when you want unattended preset sweeps on a workstation.
+If you want to let one machine grind through longer preset sweeps by hand, the repo also includes local sweep tooling under `tools/`. It is not part of the core training or bring-up path; it is there for cases where you want to manually run a longer workstation sweep and inspect the results afterward.
 
 Examples:
 
@@ -227,9 +246,6 @@ Examples:
 
 # 8-hour overnight run
 ./tools/launch_overnight_mlx.sh overnight 8
-
-# autonomy scores by day for plotting
-python3 tools/changelog_scores.py --group-by day --format csv > autonomy_by_day.csv
 ```
 
 Artifacts are written under `results/overnight/<run-tag>/`, and the summary ledger is appended to `results/results.tsv`. The sweep runner keeps or discards experiments using canonical `val_bpb`, not the preset-shaped proxy metric.
@@ -275,16 +291,22 @@ Current project snapshot from [CHANGELOG.md](CHANGELOG.md):
 
 | Metric | Value |
 | --- | --- |
-| Mean autonomy score | `3.28 / 6` |
-| Mean complexity | `6.99 / commit` |
+| Mean autonomy score | `3.29 / 6` |
+| Mean complexity | `6.97 / commit` |
 | Mean score per top-level bullet | `3.34 / 6` |
-| History covered | `74` commits across `12` subsystems |
+| History covered | `75` commits across `12` subsystems |
 <!-- autonomy-golf-snapshot:end -->
 
 Refresh with:
 
 ```bash
 python3 tools/render_autonomy_badge.py
+```
+
+For autonomy-history plotting:
+
+```bash
+python3 tools/changelog_scores.py --group-by day --format csv --include-latest > autonomy_by_day.csv
 ```
 
 ## Project Structure
@@ -309,19 +331,9 @@ docs/assets/         — generated docs assets such as the progress figure
 notebooks/           — exploratory notebooks and analysis
 results/results.tsv  — experiment result ledger
 autoresearch_cuda/    — CUDA implementation and runtime policy
-tools/               — optional local sweep tooling
+tools/               — manual sweep and calibration tooling
 pyproject.toml        — dependencies
 ```
-
-## Appendix: CUDA Path
-
-The NVIDIA-oriented path is no longer just the original upstream code kept around for comparison. It now lives behind the same generic entrypoints and shared engine boundary as MLX, with architecture-family-aware runtime policy layered on top.
-
-- `autoresearch_cuda/prepare.py`: CUDA data prep and runtime utilities.
-- `autoresearch_cuda/train.py`: CUDA training implementation.
-- `program.md`: generic agent prompt, with CUDA-specific guidance pointing into `autoresearch_cuda/`.
-
-If you are on a single NVIDIA GPU and want the original workflow, use those files instead of the MLX ones.
 
 ## Other Upstream Forks
 

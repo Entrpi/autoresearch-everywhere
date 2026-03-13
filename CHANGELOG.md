@@ -29,7 +29,30 @@ On this hardware, the default canonical matched benchmark window for optimizatio
 
 ## Latest
 
-### New commit — docs: tighten the kernel-lab front door — score `3` — complexity `5`
+### New commit — docs: fold CUDA into the front-door README story — score `4` — complexity `6`
+
+**Human-directed, AI-shaped (4)**
+
+- Fold CUDA into the main README start-here story instead of leaving it in an appendix, and keep the workstation sweep section framed around its actual user story.
+  - Meaning: the README now presents CUDA as a first-class engine behind the same `prepare.py`, `train.py`, `calibrate.py`, and `kernel-lab.py` front doors, with a dedicated NVIDIA shortcut under `Start Here`, instead of treating it as a side note after the main story. The sweep tooling section also stays framed as `Manual Longer Sweeps`, which is the real user-facing job it does.
+  - Motivation: the appendix framing made CUDA feel secondary even though the repo already has a real shared-engine boundary, a CUDA runtime layer, GB10 validation, and a serious kernel-lab path. At the same time, the old “optional tooling” language hid the point of the longer-sweep scripts behind implementation-sounding wording.
+  - Purpose: make the README read like the product we actually have: one cross-platform front door with MLX and CUDA as part of the same story, plus a clearly named manual sweep path for longer workstation runs.
+  - Adding a top-level CUDA shortcut that explains what the NVIDIA path can already do today and where it differs from MLX.
+  - Removing the old CUDA appendix once that information was folded into the main flow.
+
+**Grounding**
+
+- Files:
+  - `CHANGELOG.md`
+  - `README.md`
+- Validation:
+  - `python3 tools/changelog_scores.py --group-by entry --format csv --include-latest --verify`
+- Measurements:
+  - No new runtime measurements; this was a documentation and framing cleanup.
+
+## Committed History
+
+### March 13, 2026 — `b74bff3` — docs: tighten the kernel-lab front door — score `3` — complexity `5`
 
 **AI-identified within brief, human-shaped (3)**
 
@@ -43,18 +66,6 @@ On this hardware, the default canonical matched benchmark window for optimizatio
     - current MLX-vs-CUDA strengths
     - one or two concrete starting commands
   - Moving the detailed workflows and setup notes behind [docs/kernel-lab.md](/Users/ent/Codex/autoresearch/docs/kernel-lab.md).
-
-**Grounding**
-
-- Files:
-  - `CHANGELOG.md`
-  - `README.md`
-- Validation:
-  - `python3 tools/changelog_scores.py --group-by entry --format csv --include-latest --verify`
-- Measurements:
-  - No new runtime measurements; this was a documentation and framing cleanup.
-
-## Committed History
 
 ### March 13, 2026 — `827b199` — docs: pin GB10 CUDA validation environment — score `3` — complexity `5`
 
