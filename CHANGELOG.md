@@ -29,14 +29,18 @@ On this hardware, the default canonical matched benchmark window for optimizatio
 
 ## Latest
 
-### New commit — calibration: add batch-profile-first hardware normalization to bring-up — score `2`
+### New commit — calibration: add truth-backed CUDA horizon projection to bring-up — score `3` — complexity `6`
 
-**AI-identified within brief, human-approved (2)**
+**AI-identified within brief, human-shaped (3)**
 
-- Add a batch-profile phase ahead of preset ranking so bring-up compares preset families under a hardware-shaped batch regime instead of each family's shipped default split.
-  - Meaning: `calibrate.py` now runs a dedicated `batch-profile` phase before candidate ranking. It picks an anchor preset for the engine, sweeps a small grid of `(device_batch_size, total_batch_size)` pairs on that anchor, chooses the best short-run hardware batch profile, and then projects that profile across the ranking stage before doing the existing local search inside the winning family. The CUDA engine also now respects explicit batch-shape overrides during short probes instead of silently re-normalizing them away.
-  - Motivation: on the M5 side we repeatedly found that machine batch and total-batch behavior were closer to hardware constants than preset-family constants. The first GB10 FA4 bring-up that selected `m5-small` also suggested the same problem on CUDA: preset ranking was still being done at each family's shipped batch shape, which could bias the comparison before local search ever had a chance to help.
-  - Purpose: make platform bring-up compare families closer to their local efficient plateau on a given machine, rather than comparing default batch splits that may be artifacts of one reference machine or an older tuning pass.
+- Add a batch-profile phase ahead of every preset-family comparison, then reuse the tuned `device_batch_size` / `total_batch_size` everywhere instead of introducing a separate ranking batch regime.
+  - Meaning: `calibrate.py` now runs `batch-profile` immediately after hardware fingerprinting, chooses one machine-shaped batch profile on an anchor preset, and reuses that same tuned batch for coarse envelope, ranking, projection, and finalist stages. The CUDA engine also now respects explicit batch-shape overrides during short probes instead of silently re-normalizing them away.
+  - Motivation: on the M5 side we repeatedly found that machine batch and total-batch behavior were closer to hardware constants than preset-family constants, and the first GB10 FA4 bring-up showed the same risk on CUDA. Ranking presets at their shipped batch defaults was biasing family comparison before the real `300s` objective ever had a chance to speak.
+  - Purpose: make bring-up compare model families under one tuned hardware batch regime, so the only thing left to optimize is which family gives the best `val_bpb` at the target horizon.
+- Add a shared truth-curve projection path and the first real CUDA `300s` truth corpus so family selection can project the 5-minute winner from partial runs instead of guessing from short endpoints.
+  - Meaning: the CUDA trainer now accepts `--curve-eval-seconds` and `--curve-output`, records periodic validation checkpoints without charging eval wall time against the training budget, and writes a machine-readable curve artifact. Those artifacts now feed the shared layer in `autoresearch_platform/curve_projection.py` plus generic reporting CLIs in `tools/curve_report.py` and `tools/cuda_curve_report.py`. The projection stage can match partial CUDA curves against completed `300s` truth curves on the same preset family and hardware bucket.
+  - Motivation: the old `5s -> 10s -> 30s` reranks were still picking the wrong family on GB10. Real `300s` A/Bs under the tuned hardware batch showed that `m5-balanced` beats `m5-small` on the actual objective even when shorter horizons prefer smaller models.
+  - Purpose: replace heuristic horizon correction with a truth-backed projection step that can eventually generalize across CUDA, MLX, ROCm, and future backends while staying faithful to the only objective that matters here: lowest `val_bpb` at `300s`.
 
 **Grounding**
 
@@ -45,26 +49,39 @@ On this hardware, the default canonical matched benchmark window for optimizatio
   - `autoresearch_platform/cuda_engine.py`
   - `autoresearch_platform/engines.py`
   - `autoresearch_platform/mlx_engine.py`
+  - `autoresearch_cuda/train.py`
+  - `autoresearch_platform/curve_projection.py`
+  - `docs/cuda-core-loop-parity.md`
   - `tools/calibrate_platform.py`
+  - `tools/curve_report.py`
+  - `tools/cuda_curve_report.py`
 - Validation:
-  - `python3 -m py_compile autoresearch_platform/engines.py autoresearch_platform/mlx_engine.py autoresearch_platform/cuda_engine.py tools/calibrate_platform.py`
-  - real GB10 FA4-backed fast bring-up rerun completed through the new `batch-profile` phase and wrote:
-    - `batch_profile.json`
-    - `candidate_ranking.json`
-    - `report.json`
+  - `python3 -m py_compile autoresearch_platform/engines.py autoresearch_platform/mlx_engine.py autoresearch_platform/cuda_engine.py autoresearch_platform/curve_projection.py autoresearch_cuda/train.py tools/calibrate_platform.py tools/curve_report.py tools/cuda_curve_report.py`
+  - real GB10 FA4-backed bring-up reruns completed with persistent outputs under:
+    - `/home/ent/cuda_fast_projection_v7`
+    - `/home/ent/curve_runs`
+  - synthetic and real backend-agnostic curve-artifact summaries:
+    - `python3 tools/cuda_curve_report.py /tmp/cuda_curve_synth.json --target-seconds 45`
+    - `python3 tools/curve_report.py /home/ent/curve_runs/gb10_m5tiny_curve300.json /home/ent/curve_runs/gb10_m5small_curve300.json /home/ent/curve_runs/gb10_m5balanced_curve300.json --target-seconds 300`
 - Measurements:
-  - first real GB10 batch-profile sweep (anchor `m5-small`, `5s` probes) tested:
-    - `db=16 tb=8192` -> `146502.8 tok/s`
-    - `db=16 tb=16384` -> `152054.9 tok/s`
-    - `db=32 tb=16384` -> `151522.6 tok/s`
-    - `db=32 tb=32768` -> `154377.9 tok/s`
-  - current winner from that first sweep:
-    - `device_batch_size=32`
-    - `total_batch_size=32768`
-  - the resulting GB10 ranking stage under that normalized batch profile currently gives:
-    - `m5-tiny`: `val_bpb=2.172939`, `235839.5 tok/s`
-    - `m5-small`: `val_bpb=2.183708`, `153599.1 tok/s`
-  - this is the first evidence that batch-profile-first ranking can materially change family ordering on CUDA, and it also shows the current sweep range is probably still too narrow for Blackwell.
+  - the tuned GB10 hardware batch profile used in the latest bring-up rerun is:
+    - `device_batch_size=8`
+    - `total_batch_size=40960`
+    - `grad_accum_steps=10` on the anchor `m5-small`
+  - full sequential GB10 `300s` truth set under tuned CUDA batch regimes:
+    - `m5-balanced db=32 tb=32768` -> `1.162382`
+    - `m5-xlarge db=16 tb=32768` -> `1.169337`
+    - `m5-xlarge db=32 tb=65536` -> `1.170638`
+    - `m5-small db=32 tb=32768` -> `1.257603`
+    - `m5-large db=32 tb=32768` -> `1.285034`
+    - `m5-tiny db=32 tb=32768` -> `1.465999`
+  - corrected truth-matched projection from the saved `v7` partial curves:
+    - `m5-balanced` -> projected `1.162382`
+    - `m5-xlarge` -> projected `1.169395`
+    - `m5-small` -> projected `1.257603`
+    - `m5-large` -> projected `1.285034`
+    - `m5-tiny` -> projected `1.465999`
+  - this confirms the intended selector behavior: under the actual `300s val_bpb` objective, `m5-balanced` is the GB10 winner, while `m5-xlarge db=16` is the closest scaling candidate.
 
 ## Committed History
 

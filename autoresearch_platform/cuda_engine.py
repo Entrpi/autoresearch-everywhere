@@ -112,6 +112,10 @@ class CUDAEngine:
         window_pattern: str | None = None,
         device_batch_size: int | None = None,
         total_batch_size: int | None = None,
+        curve_eval_seconds: tuple[float, ...] | None = None,
+        eval_seq_len: int | None = None,
+        eval_tokens: int | None = None,
+        eval_batch_size: int | None = None,
         no_checkpoint: bool = True,
     ) -> ProbeResult:
         resolved = resolve_run_preset(
@@ -208,6 +212,16 @@ class CUDAEngine:
                 resolved.window_pattern,
             ]
         )
+        curve_output_path = logs_dir / f"{label}.curve.json" if curve_eval_seconds else None
+        if curve_eval_seconds:
+            cmd.extend(["--curve-eval-seconds", ",".join(f"{value:g}" for value in curve_eval_seconds)])
+            cmd.extend(["--curve-output", str(curve_output_path)])
+        if eval_seq_len is not None:
+            cmd.extend(["--eval-seq-len", str(eval_seq_len)])
+        if eval_tokens is not None:
+            cmd.extend(["--eval-tokens", str(eval_tokens)])
+        if eval_batch_size is not None:
+            cmd.extend(["--eval-batch-size", str(eval_batch_size)])
         completed, wall_seconds, stdout_path, stderr_path = self._run_command(cmd, logs_dir=logs_dir, label=label)
         summary = parse_summary(completed.stdout) if completed.returncode == 0 else {}
         error_tail = None
@@ -235,6 +249,8 @@ class CUDAEngine:
             wall_seconds=wall_seconds,
             stdout_path=str(stdout_path),
             stderr_path=str(stderr_path),
+            curve_output_path=str(curve_output_path) if curve_output_path is not None else self._get_str(summary, "curve_output"),
+            curve_eval_points=self._get_int(summary, "curve_eval_points"),
             val_bpb=self._get_float(summary, "val_bpb"),
             steady_state_tok_per_sec=steady_state_tok_per_sec,
             peak_vram_mb=self._get_float(summary, "peak_vram_mb"),
@@ -268,13 +284,19 @@ class CUDAEngine:
             patterns.append("L")
         return list(dict.fromkeys(patterns))
 
+    def _minimum_search_device_batch(self, *, seq_len: int) -> int:
+        return 2 if seq_len >= 2048 else 4
+
     def local_batch_candidates(self, preset: str, *, seq_len: int) -> list[tuple[int, int]]:
         value = CUDA_PRESETS[preset]
         base_device_batch = value.device_batch_size
+        min_device_batch = self._minimum_search_device_batch(seq_len=seq_len)
         device_batches = sorted({
-            max(16, base_device_batch // 4),
-            max(16, base_device_batch // 2),
+            min_device_batch,
+            max(min_device_batch, base_device_batch // 4),
+            max(min_device_batch, base_device_batch // 2),
             base_device_batch,
+            base_device_batch * 2,
         })
         grad_accum_candidates = (1, 2)
         combos: list[tuple[int, int]] = []
@@ -289,20 +311,60 @@ class CUDAEngine:
     def batch_profile_candidates(self, preset: str, *, seq_len: int) -> list[tuple[int, int]]:
         value = CUDA_PRESETS[preset]
         base_device_batch = value.device_batch_size
+        min_device_batch = self._minimum_search_device_batch(seq_len=seq_len)
         device_batches = sorted(
             {
-                max(8, base_device_batch // 2),
+                min_device_batch,
+                max(min_device_batch, base_device_batch // 4),
+                max(min_device_batch, base_device_batch // 2),
                 base_device_batch,
                 base_device_batch * 2,
             }
         )
-        grad_accum_candidates = (1, 2, 4)
+        grad_accum_candidates = (1, 2, 4, 8)
         combos: list[tuple[int, int]] = []
         for device_batch in device_batches:
             tokens_per_fwdbwd = seq_len * device_batch
             if tokens_per_fwdbwd <= 0:
                 continue
             for grad_accum in grad_accum_candidates:
+                combos.append((device_batch, tokens_per_fwdbwd * grad_accum))
+        return sorted(set(combos))
+
+    def batch_profile_refinement_candidates(
+        self,
+        preset: str,
+        *,
+        seq_len: int,
+        coarse_winner: tuple[int, int],
+    ) -> list[tuple[int, int]]:
+        winner_device_batch, winner_total_batch = coarse_winner
+        tokens_per_fwdbwd = seq_len * winner_device_batch
+        if tokens_per_fwdbwd <= 0:
+            return []
+        winner_grad_accum = max(1, winner_total_batch // tokens_per_fwdbwd)
+        min_device_batch = self._minimum_search_device_batch(seq_len=seq_len)
+        device_batches = {
+            min_device_batch,
+            max(min_device_batch, winner_device_batch // 2),
+            winner_device_batch,
+            winner_device_batch * 2,
+        }
+        grad_accum_candidates = {
+            max(1, winner_grad_accum - 2),
+            max(1, winner_grad_accum - 1),
+            winner_grad_accum,
+            winner_grad_accum + 1,
+            winner_grad_accum + 2,
+            max(1, round(winner_grad_accum * 1.5)),
+            winner_grad_accum * 2,
+        }
+        combos: list[tuple[int, int]] = []
+        for device_batch in sorted(device_batches):
+            tokens_per_fwdbwd = seq_len * device_batch
+            if tokens_per_fwdbwd <= 0:
+                continue
+            for grad_accum in sorted(acc for acc in grad_accum_candidates if acc <= 16):
                 combos.append((device_batch, tokens_per_fwdbwd * grad_accum))
         return sorted(set(combos))
 

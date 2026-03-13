@@ -71,6 +71,8 @@ class ProbeResult:
     wall_seconds: float
     stdout_path: str
     stderr_path: str
+    curve_output_path: str | None = None
+    curve_eval_points: int | None = None
     val_bpb: float | None = None
     proxy_val_bpb: float | None = None
     steady_state_tok_per_sec: float | None = None
@@ -133,6 +135,10 @@ class TrainingEngine(Protocol):
         window_pattern: str | None = None,
         device_batch_size: int | None = None,
         total_batch_size: int | None = None,
+        curve_eval_seconds: tuple[float, ...] | None = None,
+        eval_seq_len: int | None = None,
+        eval_tokens: int | None = None,
+        eval_batch_size: int | None = None,
         no_checkpoint: bool = True,
     ) -> ProbeResult:
         ...
@@ -147,6 +153,15 @@ class TrainingEngine(Protocol):
         ...
 
     def batch_profile_candidates(self, preset: str, *, seq_len: int) -> list[tuple[int, int]]:
+        ...
+
+    def batch_profile_refinement_candidates(
+        self,
+        preset: str,
+        *,
+        seq_len: int,
+        coarse_winner: tuple[int, int],
+    ) -> list[tuple[int, int]]:
         ...
 
     def calibration_signatures(self) -> dict[str, str | None]:

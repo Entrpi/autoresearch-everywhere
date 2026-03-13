@@ -8,9 +8,11 @@ os.environ["PYTORCH_ALLOC_CONF"] = "expandable_segments:True"
 os.environ["HF_HUB_DISABLE_PROGRESS_BARS"] = "1"
 
 import argparse
+import json
 import gc
 import time
 from dataclasses import dataclass, asdict
+from pathlib import Path
 
 from autoresearch_cuda.config import CUDA_PRESETS, resolve_run_preset
 
@@ -72,10 +74,38 @@ def build_parser():
         action="store_true",
         help="Disable torch.compile for short probes and debugging runs.",
     )
+    parser.add_argument(
+        "--curve-eval-seconds",
+        type=str,
+        help="Comma-separated training-time checkpoints in seconds for periodic validation evals.",
+    )
+    parser.add_argument(
+        "--curve-output",
+        type=str,
+        help="Optional JSON path to write periodic validation curve data to.",
+    )
     return parser
 
 
 ARGS = build_parser().parse_args()
+
+
+def _parse_curve_eval_seconds(value: str | None) -> list[float]:
+    if not value:
+        return []
+    checkpoints: list[float] = []
+    for raw in value.split(","):
+        item = raw.strip()
+        if not item:
+            continue
+        checkpoint = float(item)
+        if checkpoint <= 0:
+            raise ValueError("--curve-eval-seconds values must be positive.")
+        checkpoints.append(checkpoint)
+    return sorted(dict.fromkeys(checkpoints))
+
+
+CURVE_EVAL_SECONDS = _parse_curve_eval_seconds(ARGS.curve_eval_seconds)
 
 import torch
 import torch.nn as nn
@@ -943,6 +973,11 @@ steady_state_step_count = (
     else 0
 )
 timing_count_starts_after_step = 10 if RESUME_TRAINING_STATE is None else step
+curve_points: list[dict] = []
+curve_eval_total_seconds = 0.0
+curve_eval_index = 0
+while curve_eval_index < len(CURVE_EVAL_SECONDS) and CURVE_EVAL_SECONDS[curve_eval_index] <= total_training_time:
+    curve_eval_index += 1
 
 resumed_from = None
 if ARGS.eval_only:
@@ -1079,6 +1114,50 @@ def run_validation_eval(model, tokenizer):
         "eval_policy_version": eval_plan["policy_version"],
     }
 
+
+def write_curve_output(path: str | None, payload: dict) -> None:
+    if not path:
+        return
+    output_path = Path(path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text(json.dumps(payload, indent=2) + "\n")
+
+
+def maybe_run_curve_eval(
+    *,
+    model,
+    tokenizer,
+    step: int,
+    total_training_time: float,
+    total_tokens: int,
+    curve_points: list[dict],
+    curve_eval_total_seconds: float,
+    curve_eval_index: int,
+):
+    while curve_eval_index < len(CURVE_EVAL_SECONDS) and total_training_time >= CURVE_EVAL_SECONDS[curve_eval_index]:
+        target_training_seconds = CURVE_EVAL_SECONDS[curve_eval_index]
+        eval_result = run_validation_eval(model, tokenizer)
+        curve_eval_total_seconds += eval_result["eval_seconds"]
+        curve_points.append(
+            {
+                "target_training_seconds": target_training_seconds,
+                "actual_training_seconds": total_training_time,
+                "step": step,
+                "total_tokens": total_tokens,
+                **eval_result,
+            }
+        )
+        print(
+            "curve_eval:      "
+            f"target={target_training_seconds:.1f}s "
+            f"actual={total_training_time:.1f}s "
+            f"val_bpb={eval_result['val_bpb']:.6f} "
+            f"eval_seconds={eval_result['eval_seconds']:.1f}"
+        )
+        model.train()
+        curve_eval_index += 1
+    return curve_eval_total_seconds, curve_eval_index
+
 # ---------------------------------------------------------------------------
 # Training loop
 # ---------------------------------------------------------------------------
@@ -1147,13 +1226,22 @@ if not ARGS.eval_only:
             gc.collect()
 
         step += 1
+        total_tokens = step * TOTAL_BATCH_SIZE
+        curve_eval_total_seconds, curve_eval_index = maybe_run_curve_eval(
+            model=model,
+            tokenizer=tokenizer,
+            step=step,
+            total_training_time=total_training_time,
+            total_tokens=total_tokens,
+            curve_points=curve_points,
+            curve_eval_total_seconds=curve_eval_total_seconds,
+            curve_eval_index=curve_eval_index,
+        )
 
         if total_training_time >= TIME_BUDGET:
             break
 
     print()  # newline after \r training log
-
-    total_tokens = step * TOTAL_BATCH_SIZE
 
     if ARGS.checkpoint_path and not ARGS.no_checkpoint:
         checkpoint_saved_to = save_training_checkpoint(
@@ -1210,6 +1298,36 @@ if ARGS.eval_only or not ARGS.benchmark_skip_eval:
     eval_calibration_limited_by = eval_result["eval_calibration_limited_by"]
     eval_policy_version = eval_result["eval_policy_version"]
 
+curve_payload = None
+if CURVE_EVAL_SECONDS:
+    curve_payload = {
+        "engine": "cuda",
+        "preset": ARGS.preset,
+        "hardware_key": hardware_key,
+        "accelerator_architecture": cuda_runtime.reference_family.family_key,
+        "accelerator_compute_capability": f"{cap[0]}.{cap[1]}",
+        "resolved_attention_backend": RESOLVED_ATTENTION_BACKEND,
+        "time_budget": TIME_BUDGET,
+        "sequence_len": MAX_SEQ_LEN,
+        "window_pattern": WINDOW_PATTERN,
+        "depth": DEPTH,
+        "device_batch_size": DEVICE_BATCH_SIZE,
+        "total_batch_size": TOTAL_BATCH_SIZE,
+        "grad_accum_steps": grad_accum_steps,
+        "curve_eval_seconds": CURVE_EVAL_SECONDS,
+        "curve_eval_total_seconds": curve_eval_total_seconds,
+        "curve_points": curve_points,
+        "final_eval": {
+            "val_bpb": val_bpb,
+            "eval_seconds": eval_seconds,
+            "eval_seq_len": eval_seq_len,
+            "eval_tokens": eval_tokens,
+            "eval_batch_size": eval_batch_size,
+            "canonical_rung": canonical_rung,
+        } if val_bpb is not None else None,
+    }
+    write_curve_output(ARGS.curve_output, curve_payload)
+
 # Final summary
 t_end = time.time()
 effective_steady_time = steady_state_training_time if steady_state_training_time > 0 else total_training_time
@@ -1261,6 +1379,11 @@ print(f"peak_vram_mb:     {peak_vram_mb:.1f}")
 print(f"mfu_percent:      {steady_state_mfu:.2f}")
 print(f"steady_state_tok_per_sec: {steady_state_tok_per_sec:.1f}")
 print(f"total_tokens_M:   {total_tokens / 1e6:.1f}")
+if CURVE_EVAL_SECONDS:
+    print(f"curve_eval_points: {len(curve_points)}")
+    print(f"curve_eval_total_seconds: {curve_eval_total_seconds:.1f}")
+    if ARGS.curve_output:
+        print(f"curve_output:     {ARGS.curve_output}")
 print(f"num_steps:        {step}")
 print(f"num_params_M:     {num_params / 1e6:.1f}")
 print(f"depth:            {DEPTH}")

@@ -37,6 +37,8 @@ The largest remaining gaps are:
 3. no CUDA trainer integration evidence yet for kernel-lab targets
 4. no broad hardware validation matrix yet beyond GB10
 
+One important nuance from the latest GB10 work is that "longer short probes" are not the same thing as real horizon correction. The current fast-mode bring-up can now normalize hardware batch shape before family comparison, but the repo still does not have enough true intermediate `val_bpb` data to predict a `300s` winner reliably from very short runs. The next corrective step is therefore not another heuristic rerank; it is periodic validation checkpoints during longer CUDA runs so the repo can build a true horizon dataset from real `300s` trajectories.
+
 So the shortest honest summary is:
 
 - CUDA is already a serious training engine and a serious kernel-lab backend
@@ -131,6 +133,30 @@ These are the real parity gaps:
 | Hardware validation breadth | M5 deep | GB10 real, others pending | major gap |
 
 The key takeaway is that CUDA is not generally behind everywhere. It is specifically behind on the **calibrated trainer-loop features**, while already competitive or ahead on parts of the **kernel-lab evidence stack**.
+
+### Horizon data is still weaker than it should be
+
+The recent GB10 calibration work also exposed a more subtle parity gap: the CUDA bring-up flow can now tune hardware batch shape early, but it still does not have a trustworthy way to infer the `300s` winner from short family probes alone.
+
+What is true today:
+
+- the trainer reports a final held-out `val_bpb`
+- short bring-up probes can compare families at a shared tuned hardware batch
+- long `300s` A/B runs already showed that the true best family can differ from what a short rerank suggests
+
+What was missing until now:
+
+- periodic validation checkpoints during the long run
+- a machine-readable curve artifact that records `val_bpb` at multiple training horizons
+- a small reporting tool that can compare those curves directly
+
+That means the current "horizon correction" logic should still be treated as provisional. The repo now has the first real CUDA curve path:
+
+- `autoresearch_cuda/train.py` can emit periodic validation checkpoints via `--curve-eval-seconds`
+- it can write a JSON curve artifact with `--curve-output`
+- `tools/cuda_curve_report.py` can summarize those artifacts for a target horizon
+
+This is the foundation for replacing the current fake horizon rerank with a curve-backed model built from real `300s` trajectories.
 
 ## GB10: What We Already Proved
 

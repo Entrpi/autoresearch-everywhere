@@ -152,8 +152,13 @@ class MLXEngine:
         window_pattern: str | None = None,
         device_batch_size: int | None = None,
         total_batch_size: int | None = None,
+        curve_eval_seconds: tuple[float, ...] | None = None,
+        eval_seq_len: int | None = None,
+        eval_tokens: int | None = None,
+        eval_batch_size: int | None = None,
         no_checkpoint: bool = True,
     ) -> ProbeResult:
+        del curve_eval_seconds, eval_seq_len, eval_tokens, eval_batch_size
         preset_config = PRESETS[preset]
         resolved_seq_len = seq_len if seq_len is not None else preset_config.seq_len
         resolved_window = window_pattern if window_pattern is not None else preset_config.window_pattern
@@ -278,6 +283,41 @@ class MLXEngine:
 
     def batch_profile_candidates(self, preset: str, *, seq_len: int) -> list[tuple[int, int]]:
         return self.local_batch_candidates(preset, seq_len=seq_len)
+
+    def batch_profile_refinement_candidates(
+        self,
+        preset: str,
+        *,
+        seq_len: int,
+        coarse_winner: tuple[int, int],
+    ) -> list[tuple[int, int]]:
+        winner_device_batch, winner_total_batch = coarse_winner
+        tokens_per_fwdbwd = seq_len * winner_device_batch
+        if tokens_per_fwdbwd <= 0:
+            return []
+        winner_grad_accum = max(1, winner_total_batch // tokens_per_fwdbwd)
+        device_batches = {
+            max(1, winner_device_batch // 2),
+            winner_device_batch,
+            winner_device_batch * 2,
+        }
+        grad_accum_candidates = {
+            max(1, winner_grad_accum - 2),
+            max(1, winner_grad_accum - 1),
+            winner_grad_accum,
+            winner_grad_accum + 1,
+            winner_grad_accum + 2,
+            max(1, round(winner_grad_accum * 1.5)),
+            winner_grad_accum * 2,
+        }
+        combos: list[tuple[int, int]] = []
+        for device_batch in sorted(device_batches):
+            tokens_per_fwdbwd = seq_len * device_batch
+            if tokens_per_fwdbwd <= 0:
+                continue
+            for grad_accum in sorted(acc for acc in grad_accum_candidates if acc <= 16):
+                combos.append((device_batch, tokens_per_fwdbwd * grad_accum))
+        return sorted(set(combos))
 
     def calibration_signatures(self) -> dict[str, str | None]:
         return {
