@@ -129,6 +129,32 @@ class ProjectionDecision:
 
 
 @dataclass(frozen=True)
+class MultiHorizonProjectionDiagnostics:
+    preset: str
+    short_observed_seconds: float | None
+    long_observed_seconds: float | None
+    short_projected_val_bpb: float | None
+    long_projected_val_bpb: float
+    horizon_alpha: float | None
+    stability_gap: float | None
+    stability_snr: float | None
+    stable_projection: bool
+
+
+@dataclass(frozen=True)
+class MultiHorizonProjectionDecision:
+    target_seconds: float
+    short_horizon_seconds: float | None
+    long_horizon_seconds: float | None
+    top_preset: str
+    top_winner_probability: float
+    top_margin_to_second: float | None
+    top_stability_gap: float | None
+    top_stability_snr: float | None
+    enough_signal: bool
+
+
+@dataclass(frozen=True)
 class ScalingCandidate:
     target_seconds: float
     scaling_target_seconds: float
@@ -865,3 +891,129 @@ def compare_projected_curves(
             )
         )
     return enriched, decision
+
+
+def compare_multi_horizon_curves(
+    short_curves: list[CurveArtifact],
+    long_curves: list[CurveArtifact],
+    *,
+    target_seconds: float,
+    calibration: ProjectionCalibration | None = None,
+    truth_curves: list[CurveArtifact] | None = None,
+    winner_probability_threshold: float = 0.9,
+    projected_margin_threshold: float = 0.01,
+    monte_carlo_samples: int = MONTE_CARLO_SAMPLES,
+) -> tuple[list[ProjectedCurveEstimate], MultiHorizonProjectionDecision | None, list[MultiHorizonProjectionDiagnostics]]:
+    short_estimates, _ = compare_projected_curves(
+        short_curves,
+        target_seconds=target_seconds,
+        calibration=calibration,
+        truth_curves=truth_curves,
+        winner_probability_threshold=winner_probability_threshold,
+        projected_margin_threshold=projected_margin_threshold,
+        monte_carlo_samples=monte_carlo_samples,
+    )
+    long_estimates, long_decision = compare_projected_curves(
+        long_curves,
+        target_seconds=target_seconds,
+        calibration=calibration,
+        truth_curves=truth_curves,
+        winner_probability_threshold=winner_probability_threshold,
+        projected_margin_threshold=projected_margin_threshold,
+        monte_carlo_samples=monte_carlo_samples,
+    )
+    if long_decision is None:
+        return long_estimates, None, []
+
+    short_by_preset = {item.summary.preset: item for item in short_estimates}
+    short_curve_by_preset = {curve.preset: curve for curve in short_curves}
+    long_curve_by_preset = {curve.preset: curve for curve in long_curves}
+
+    diagnostics: list[MultiHorizonProjectionDiagnostics] = []
+    diagnostics_by_preset: dict[str, MultiHorizonProjectionDiagnostics] = {}
+    for item in long_estimates:
+        short_item = short_by_preset.get(item.summary.preset)
+        short_curve = short_curve_by_preset.get(item.summary.preset)
+        long_curve = long_curve_by_preset.get(item.summary.preset)
+
+        short_observed_seconds = (
+            short_curve.curve_points[-1].actual_training_seconds
+            if short_curve is not None and short_curve.curve_points
+            else None
+        )
+        long_observed_seconds = (
+            long_curve.curve_points[-1].actual_training_seconds
+            if long_curve is not None and long_curve.curve_points
+            else None
+        )
+        short_projected_val_bpb = short_item.corrected_val_bpb if short_item is not None else None
+        horizon_alpha = None
+        stability_gap = None
+        stability_snr = None
+        stable_projection = True
+
+        if (
+            short_item is not None
+            and short_observed_seconds is not None
+            and long_observed_seconds is not None
+            and long_observed_seconds > short_observed_seconds
+            and short_item.corrected_val_bpb > 0
+            and item.corrected_val_bpb > 0
+        ):
+            horizon_alpha = (
+                math.log(item.corrected_val_bpb) - math.log(short_item.corrected_val_bpb)
+            ) / (math.log(long_observed_seconds) - math.log(short_observed_seconds))
+            stability_gap = abs(item.corrected_val_bpb - short_item.corrected_val_bpb)
+            pooled_std = max(
+                PROJECTION_STD_FLOOR,
+                math.sqrt(short_item.projection_std**2 + item.projection_std**2),
+            )
+            stability_snr = stability_gap / pooled_std
+            stable_projection = stability_gap <= max(projected_margin_threshold, pooled_std)
+
+        diag = MultiHorizonProjectionDiagnostics(
+            preset=item.summary.preset,
+            short_observed_seconds=short_observed_seconds,
+            long_observed_seconds=long_observed_seconds,
+            short_projected_val_bpb=short_projected_val_bpb,
+            long_projected_val_bpb=item.corrected_val_bpb,
+            horizon_alpha=horizon_alpha,
+            stability_gap=stability_gap,
+            stability_snr=stability_snr,
+            stable_projection=stable_projection,
+        )
+        diagnostics.append(diag)
+        diagnostics_by_preset[diag.preset] = diag
+
+    top_diag = diagnostics_by_preset.get(long_decision.top_preset)
+    enough_signal = long_decision.enough_signal and (top_diag.stable_projection if top_diag is not None else True)
+    decision = MultiHorizonProjectionDecision(
+        target_seconds=target_seconds,
+        short_horizon_seconds=top_diag.short_observed_seconds if top_diag is not None else None,
+        long_horizon_seconds=top_diag.long_observed_seconds if top_diag is not None else None,
+        top_preset=long_decision.top_preset,
+        top_winner_probability=long_decision.top_winner_probability,
+        top_margin_to_second=long_decision.top_margin_to_second,
+        top_stability_gap=top_diag.stability_gap if top_diag is not None else None,
+        top_stability_snr=top_diag.stability_snr if top_diag is not None else None,
+        enough_signal=enough_signal,
+    )
+
+    enriched: list[ProjectedCurveEstimate] = []
+    for item in long_estimates:
+        enriched.append(
+            ProjectedCurveEstimate(
+                summary=item.summary,
+                corrected_val_bpb=item.corrected_val_bpb,
+                projection_std=item.projection_std,
+                calibration_horizon_seconds=item.calibration_horizon_seconds,
+                calibration_sample_count=item.calibration_sample_count,
+                correction_mean=item.correction_mean,
+                projection_source=item.projection_source,
+                matched_truth_count=item.matched_truth_count,
+                winner_probability=item.winner_probability,
+                enough_signal=enough_signal if item.summary.preset == long_decision.top_preset else False,
+            )
+        )
+
+    return enriched, decision, diagnostics

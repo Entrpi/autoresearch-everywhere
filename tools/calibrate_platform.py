@@ -27,6 +27,7 @@ from autoresearch_platform.platform_defaults import write_platform_default_cache
 from autoresearch_platform.curve_projection import (  # noqa: E402
     build_projection_calibration,
     compare_projected_curves,
+    compare_multi_horizon_curves,
     load_curve_artifact,
     load_curve_artifacts_from_dir,
     select_scaling_candidate,
@@ -579,6 +580,14 @@ def projected_row_to_dict(item) -> dict:
         }
     )
     return payload
+
+
+def decision_enough_signal(decision) -> bool:
+    if decision is None:
+        return False
+    if isinstance(decision, dict):
+        return bool(decision.get("enough_signal"))
+    return bool(getattr(decision, "enough_signal", False))
 
 
 def load_truth_curves(
@@ -1720,7 +1729,7 @@ def run_platform_calibration(args) -> dict:
     finalist_candidates = []
     finalist_presets = projected_presets[: max(1, finalist_count)]
     candidate_family = None
-    if projection_decision is not None and bool(projection_decision.get("enough_signal")) and projection_winner is not None:
+    if projection_decision is not None and decision_enough_signal(projection_decision) and projection_winner is not None:
         candidate_family = projection_probe_metadata_by_preset[projection_winner["preset"]]
     elif len(finalist_presets) > 1:
         finalist_inputs = {
@@ -1742,6 +1751,7 @@ def run_platform_calibration(args) -> dict:
             ),
         }
         finalist_phase = load_phase_if_matching(output_dir, "finalist_projection", finalist_inputs, force=args.force)
+        finalist_diagnostics = []
         if finalist_phase is None:
             finalist_probe_rows = [
                 run_curve_train_probe(
@@ -1760,7 +1770,8 @@ def run_platform_calibration(args) -> dict:
                 for preset in finalist_presets
             ]
             finalist_curves = load_probe_curve_artifacts(finalist_probe_rows)
-            finalist_estimates, finalist_decision = compare_projected_curves(
+            finalist_estimates, finalist_decision, finalist_diagnostics = compare_multi_horizon_curves(
+                projection_curves,
                 finalist_curves,
                 target_seconds=PROJECTION_TARGET_SECONDS,
                 calibration=projection_calibration,
@@ -1785,6 +1796,7 @@ def run_platform_calibration(args) -> dict:
                     "probe_rows": [asdict(row) for row in finalist_probe_rows],
                     "ranked_rows": [ranked_probe_to_dict(item) for item in finalist_candidates],
                     "decision": None if finalist_decision is None else asdict(finalist_decision),
+                    "diagnostics": [asdict(item) for item in finalist_diagnostics],
                     "rows": [projected_row_to_dict(item) for item in finalist_estimates],
                     "winner": projected_row_to_dict(finalist_estimates[0]) if finalist_estimates else None,
                 },
@@ -1803,7 +1815,8 @@ def run_platform_calibration(args) -> dict:
             ranking_time_budget=finalist_time_budget,
         )
         finalist_curves = load_probe_curve_artifacts(finalist_probe_rows)
-        finalist_estimates, finalist_decision = compare_projected_curves(
+        finalist_estimates, finalist_decision, finalist_diagnostics = compare_multi_horizon_curves(
+            projection_curves,
             finalist_curves,
             target_seconds=PROJECTION_TARGET_SECONDS,
             calibration=projection_calibration,
@@ -2057,6 +2070,7 @@ def run_platform_calibration(args) -> dict:
                 "rows": finalist_phase["payload"]["rows"],
                 "winner": finalist_phase["payload"]["winner"],
                 "decision": finalist_phase["payload"].get("decision"),
+                "diagnostics": finalist_phase["payload"].get("diagnostics", []),
             }
             if finalist_phase is not None
             else None

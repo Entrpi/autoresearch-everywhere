@@ -29,36 +29,37 @@ On this hardware, the default canonical matched benchmark window for optimizatio
 
 ## Latest
 
-### New commit — calibration: add a secondary scaling-candidate pass above the strict 300s winner — score `3` — complexity `6`
+### New commit — calibration: add multi-horizon truth-backed projection gating — score `2`
 
-**AI-identified within brief, human-shaped (3)**
+**AI-identified within brief, human-approved (2)**
 
-- Add a second calibration layer that can surface a larger near-frontier model as a scaling candidate even when it does not beat the strict `300s` `val_bpb` winner.
-  - Meaning: the projection/reporting path now keeps one strict winner for the actual objective, but it can also report a larger family that stays very close to the lead at `300s` and projects as the more interesting longer-horizon scaling bet. This is exposed in the shared curve logic, the platform-calibration payload, and the generated Markdown report without changing how the default winner is chosen.
-  - Motivation: the completed GB10 truth corpus exposed a real near-frontier case that the old reports could not express honestly. `m5-balanced` is the strict `300s` winner, but `m5-xlarge db=16` finishes within `0.006955` BPB and remains close enough that longer-horizon users should see it called out separately instead of either hiding it or secretly weighting larger models higher.
-  - Purpose: preserve a hard objective-driven default while still surfacing the most plausible larger-family scaling path for deeper follow-up calibration.
-  - Adding `ScalingCandidate` and the truth-curve selection logic in `autoresearch_platform/curve_projection.py`.
-  - Extending `tools/calibrate_platform.py` so the platform report and JSON artifact include the secondary scaling candidate when one is supported by the truth corpus.
-  - Updating the front-door and platform-calibration docs so the report story now explicitly distinguishes the strict `300s` winner from the optional longer-horizon scaling candidate.
+- Add a multi-horizon projection gate that compares shorter and longer finalist curves against the same `300s` truth target before declaring that there is enough signal to stop.
+  - Meaning: the shared curve layer now reasons across two observed horizons instead of trusting a single partial curve snapshot. The calibration flow compares the shorter finalist projections with the longer finalist projections, measures whether the winner stays stable as more real training time is observed, and only carries the `enough_signal` decision forward when the longer-horizon result is both strong enough and stable enough.
+  - Motivation: the first GB10 truth-backed projection pass showed that a simple short-horizon rerank could still pick the wrong family. We needed a more disciplined way to ask whether an early winner was genuinely converging toward the `300s` winner or was just benefiting from startup behavior.
+  - Purpose: make the horizon model trustworthy enough to guide early stopping decisions in `calibrate.py` without pretending that one short curve can stand in for the real `300s` objective.
+  - Adding `MultiHorizonProjectionDiagnostics` and `MultiHorizonProjectionDecision` plus the shared `compare_multi_horizon_curves(...)` helper in `autoresearch_platform/curve_projection.py`.
+  - Updating `tools/calibrate_platform.py` so the finalist stage compares the `30s` finalist curves against the earlier projection curves, records per-preset stability diagnostics, and gates `enough_signal` on that multi-horizon check instead of reading the long-horizon decision directly.
 
 **Grounding**
 
 - Files:
   - `CHANGELOG.md`
-  - `README.md`
   - `autoresearch_platform/curve_projection.py`
-  - `docs/platform-calibration.md`
   - `tools/calibrate_platform.py`
 - Validation:
   - `python3 -m py_compile autoresearch_platform/curve_projection.py tools/calibrate_platform.py`
+  - synthetic positive multi-horizon projection check using `/tmp/test_multi_horizon.py`
+  - synthetic stability-path probe using `/tmp/test_multi_horizon_unstable.py`
   - `python3 tools/changelog_scores.py --group-by entry --format csv --include-latest --verify`
   - `python3 tools/render_autonomy_badge.py`
 - Measurements:
-  - on the completed GB10 `300s` truth corpus:
-    - strict winner: `m5-balanced` at `1.162382`
-    - closest larger near-frontier family: `m5-xlarge db=16` at `1.169337`
-    - gap at `300s`: `0.006955`
-  - the new scaling-candidate selector keeps `m5-balanced` as the only strict winner while surfacing `m5-xlarge` as the longer-horizon scaling candidate from the same truth set
+  - the new multi-horizon path is grounded against the already completed GB10 `300s` truth corpus:
+    - `m5-balanced` at `1.162382`
+    - `m5-xlarge db=16` at `1.169337`
+    - `m5-small` at `1.257603`
+    - `m5-large` at `1.285034`
+    - `m5-tiny` at `1.465999`
+  - the synthetic positive check confirmed that a winner can remain `enough_signal=true` when the shorter and longer horizons agree closely on the projected target outcome
 
 ## Committed History
 
