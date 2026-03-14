@@ -67,8 +67,9 @@ class CurveArtifact:
 
 @dataclass(frozen=True)
 class CurveProjection:
-    target_seconds: float
-    projected_seconds: float
+    target_seconds: float | None
+    target_tokens: float | None
+    projected_seconds: float | None
     projected_tokens: float
     projected_val_bpb: float
     method: str
@@ -85,7 +86,8 @@ class CurveSummary:
     device_batch_size: int | None
     total_batch_size: int | None
     curve_points: int
-    target_seconds: float
+    target_seconds: float | None
+    target_tokens: float | None
     observed_seconds: float | None
     observed_tokens: float | None
     projected_val_bpb: float | None
@@ -112,7 +114,8 @@ class ProjectionCalibrationPoint:
 
 @dataclass(frozen=True)
 class ProjectionCalibration:
-    target_seconds: float
+    target_seconds: float | None
+    target_tokens: float | None
     points: tuple[ProjectionCalibrationPoint, ...]
 
 
@@ -181,7 +184,8 @@ class HorizonProjectionDecision:
 
 @dataclass(frozen=True)
 class ProjectionDecision:
-    target_seconds: float
+    target_seconds: float | None
+    target_tokens: float | None
     top_preset: str
     top_projected_tokens: float | None
     top_winner_probability: float
@@ -219,7 +223,8 @@ class MultiHorizonProjectionDiagnostics:
 
 @dataclass(frozen=True)
 class MultiHorizonProjectionDecision:
-    target_seconds: float
+    target_seconds: float | None
+    target_tokens: float | None
     short_horizon_seconds: float | None
     long_horizon_seconds: float | None
     top_preset: str
@@ -356,6 +361,7 @@ def load_curve_artifacts_from_dir(
     engine: str | None = None,
     hardware_key: str | None = None,
     require_target_seconds: float | None = None,
+    require_target_tokens: float | None = None,
 ) -> list[CurveArtifact]:
     curves: list[CurveArtifact] = []
     for path in sorted(directory.glob("*.json")):
@@ -370,6 +376,10 @@ def load_curve_artifacts_from_dir(
         horizon_seconds = final_training_seconds(curve)
         if require_target_seconds is not None and (
             horizon_seconds is None or float(horizon_seconds) < require_target_seconds
+        ):
+            continue
+        if require_target_tokens is not None and (
+            not curve.curve_points or float(curve.curve_points[-1].total_tokens) < require_target_tokens
         ):
             continue
         curves.append(curve)
@@ -409,11 +419,84 @@ def _interpolate_seconds(points: tuple[CurvePoint, ...], target_seconds: float) 
     return points[-1]
 
 
+def _interpolate_tokens(points: tuple[CurvePoint, ...], target_tokens: float) -> CurvePoint | None:
+    if not points:
+        return None
+    if target_tokens <= points[0].total_tokens:
+        return points[0]
+    if target_tokens >= points[-1].total_tokens:
+        return points[-1]
+    for left, right in zip(points, points[1:]):
+        if left.total_tokens <= target_tokens <= right.total_tokens:
+            if math.isclose(left.total_tokens, right.total_tokens):
+                return right
+            alpha = (target_tokens - left.total_tokens) / (right.total_tokens - left.total_tokens)
+            return CurvePoint(
+                target_training_seconds=(
+                    left.target_training_seconds
+                    + alpha * (right.target_training_seconds - left.target_training_seconds)
+                ),
+                actual_training_seconds=(
+                    left.actual_training_seconds
+                    + alpha * (right.actual_training_seconds - left.actual_training_seconds)
+                ),
+                step=round(left.step + alpha * (right.step - left.step)),
+                total_tokens=target_tokens,
+                val_bpb=left.val_bpb + alpha * (right.val_bpb - left.val_bpb),
+                eval_seconds=(
+                    None
+                    if left.eval_seconds is None or right.eval_seconds is None
+                    else left.eval_seconds + alpha * (right.eval_seconds - left.eval_seconds)
+                ),
+                eval_seq_len=right.eval_seq_len if right.eval_seq_len is not None else left.eval_seq_len,
+                eval_tokens=right.eval_tokens if right.eval_tokens is not None else left.eval_tokens,
+                eval_batch_size=right.eval_batch_size if right.eval_batch_size is not None else left.eval_batch_size,
+                canonical_rung=right.canonical_rung or left.canonical_rung,
+            )
+    return points[-1]
+
+
 def truncate_curve(curve: CurveArtifact, *, horizon_seconds: float) -> CurveArtifact | None:
     points = tuple(point for point in curve.curve_points if point.actual_training_seconds <= horizon_seconds + 1e-9)
     interpolated = _interpolate_seconds(curve.curve_points, horizon_seconds)
     if interpolated is not None:
         if not points or not math.isclose(points[-1].actual_training_seconds, interpolated.actual_training_seconds):
+            points = points + (interpolated,)
+    if not points:
+        return None
+    payload = dict(curve.raw_payload)
+    payload["curve_points"] = [
+        {
+            "target_training_seconds": point.target_training_seconds,
+            "actual_training_seconds": point.actual_training_seconds,
+            "step": point.step,
+            "total_tokens": point.total_tokens,
+            "val_bpb": point.val_bpb,
+            "eval_seconds": point.eval_seconds,
+            "eval_seq_len": point.eval_seq_len,
+            "eval_tokens": point.eval_tokens,
+            "eval_batch_size": point.eval_batch_size,
+            "canonical_rung": point.canonical_rung,
+        }
+        for point in points
+    ]
+    return CurveArtifact(
+        engine=curve.engine,
+        preset=curve.preset,
+        hardware_key=curve.hardware_key,
+        device_batch_size=curve.device_batch_size,
+        total_batch_size=curve.total_batch_size,
+        curve_points=points,
+        final_eval=curve.final_eval,
+        raw_payload=payload,
+    )
+
+
+def truncate_curve_tokens(curve: CurveArtifact, *, horizon_tokens: float) -> CurveArtifact | None:
+    points = tuple(point for point in curve.curve_points if point.total_tokens <= horizon_tokens + 1e-9)
+    interpolated = _interpolate_tokens(curve.curve_points, horizon_tokens)
+    if interpolated is not None:
+        if not points or not math.isclose(points[-1].total_tokens, interpolated.total_tokens):
             points = points + (interpolated,)
     if not points:
         return None
@@ -469,6 +552,34 @@ def _estimate_tokens_at_seconds(points: tuple[CurvePoint, ...], target_seconds: 
     return points[-1].total_tokens + max(0.0, target_seconds - points[-1].actual_training_seconds) * rate
 
 
+def _estimate_seconds_at_tokens(points: tuple[CurvePoint, ...], target_tokens: float) -> float | None:
+    interpolated = _interpolate_tokens(points, target_tokens)
+    if interpolated is not None and target_tokens <= points[-1].total_tokens:
+        return interpolated.actual_training_seconds
+    if not points:
+        return None
+    if len(points) == 1:
+        rate = points[0].total_tokens / max(points[0].actual_training_seconds, 1e-9)
+        if rate <= 0:
+            return None
+        return target_tokens / rate
+    intervals = []
+    for left, right in zip(points[1:], points[2:]):
+        delta_t = right.actual_training_seconds - left.actual_training_seconds
+        if delta_t <= 0:
+            continue
+        intervals.append((right.total_tokens - left.total_tokens) / delta_t)
+    if not intervals:
+        left, right = points[-2], points[-1]
+        delta_t = max(right.actual_training_seconds - left.actual_training_seconds, 1e-9)
+        rate = (right.total_tokens - left.total_tokens) / delta_t
+    else:
+        rate = statistics.median(intervals)
+    if rate <= 0:
+        return None
+    return points[-1].actual_training_seconds + max(0.0, target_tokens - points[-1].total_tokens) / rate
+
+
 def _fit_log_token_projection(points: tuple[CurvePoint, ...], target_tokens: float) -> tuple[float, float | None, float | None]:
     fit_points = list(points[1:] if len(points) > 2 else points)
     xs = [math.log(max(point.total_tokens, 1.0)) for point in fit_points]
@@ -494,16 +605,53 @@ def _fit_log_token_projection(points: tuple[CurvePoint, ...], target_tokens: flo
     return min(last_observed, projected), fit_r2, fit_sigma
 
 
-def project_curve(curve: CurveArtifact, *, target_seconds: float) -> CurveProjection | None:
+def project_curve(
+    curve: CurveArtifact,
+    *,
+    target_seconds: float | None = None,
+    target_tokens: float | None = None,
+) -> CurveProjection | None:
+    if (target_seconds is None) == (target_tokens is None):
+        raise ValueError("project_curve requires exactly one of target_seconds or target_tokens.")
     points = curve.curve_points
     if not points:
         return None
+    if target_tokens is not None:
+        if target_tokens <= points[-1].total_tokens:
+            interpolated = _interpolate_tokens(points, target_tokens)
+            if interpolated is None:
+                return None
+            return CurveProjection(
+                target_seconds=None,
+                target_tokens=target_tokens,
+                projected_seconds=interpolated.actual_training_seconds,
+                projected_tokens=target_tokens,
+                projected_val_bpb=interpolated.val_bpb,
+                method="interpolate-tokens",
+                observed_point_count=len(points),
+            )
+        projected_val_bpb, fit_r2, fit_sigma = _fit_log_token_projection(points, target_tokens)
+        projected_seconds = _estimate_seconds_at_tokens(points, target_tokens)
+        return CurveProjection(
+            target_seconds=None,
+            target_tokens=target_tokens,
+            projected_seconds=projected_seconds,
+            projected_tokens=target_tokens,
+            projected_val_bpb=projected_val_bpb,
+            method="log-token-fit",
+            observed_point_count=len(points),
+            fit_r2=fit_r2,
+            fit_sigma=fit_sigma,
+        )
+
+    assert target_seconds is not None
     if target_seconds <= points[-1].actual_training_seconds:
         interpolated = _interpolate_seconds(points, target_seconds)
         if interpolated is None:
             return None
         return CurveProjection(
             target_seconds=target_seconds,
+            target_tokens=interpolated.total_tokens,
             projected_seconds=target_seconds,
             projected_tokens=interpolated.total_tokens,
             projected_val_bpb=interpolated.val_bpb,
@@ -517,6 +665,7 @@ def project_curve(curve: CurveArtifact, *, target_seconds: float) -> CurveProjec
     projected_val_bpb, fit_r2, fit_sigma = _fit_log_token_projection(points, projected_tokens)
     return CurveProjection(
         target_seconds=target_seconds,
+        target_tokens=projected_tokens,
         projected_seconds=target_seconds,
         projected_tokens=projected_tokens,
         projected_val_bpb=projected_val_bpb,
@@ -527,8 +676,13 @@ def project_curve(curve: CurveArtifact, *, target_seconds: float) -> CurveProjec
     )
 
 
-def summarize_curve(curve: CurveArtifact, *, target_seconds: float) -> dict:
-    projection = project_curve(curve, target_seconds=target_seconds)
+def summarize_curve(
+    curve: CurveArtifact,
+    *,
+    target_seconds: float | None = None,
+    target_tokens: float | None = None,
+) -> dict:
+    projection = project_curve(curve, target_seconds=target_seconds, target_tokens=target_tokens)
     final_eval = curve.final_eval or {}
     return {
         "engine": curve.engine,
@@ -538,6 +692,7 @@ def summarize_curve(curve: CurveArtifact, *, target_seconds: float) -> dict:
         "total_batch_size": curve.total_batch_size,
         "curve_points": len(curve.curve_points),
         "target_seconds": target_seconds,
+        "target_tokens": target_tokens,
         "observed_seconds": curve.curve_points[-1].actual_training_seconds if curve.curve_points else None,
         "observed_tokens": curve.curve_points[-1].total_tokens if curve.curve_points else None,
         "projected_val_bpb": projection.projected_val_bpb if projection else None,
@@ -551,13 +706,26 @@ def summarize_curve(curve: CurveArtifact, *, target_seconds: float) -> dict:
     }
 
 
-def summarize_curve_artifact(curve: CurveArtifact, *, target_seconds: float) -> CurveSummary:
-    summary = summarize_curve(curve, target_seconds=target_seconds)
+def summarize_curve_artifact(
+    curve: CurveArtifact,
+    *,
+    target_seconds: float | None = None,
+    target_tokens: float | None = None,
+) -> CurveSummary:
+    summary = summarize_curve(curve, target_seconds=target_seconds, target_tokens=target_tokens)
     return CurveSummary(**summary)
 
 
-def summarize_curves(curves: list[CurveArtifact], *, target_seconds: float) -> list[CurveSummary]:
-    rows = [summarize_curve_artifact(curve, target_seconds=target_seconds) for curve in curves]
+def summarize_curves(
+    curves: list[CurveArtifact],
+    *,
+    target_seconds: float | None = None,
+    target_tokens: float | None = None,
+) -> list[CurveSummary]:
+    rows = [
+        summarize_curve_artifact(curve, target_seconds=target_seconds, target_tokens=target_tokens)
+        for curve in curves
+    ]
     rows.sort(key=lambda row: (row.projected_val_bpb is None, row.projected_val_bpb))
 
     valid_projected = [row.projected_val_bpb for row in rows if row.projected_val_bpb is not None]
@@ -615,36 +783,62 @@ def _robust_std(values: list[float]) -> float:
 def build_projection_calibration(
     truth_curves: list[CurveArtifact],
     *,
-    target_seconds: float,
+    target_seconds: float | None = None,
+    target_tokens: float | None = None,
 ) -> ProjectionCalibration:
+    if (target_seconds is None) == (target_tokens is None):
+        raise ValueError("build_projection_calibration requires exactly one of target_seconds or target_tokens.")
     residuals_by_horizon: dict[tuple[float, float], list[float]] = {}
     for curve in truth_curves:
-        final_eval = curve.final_eval or {}
-        target_horizon = final_training_seconds(curve)
-        final_val_bpb = final_eval.get("val_bpb")
-        if target_horizon is None or final_val_bpb is None:
-            continue
-        if float(target_horizon) < target_seconds:
-            continue
-        horizons = sorted(
-            {
-                point.actual_training_seconds
-                for point in curve.curve_points
-                if point.actual_training_seconds < target_seconds - 1e-9
-            }
-        )
-        for horizon_seconds in horizons:
-            truncated = truncate_curve(curve, horizon_seconds=horizon_seconds)
-            if truncated is None:
+        if target_tokens is not None:
+            target_point = _interpolate_tokens(curve.curve_points, target_tokens)
+            if target_point is None or curve.curve_points[-1].total_tokens < target_tokens:
                 continue
-            horizon_tokens = truncated.curve_points[-1].total_tokens if truncated.curve_points else None
-            if horizon_tokens is None:
+            horizons = sorted(
+                {
+                    point.total_tokens
+                    for point in curve.curve_points
+                    if point.total_tokens < target_tokens - 1e-9
+                }
+            )
+            for horizon_tokens in horizons:
+                truncated = truncate_curve_tokens(curve, horizon_tokens=horizon_tokens)
+                if truncated is None or not truncated.curve_points:
+                    continue
+                projection = project_curve(truncated, target_tokens=target_tokens)
+                if projection is None:
+                    continue
+                horizon_seconds = truncated.curve_points[-1].actual_training_seconds
+                residual = float(target_point.val_bpb) - projection.projected_val_bpb
+                residuals_by_horizon.setdefault((float(horizon_seconds), float(horizon_tokens)), []).append(residual)
+        else:
+            assert target_seconds is not None
+            final_eval = curve.final_eval or {}
+            target_horizon = final_training_seconds(curve)
+            final_val_bpb = final_eval.get("val_bpb")
+            if target_horizon is None or final_val_bpb is None:
                 continue
-            projection = project_curve(truncated, target_seconds=target_seconds)
-            if projection is None:
+            if float(target_horizon) < target_seconds:
                 continue
-            residual = float(final_val_bpb) - projection.projected_val_bpb
-            residuals_by_horizon.setdefault((float(horizon_seconds), float(horizon_tokens)), []).append(residual)
+            horizons = sorted(
+                {
+                    point.actual_training_seconds
+                    for point in curve.curve_points
+                    if point.actual_training_seconds < target_seconds - 1e-9
+                }
+            )
+            for horizon_seconds in horizons:
+                truncated = truncate_curve(curve, horizon_seconds=horizon_seconds)
+                if truncated is None:
+                    continue
+                horizon_tokens = truncated.curve_points[-1].total_tokens if truncated.curve_points else None
+                if horizon_tokens is None:
+                    continue
+                projection = project_curve(truncated, target_seconds=target_seconds)
+                if projection is None:
+                    continue
+                residual = float(final_val_bpb) - projection.projected_val_bpb
+                residuals_by_horizon.setdefault((float(horizon_seconds), float(horizon_tokens)), []).append(residual)
 
     points: list[ProjectionCalibrationPoint] = []
     for horizon_seconds, horizon_tokens in sorted(residuals_by_horizon):
@@ -659,7 +853,7 @@ def build_projection_calibration(
                 residual_mad=statistics.median(abs(value - statistics.median(residuals)) for value in residuals),
             )
         )
-    return ProjectionCalibration(target_seconds=target_seconds, points=tuple(points))
+    return ProjectionCalibration(target_seconds=target_seconds, target_tokens=target_tokens, points=tuple(points))
 
 
 def nearest_calibration_point(
@@ -726,6 +920,37 @@ def _curve_distance_to_truth(curve: CurveArtifact, truth_curve: CurveArtifact) -
     return distance
 
 
+def _curve_distance_to_truth_by_tokens(curve: CurveArtifact, truth_curve: CurveArtifact) -> float:
+    if not curve.curve_points or not truth_curve.curve_points:
+        return float("inf")
+    max_tokens = curve.curve_points[-1].total_tokens
+    truth_partial = truncate_curve_tokens(truth_curve, horizon_tokens=max_tokens)
+    if truth_partial is None or not truth_partial.curve_points:
+        return float("inf")
+    errors: list[float] = []
+    for point in curve.curve_points:
+        truth_point = _interpolate_tokens(truth_partial.curve_points, point.total_tokens)
+        if truth_point is None:
+            continue
+        errors.append(abs(point.val_bpb - truth_point.val_bpb))
+    if not errors:
+        return float("inf")
+    distance = statistics.fmean(errors)
+    if (
+        curve.device_batch_size is not None
+        and truth_curve.device_batch_size is not None
+        and curve.device_batch_size != truth_curve.device_batch_size
+    ):
+        distance += 0.01 * abs(curve.device_batch_size - truth_curve.device_batch_size) / max(curve.device_batch_size, 1)
+    if (
+        curve.total_batch_size is not None
+        and truth_curve.total_batch_size is not None
+        and curve.total_batch_size != truth_curve.total_batch_size
+    ):
+        distance += 0.01 * abs(curve.total_batch_size - truth_curve.total_batch_size) / max(curve.total_batch_size, 1)
+    return distance
+
+
 def _best_truth_curve_by_preset(
     truth_curves: list[CurveArtifact],
     *,
@@ -767,8 +992,11 @@ def estimate_from_matching_truth(
     curve: CurveArtifact,
     *,
     truth_curves: list[CurveArtifact],
-    target_seconds: float,
+    target_seconds: float | None = None,
+    target_tokens: float | None = None,
 ) -> tuple[float, float, int] | None:
+    if (target_seconds is None) == (target_tokens is None):
+        raise ValueError("estimate_from_matching_truth requires exactly one of target_seconds or target_tokens.")
     finals: list[float] = []
     distances: list[float] = []
     for truth_curve in truth_curves:
@@ -778,14 +1006,21 @@ def estimate_from_matching_truth(
             continue
         if curve.hardware_key is not None and truth_curve.hardware_key is not None and truth_curve.hardware_key != curve.hardware_key:
             continue
-        final_eval = truth_curve.final_eval or {}
-        final_val_bpb = final_eval.get("val_bpb")
-        if final_val_bpb is None:
-            continue
-        truth_horizon = final_training_seconds(truth_curve)
-        if truth_horizon is None or truth_horizon < target_seconds:
-            continue
-        distance = _curve_distance_to_truth(curve, truth_curve)
+        if target_tokens is not None:
+            truth_point = _interpolate_tokens(truth_curve.curve_points, target_tokens)
+            if truth_point is None or truth_curve.curve_points[-1].total_tokens < target_tokens:
+                continue
+            final_val_bpb = float(truth_point.val_bpb)
+            distance = _curve_distance_to_truth_by_tokens(curve, truth_curve)
+        else:
+            final_eval = truth_curve.final_eval or {}
+            final_val_bpb = final_eval.get("val_bpb")
+            if final_val_bpb is None:
+                continue
+            truth_horizon = final_training_seconds(truth_curve)
+            if truth_horizon is None or truth_horizon < target_seconds:
+                continue
+            distance = _curve_distance_to_truth(curve, truth_curve)
         if not math.isfinite(distance):
             continue
         finals.append(float(final_val_bpb))
@@ -804,8 +1039,13 @@ def estimate_from_truth_anchor(
     curve: CurveArtifact,
     *,
     truth_curves: list[CurveArtifact],
-    target_seconds: float,
+    target_seconds: float | None = None,
+    target_tokens: float | None = None,
 ) -> tuple[float, float, int, float, float | None, float | None] | None:
+    if target_tokens is not None:
+        return None
+    if target_seconds is None:
+        raise ValueError("estimate_from_truth_anchor requires target_seconds.")
     matching: list[CurveArtifact] = []
     for truth_curve in truth_curves:
         if truth_curve.preset != curve.preset:
@@ -941,11 +1181,14 @@ def select_scaling_candidate(
 def estimate_projected_curve(
     curve: CurveArtifact,
     *,
-    target_seconds: float,
+    target_seconds: float | None = None,
+    target_tokens: float | None = None,
     calibration: ProjectionCalibration | None = None,
     truth_curves: list[CurveArtifact] | None = None,
 ) -> ProjectedCurveEstimate:
-    summary = summarize_curve_artifact(curve, target_seconds=target_seconds)
+    if (target_seconds is None) == (target_tokens is None):
+        raise ValueError("estimate_projected_curve requires exactly one of target_seconds or target_tokens.")
+    summary = summarize_curve_artifact(curve, target_seconds=target_seconds, target_tokens=target_tokens)
     if summary.projected_val_bpb is None:
         return ProjectedCurveEstimate(
             summary=summary,
@@ -959,7 +1202,10 @@ def estimate_projected_curve(
             correction_mean=0.0,
         )
     observed_target = (
-        summary.observed_seconds is not None
+        summary.observed_tokens is not None
+        and summary.observed_tokens + 1e-9 >= target_tokens
+        if target_tokens is not None
+        else summary.observed_seconds is not None
         and summary.observed_seconds + 1e-9 >= target_seconds
     )
     if observed_target:
@@ -967,6 +1213,7 @@ def estimate_projected_curve(
             curve,
             truth_curves=truth_curves or [],
             target_seconds=target_seconds,
+            target_tokens=target_tokens,
         )
         matched_truth_count = truth_estimate[2] if truth_estimate is not None else 0
         return ProjectedCurveEstimate(
@@ -978,7 +1225,7 @@ def estimate_projected_curve(
             ),
             fit_r2=summary.projection_fit_r2,
             fit_sigma=summary.projection_fit_sigma,
-            calibration_horizon_seconds=target_seconds,
+            calibration_horizon_seconds=target_seconds if target_seconds is not None else summary.observed_seconds,
             calibration_horizon_tokens=summary.projected_tokens,
             calibration_sample_count=matched_truth_count,
             correction_mean=0.0,
@@ -989,6 +1236,7 @@ def estimate_projected_curve(
         curve,
         truth_curves=truth_curves or [],
         target_seconds=target_seconds,
+        target_tokens=target_tokens,
     )
     if truth_estimate is not None:
         corrected_val_bpb, projection_std, matched_truth_count = truth_estimate
@@ -1009,6 +1257,7 @@ def estimate_projected_curve(
         curve,
         truth_curves=truth_curves or [],
         target_seconds=target_seconds,
+        target_tokens=target_tokens,
     )
     if truth_anchor_estimate is not None:
         (
@@ -1083,17 +1332,21 @@ def estimate_projected_curve(
 def compare_projected_curves(
     curves: list[CurveArtifact],
     *,
-    target_seconds: float,
+    target_seconds: float | None = None,
+    target_tokens: float | None = None,
     calibration: ProjectionCalibration | None = None,
     truth_curves: list[CurveArtifact] | None = None,
     winner_probability_threshold: float = 0.9,
     projected_margin_threshold: float = 0.01,
     monte_carlo_samples: int = MONTE_CARLO_SAMPLES,
 ) -> tuple[list[ProjectedCurveEstimate], ProjectionDecision | None]:
+    if (target_seconds is None) == (target_tokens is None):
+        raise ValueError("compare_projected_curves requires exactly one of target_seconds or target_tokens.")
     estimates = [
         estimate_projected_curve(
             curve,
             target_seconds=target_seconds,
+            target_tokens=target_tokens,
             calibration=calibration,
             truth_curves=truth_curves,
         )
@@ -1190,6 +1443,7 @@ def compare_projected_curves(
     )
     decision = ProjectionDecision(
         target_seconds=target_seconds,
+        target_tokens=target_tokens,
         top_preset=top.summary.preset,
         top_projected_tokens=top.summary.projected_tokens,
         top_winner_probability=top.winner_probability or 0.0,
@@ -1556,16 +1810,20 @@ def compare_multi_horizon_curves(
     short_curves: list[CurveArtifact],
     long_curves: list[CurveArtifact],
     *,
-    target_seconds: float,
+    target_seconds: float | None = None,
+    target_tokens: float | None = None,
     calibration: ProjectionCalibration | None = None,
     truth_curves: list[CurveArtifact] | None = None,
     winner_probability_threshold: float = 0.9,
     projected_margin_threshold: float = 0.01,
     monte_carlo_samples: int = MONTE_CARLO_SAMPLES,
 ) -> tuple[list[ProjectedCurveEstimate], MultiHorizonProjectionDecision | None, list[MultiHorizonProjectionDiagnostics]]:
+    if (target_seconds is None) == (target_tokens is None):
+        raise ValueError("compare_multi_horizon_curves requires exactly one of target_seconds or target_tokens.")
     short_estimates, _ = compare_projected_curves(
         short_curves,
         target_seconds=target_seconds,
+        target_tokens=target_tokens,
         calibration=calibration,
         truth_curves=truth_curves,
         winner_probability_threshold=winner_probability_threshold,
@@ -1575,6 +1833,7 @@ def compare_multi_horizon_curves(
     long_estimates, long_decision = compare_projected_curves(
         long_curves,
         target_seconds=target_seconds,
+        target_tokens=target_tokens,
         calibration=calibration,
         truth_curves=truth_curves,
         winner_probability_threshold=winner_probability_threshold,
@@ -1712,6 +1971,7 @@ def compare_multi_horizon_curves(
         confidence_reason = stability_reason
     decision = MultiHorizonProjectionDecision(
         target_seconds=target_seconds,
+        target_tokens=target_tokens,
         short_horizon_seconds=top_diag.short_observed_seconds if top_diag is not None else None,
         long_horizon_seconds=top_diag.long_observed_seconds if top_diag is not None else None,
         top_preset=long_decision.top_preset,
@@ -1743,6 +2003,9 @@ def compare_multi_horizon_curves(
                 winner_probability=item.winner_probability,
                 enough_signal=enough_signal if item.summary.preset == long_decision.top_preset else False,
                 confidence_reason=long_decision.confidence_reason if item.summary.preset == long_decision.top_preset else None,
+                truth_anchor_seconds=item.truth_anchor_seconds,
+                truth_anchor_tokens=item.truth_anchor_tokens,
+                extrapolation_ratio=item.extrapolation_ratio,
             )
         )
 

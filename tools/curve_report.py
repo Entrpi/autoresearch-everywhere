@@ -29,6 +29,19 @@ from autoresearch_platform.curve_projection import (
     summarize_curves,
 )
 
+TARGET_BUDGET_SECONDS = "seconds"
+TARGET_BUDGET_TOKENS = "tokens"
+
+
+def _target_label(*, target_seconds: float | None, target_tokens: float | None) -> str:
+    if target_tokens is not None:
+        if target_tokens >= 1e9:
+            return f"{target_tokens / 1e9:.2f}B tokens"
+        return f"{target_tokens / 1e6:.0f}M tokens"
+    if target_seconds is not None:
+        return f"{target_seconds:.0f}s"
+    return "n/a"
+
 
 def summary_to_dict(row) -> dict:
     return {
@@ -39,6 +52,7 @@ def summary_to_dict(row) -> dict:
         "total_batch_size": row.total_batch_size,
         "curve_points": row.curve_points,
         "target_seconds": row.target_seconds,
+        "target_tokens": row.target_tokens,
         "observed_seconds": row.observed_seconds,
         "observed_tokens": row.observed_tokens,
         "projected_val_bpb": row.projected_val_bpb,
@@ -64,6 +78,7 @@ def projection_to_dict(row: ProjectedCurveEstimate) -> dict:
         "total_batch_size": row.summary.total_batch_size,
         "curve_points": row.summary.curve_points,
         "target_seconds": row.summary.target_seconds,
+        "target_tokens": row.summary.target_tokens,
         "observed_seconds": row.summary.observed_seconds,
         "observed_tokens": row.summary.observed_tokens,
         "projected_val_bpb": row.summary.projected_val_bpb,
@@ -241,7 +256,7 @@ def print_summary_markdown(rows: list[dict]) -> None:
 def print_projection_markdown(rows: list[dict], decision: ProjectionDecision | None) -> None:
     if decision is not None:
         print(
-            f"Projection target: `{decision.target_seconds:.0f}s`  \n"
+            f"Projection target: `{_target_label(target_seconds=decision.target_seconds, target_tokens=decision.target_tokens)}`  \n"
             f"Projected winner: `{decision.top_preset}`  \n"
             f"Winner projected tokens: `{_format_tokens(decision.top_projected_tokens)}`  \n"
             f"Winner probability: `{decision.top_winner_probability:.3f}`  \n"
@@ -329,7 +344,7 @@ def print_multi_horizon_markdown(
         stability_gap = _format_float(decision.top_stability_gap)
         stability_snr = _format_float(decision.top_stability_snr, digits=3)
         print(
-            f"Projection target: `{decision.target_seconds:.0f}s`  \n"
+            f"Projection target: `{_target_label(target_seconds=decision.target_seconds, target_tokens=decision.target_tokens)}`  \n"
             f"Projected winner: `{decision.top_preset}`  \n"
             f"Winner probability: `{decision.top_winner_probability:.3f}`  \n"
             f"Margin to second: `{margin}`  \n"
@@ -574,7 +589,14 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--engine", help="Optional engine filter when scanning directories.")
     parser.add_argument("--hardware-key", help="Optional hardware-key filter when scanning directories.")
-    parser.add_argument("--target-seconds", type=float, default=300.0, help="Training horizon to estimate.")
+    parser.add_argument(
+        "--target-budget-mode",
+        choices=(TARGET_BUDGET_SECONDS, TARGET_BUDGET_TOKENS),
+        default=TARGET_BUDGET_SECONDS,
+        help="Whether to project to a fixed wall-clock horizon or a fixed token budget.",
+    )
+    parser.add_argument("--target-seconds", type=float, default=300.0, help="Training horizon to estimate when using seconds mode.")
+    parser.add_argument("--target-tokens", type=float, default=100_000_000.0, help="Token budget to estimate when using tokens mode.")
     parser.add_argument(
         "--truth-curves-dir",
         help="Optional directory of completed truth-curve artifacts used to calibrate projection uncertainty.",
@@ -617,6 +639,9 @@ def main() -> int:
     if not short_curves:
         raise SystemExit("no curve artifacts found in the supplied inputs")
 
+    target_seconds = args.target_seconds if args.target_budget_mode == TARGET_BUDGET_SECONDS else None
+    target_tokens = float(args.target_tokens) if args.target_budget_mode == TARGET_BUDGET_TOKENS else None
+
     truth_curves = None
     calibration = None
     if args.truth_curves_dir:
@@ -626,11 +651,18 @@ def main() -> int:
             Path(args.truth_curves_dir),
             engine=truth_engine,
             hardware_key=truth_hardware_key,
-            require_target_seconds=args.target_seconds,
+            require_target_seconds=target_seconds,
+            require_target_tokens=target_tokens,
         )
-        calibration = build_projection_calibration(truth_curves, target_seconds=args.target_seconds)
+        calibration = build_projection_calibration(
+            truth_curves,
+            target_seconds=target_seconds,
+            target_tokens=target_tokens,
+        )
 
     if args.horizons:
+        if args.target_budget_mode != TARGET_BUDGET_SECONDS:
+            raise SystemExit("--horizons is only supported in seconds mode")
         horizons = [float(item.strip()) for item in args.horizons.split(",") if item.strip()]
         if not horizons:
             raise SystemExit("--horizons was provided but no numeric horizons were parsed")
@@ -647,7 +679,7 @@ def main() -> int:
             suggest_next_horizon(
                 rows,
                 decisions,
-                target_seconds=args.target_seconds,
+                target_seconds=target_seconds,
                 candidate_horizons=horizons,
             )
         )
@@ -655,7 +687,7 @@ def main() -> int:
             summarize_longer_horizon_projection(
                 rows,
                 decisions,
-                target_seconds=args.target_seconds,
+                target_seconds=target_seconds,
                 scaling_target_seconds=max(horizons),
             )
         )
@@ -685,7 +717,8 @@ def main() -> int:
         projections, decision, diagnostics = compare_multi_horizon_curves(
             short_curves,
             long_curves,
-            target_seconds=args.target_seconds,
+            target_seconds=target_seconds,
+            target_tokens=target_tokens,
             calibration=calibration,
             truth_curves=truth_curves,
             winner_probability_threshold=args.winner_probability_threshold,
@@ -709,7 +742,11 @@ def main() -> int:
         return 0
 
     if args.summaries_only:
-        summaries = summarize_curves(short_curves, target_seconds=args.target_seconds)
+        summaries = summarize_curves(
+            short_curves,
+            target_seconds=target_seconds,
+            target_tokens=target_tokens,
+        )
         rows = [summary_to_dict(row) for row in summaries]
         if args.json:
             print(json.dumps({"mode": "summary", "rows": rows}, indent=2))
@@ -719,7 +756,8 @@ def main() -> int:
 
     projections, decision = compare_projected_curves(
         short_curves,
-        target_seconds=args.target_seconds,
+        target_seconds=target_seconds,
+        target_tokens=target_tokens,
         calibration=calibration,
         truth_curves=truth_curves,
         winner_probability_threshold=args.winner_probability_threshold,

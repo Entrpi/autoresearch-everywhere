@@ -60,6 +60,9 @@ SHARP_EDGE_DROP_FRACTION = 0.65
 PROJECTION_TARGET_SECONDS = 300.0
 SCALING_TARGET_SECONDS = 900.0
 REPORT_HORIZONS = (60.0, 120.0, PROJECTION_TARGET_SECONDS, SCALING_TARGET_SECONDS)
+TOKEN_TARGET_DEFAULT = 100_000_000.0
+TARGET_BUDGET_SECONDS = "seconds"
+TARGET_BUDGET_TOKENS = "tokens"
 FRIENDLY_PROGRESS_ENABLED = True
 
 PHASE_FRIENDLY_PREAMBLES = {
@@ -254,6 +257,20 @@ def format_duration(seconds: float | None) -> str:
     return f"{hours}h {minutes:02d}m" if minutes else f"{hours}h"
 
 
+def objective_text(*, target_budget_mode: str, target_seconds: float | None, target_tokens: float | None) -> str:
+    if target_budget_mode == TARGET_BUDGET_TOKENS:
+        assert target_tokens is not None
+        if target_tokens >= 1_000_000:
+            return f"{target_tokens / 1_000_000:.0f}M tokens"
+        return f"{int(target_tokens)} tokens"
+    assert target_seconds is not None
+    return f"{int(target_seconds)}s"
+
+
+def objective_val_bpb_label(*, target_budget_mode: str, target_seconds: float | None, target_tokens: float | None) -> str:
+    return f"Projected {objective_text(target_budget_mode=target_budget_mode, target_seconds=target_seconds, target_tokens=target_tokens)} val_bpb"
+
+
 def set_friendly_progress(enabled: bool) -> None:
     global FRIENDLY_PROGRESS_ENABLED
     FRIENDLY_PROGRESS_ENABLED = enabled
@@ -316,6 +333,7 @@ def estimate_calibration_phases(
     engine: TrainingEngine,
     presets: list[str],
     mode: str,
+    target_budget_mode: str,
     batch_profile_time_budget: float,
     coarse_time_budget: float,
     projection_time_budget: float,
@@ -337,7 +355,8 @@ def estimate_calibration_phases(
     estimates.append(("projection ranking", len(presets) * projection_time_budget))
     if len(presets) > 1:
         estimates.append(("finalist rerank", min(len(presets), finalist_count) * finalist_time_budget))
-        estimates.append(("winner confirmation", 2 * PROJECTION_TARGET_SECONDS))
+        if target_budget_mode == TARGET_BUDGET_SECONDS:
+            estimates.append(("winner confirmation", 2 * PROJECTION_TARGET_SECONDS))
     if engine.capabilities.supports_local_search:
         estimates.append(("winner batch audit", batch_audit_time_budget * 6))
         estimates.append(("local search", local_search_time_budget * 4))
@@ -345,7 +364,7 @@ def estimate_calibration_phases(
         estimates.append(("candidate checkpoint", eval_train_seconds))
     if engine.capabilities.supports_eval_calibration and engine.capabilities.supports_checkpoint_mint:
         estimates.append(("eval calibration", 30.0 * len(eval_rungs)))
-    if scaling_confirmation_enabled:
+    if scaling_confirmation_enabled and target_budget_mode == TARGET_BUDGET_SECONDS:
         estimates.append(("scaling confirmation", 2 * SCALING_TARGET_SECONDS))
     estimates.append(("final report", 2.0))
     return estimates
@@ -356,6 +375,9 @@ def announce_calibration_story(
     engine: TrainingEngine,
     hardware_key: str,
     mode: str,
+    target_budget_mode: str,
+    target_seconds: float | None,
+    target_tokens: float | None,
     output_dir: Path,
     presets: list[str],
     truth_curves_dir: Path | None,
@@ -369,7 +391,7 @@ def announce_calibration_story(
         )
         calibration_progress(f"Output directory: {output_dir}")
         calibration_progress(
-            f"Objective: lowest val_bpb at {int(PROJECTION_TARGET_SECONDS)}s. "
+            f"Objective: lowest val_bpb at {objective_text(target_budget_mode=target_budget_mode, target_seconds=target_seconds, target_tokens=target_tokens)}. "
             f"Scaling confirmation is {'enabled' if scaling_confirmation_enabled else 'disabled (opt-in)'}."
         )
         calibration_progress(f"Preset families: {', '.join(presets)}")
@@ -386,7 +408,7 @@ def announce_calibration_story(
         "This is autoresearch-everywhere's calibration process. It determines sensible training defaults for your hardware so later autoresearch does not waste time on obviously bad batch shapes, model families, or eval settings."
     )
     calibration_progress(
-        f"You are calibrating the {engine.name} engine on {hardware_key} in {mode} mode. The main objective is the best validation BPB at {int(PROJECTION_TARGET_SECONDS)} seconds."
+        f"You are calibrating the {engine.name} engine on {hardware_key} in {mode} mode. The main objective is the best validation BPB at {objective_text(target_budget_mode=target_budget_mode, target_seconds=target_seconds, target_tokens=target_tokens)}."
     )
     calibration_progress(
         f"Expect roughly {format_duration(total_estimate)} for a fresh run before any cache reuse. Cached reruns are usually much faster."
@@ -403,9 +425,14 @@ def announce_calibration_story(
         calibration_progress(
             "No truth-curve directory is configured, so longer-horizon projection will rely on generic fits instead of hardware-matched truth curves."
         )
-    calibration_progress(
-        f"Deeper {int(SCALING_TARGET_SECONDS)}-second scaling confirmation is {'enabled' if scaling_confirmation_enabled else 'disabled by default'}."
-    )
+    if target_budget_mode == TARGET_BUDGET_SECONDS:
+        calibration_progress(
+            f"Deeper {int(SCALING_TARGET_SECONDS)}-second scaling confirmation is {'enabled' if scaling_confirmation_enabled else 'disabled by default'}."
+        )
+    else:
+        calibration_progress(
+            "Token-target mode is active, so the deeper seconds-based scaling confirmation path is skipped."
+        )
     calibration_progress("Planned phases:")
     for index, (name, seconds) in enumerate(phase_estimates, start=1):
         duration_text = format_duration(seconds) if seconds is not None else "unknown"
@@ -911,7 +938,8 @@ def load_truth_curves(
     truth_curves_dir: Path | None,
     engine_name: str,
     hardware_key: str,
-    target_seconds: float,
+    target_seconds: float | None = None,
+    target_tokens: float | None = None,
 ) -> list:
     if truth_curves_dir is None or not truth_curves_dir.exists():
         return []
@@ -920,6 +948,7 @@ def load_truth_curves(
         engine=engine_name,
         hardware_key=hardware_key,
         require_target_seconds=target_seconds,
+        require_target_tokens=target_tokens,
     )
 
 
@@ -929,7 +958,8 @@ def resolve_truth_curve_inputs(
     output_dir: Path,
     engine_name: str,
     hardware_key: str,
-    target_seconds: float,
+    target_seconds: float | None = None,
+    target_tokens: float | None = None,
 ) -> tuple[Path | None, list]:
     search_dirs: list[Path] = []
     if truth_curves_dir:
@@ -956,6 +986,7 @@ def resolve_truth_curve_inputs(
             engine_name=engine_name,
             hardware_key=hardware_key,
             target_seconds=target_seconds,
+            target_tokens=target_tokens,
         )
         if curves:
             return resolved, curves
@@ -1201,7 +1232,8 @@ def run_batch_profile_audit(
 def summarize_batch_audit_rows(
     rows: list[ProbeResult],
     *,
-    target_seconds: float,
+    target_seconds: float | None = None,
+    target_tokens: float | None = None,
     calibration=None,
     truth_curves=None,
     artifact_dir: Path | None = None,
@@ -1219,11 +1251,17 @@ def summarize_batch_audit_rows(
                     continue
                 if truth_curve.total_batch_size != row.total_batch_size:
                     continue
-                truth_horizon = final_training_seconds(truth_curve)
-                truth_final = final_val_bpb(truth_curve)
-                if truth_horizon is None or truth_horizon < target_seconds or truth_final is None:
-                    continue
-                exact_truth_finals.append(float(truth_final))
+                if target_tokens is not None:
+                    truth_projection = project_curve(truth_curve, target_tokens=target_tokens)
+                    if truth_projection is None:
+                        continue
+                    exact_truth_finals.append(float(truth_projection.projected_val_bpb))
+                else:
+                    truth_horizon = final_training_seconds(truth_curve)
+                    truth_final = final_val_bpb(truth_curve)
+                    if truth_horizon is None or truth_horizon < target_seconds or truth_final is None:
+                        continue
+                    exact_truth_finals.append(float(truth_final))
         if row.curve_output_path:
             curve_path = Path(row.curve_output_path)
             if not curve_path.exists() and artifact_dir is not None:
@@ -1238,10 +1276,11 @@ def summarize_batch_audit_rows(
                     distinct_times = {round(point.actual_training_seconds, 6) for point in curve.curve_points}
                     meaningful_curve = len(distinct_steps) >= 2 and len(distinct_tokens) >= 2 and len(distinct_times) >= 2
                     if meaningful_curve:
-                        projection = project_curve(curve, target_seconds=target_seconds)
+                        projection = project_curve(curve, target_seconds=target_seconds, target_tokens=target_tokens)
                         estimate = estimate_projected_curve(
                             curve,
                             target_seconds=target_seconds,
+                            target_tokens=target_tokens,
                             calibration=calibration,
                             truth_curves=truth_curves,
                         )
@@ -1261,7 +1300,11 @@ def summarize_batch_audit_rows(
             if estimate is not None
             else projection.projected_tokens
             if projection is not None
-            else (row.steady_state_tok_per_sec * target_seconds if row.steady_state_tok_per_sec is not None else None)
+            else (
+                row.steady_state_tok_per_sec * target_seconds
+                if target_seconds is not None and row.steady_state_tok_per_sec is not None
+                else target_tokens
+            )
         )
         projected_val_bpb = (
             exact_truth_mean
@@ -1350,7 +1393,8 @@ def summarize_batch_audit_rows(
 def select_best_batch_audit_row(
     rows: list[ProbeResult],
     *,
-    target_seconds: float,
+    target_seconds: float | None = None,
+    target_tokens: float | None = None,
     calibration=None,
     truth_curves=None,
     artifact_dir: Path | None = None,
@@ -1358,6 +1402,7 @@ def select_best_batch_audit_row(
     audit_rows = summarize_batch_audit_rows(
         rows,
         target_seconds=target_seconds,
+        target_tokens=target_tokens,
         calibration=calibration,
         truth_curves=truth_curves,
         artifact_dir=artifact_dir,
@@ -1986,6 +2031,20 @@ def write_report(path: Path, *, payload: dict) -> None:
     longer_horizon_projection = payload.get("longer_horizon_projection")
     scaling_candidate = payload.get("scaling_candidate")
     scaling_confirmation_enabled = payload.get("scaling_confirmation_enabled", False)
+    objective = payload.get("objective", {})
+    target_budget_mode = objective.get("target_budget_mode", TARGET_BUDGET_SECONDS)
+    target_seconds = objective.get("target_seconds", PROJECTION_TARGET_SECONDS)
+    target_tokens = objective.get("target_tokens")
+    objective_name = objective_text(
+        target_budget_mode=target_budget_mode,
+        target_seconds=target_seconds,
+        target_tokens=target_tokens,
+    )
+    projected_objective_label = objective_val_bpb_label(
+        target_budget_mode=target_budget_mode,
+        target_seconds=target_seconds,
+        target_tokens=target_tokens,
+    )
     promotion_bundle = payload["promotion_bundle"]
     eval_rows = payload["eval_calibration"]["rows"]
     zones = payload["zones"]
@@ -1997,6 +2056,37 @@ def write_report(path: Path, *, payload: dict) -> None:
         row["zone"] = zone_info.get("zone", "")
         row["zone_reason"] = zone_info.get("reason", "")
         coarse_table_rows.append(row)
+
+    if target_budget_mode == TARGET_BUDGET_SECONDS:
+        summary_extra_lines = [
+            (
+                f"- Longer-horizon projected leader at `{int(longer_horizon_projection['scaling_target_seconds'])}s`: "
+                f"`{longer_horizon_projection['scaling_winner_preset']}` "
+                f"(`projected val_bpb={longer_horizon_projection['scaling_winner_val_bpb']:.6f}`, "
+                f"`confidence={longer_horizon_projection['scaling_confidence_label']}`, "
+                f"`source={longer_horizon_projection['scaling_projection_source']}`)"
+                if isinstance(longer_horizon_projection, dict)
+                else "- Longer-horizon projected leader: `none`"
+            ),
+            (
+                f"- Secondary scaling candidate: `{scaling_candidate['candidate_preset']}` "
+                f"(gap at `{objective_name}`: `{scaling_candidate['candidate_gap_at_target']:.6f}`, "
+                f"projected gap at `{int(scaling_candidate['scaling_target_seconds'])}s`: "
+                f"`{scaling_candidate['projected_gap_at_scaling_target']:.6f}`)"
+                if isinstance(scaling_candidate, dict)
+                else "- Secondary scaling candidate: `none`"
+            ),
+            (
+                "- Scaling confirmation: `enabled`"
+                if scaling_confirmation_enabled
+                else "- Scaling confirmation: `disabled (opt-in)`"
+            ),
+        ]
+    else:
+        summary_extra_lines = [
+            "- Longer-horizon projection: `not part of token-target calibration`",
+            "- Scaling confirmation: `not used in token-target calibration`",
+        ]
 
     report = [
         "# Platform Calibration Report",
@@ -2011,6 +2101,7 @@ def write_report(path: Path, *, payload: dict) -> None:
         "## Summary",
         "",
         f"- Bring-up mode: `{payload['mode']}`",
+        f"- Primary objective: lowest `val_bpb` at `{objective_name}`",
         f"- Candidate new default: `{candidate_default['preset']}`",
         f"- Candidate operating point: `seq_len={candidate_default['seq_len']}`, `window_pattern={candidate_default['window_pattern']}`, `device_batch_size={candidate_default['device_batch_size']}`, `total_batch_size={candidate_default['total_batch_size']}`",
         f"- Family relation to M5 default: `{candidate_default['family_relation_to_m5']}`",
@@ -2019,35 +2110,14 @@ def write_report(path: Path, *, payload: dict) -> None:
         (
             f"- Winner batch audit: `device_batch_size={winner_batch_audit_payload['winner']['device_batch_size']}`, "
             f"`total_batch_size={winner_batch_audit_payload['winner']['total_batch_size']}`, "
-            f"`projected_300s_val_bpb={winner_batch_audit_payload['winner_row']['projected_val_bpb']:.6f}`"
+            f"`projected_val_bpb={winner_batch_audit_payload['winner_row']['projected_val_bpb']:.6f}`"
             if isinstance(winner_batch_audit_payload, dict)
             and isinstance(winner_batch_audit_payload.get("winner"), dict)
             and isinstance(winner_batch_audit_payload.get("winner_row"), dict)
             and isinstance(winner_batch_audit_payload["winner_row"].get("projected_val_bpb"), (int, float))
             else "- Winner batch audit: `not-run`"
         ),
-        (
-            f"- Longer-horizon projected leader at `{int(longer_horizon_projection['scaling_target_seconds'])}s`: "
-            f"`{longer_horizon_projection['scaling_winner_preset']}` "
-            f"(`projected val_bpb={longer_horizon_projection['scaling_winner_val_bpb']:.6f}`, "
-            f"`confidence={longer_horizon_projection['scaling_confidence_label']}`, "
-            f"`source={longer_horizon_projection['scaling_projection_source']}`)"
-            if isinstance(longer_horizon_projection, dict)
-            else "- Longer-horizon projected leader: `none`"
-        ),
-        (
-            f"- Secondary scaling candidate: `{scaling_candidate['candidate_preset']}` "
-            f"(gap at `300s`: `{scaling_candidate['candidate_gap_at_target']:.6f}`, "
-            f"projected gap at `{int(scaling_candidate['scaling_target_seconds'])}s`: "
-            f"`{scaling_candidate['projected_gap_at_scaling_target']:.6f}`)"
-            if isinstance(scaling_candidate, dict)
-            else "- Secondary scaling candidate: `none`"
-        ),
-        (
-            "- Scaling confirmation: `enabled`"
-            if scaling_confirmation_enabled
-            else "- Scaling confirmation: `disabled (opt-in)`"
-        ),
+        *summary_extra_lines,
         "",
         "## Hardware Fingerprint",
         "",
@@ -2089,7 +2159,7 @@ def write_report(path: Path, *, payload: dict) -> None:
         "",
         "## Candidate Ranking",
         "",
-        "These are the raw observed metrics from the same all-family run that feeds the projection stage below. They are useful context, but the actual family decision is made from the projected `300s` objective rather than these shorter-horizon endpoints alone.",
+        f"These are the raw observed metrics from the same all-family run that feeds the projection stage below. They are useful context, but the actual family decision is made from the projected `{objective_name}` objective rather than these shorter-horizon endpoints alone.",
         "",
         markdown_table(
             ranking_rows,
@@ -2171,7 +2241,7 @@ def write_report(path: Path, *, payload: dict) -> None:
             [
                 "## Projection Ranking",
                 "",
-                "All candidate families are run at a longer budget and projected against the `300s` objective using the shared truth-curve model. This establishes the leading family candidates before any deeper rerank or winner-specific batch audit happens.",
+                f"All candidate families are run at a longer budget and projected against the `{objective_name}` objective using the shared truth-curve model. This establishes the leading family candidates before any deeper rerank or winner-specific batch audit happens.",
                 "",
                 markdown_table(
                     projection_rows,
@@ -2180,7 +2250,7 @@ def write_report(path: Path, *, payload: dict) -> None:
                         ("device_batch_size", "Device batch"),
                         ("total_batch_size", "Total batch"),
                         ("curve_points", "Curve points"),
-                        ("projected_val_bpb", "Projected 300s val_bpb"),
+                        ("projected_val_bpb", projected_objective_label),
                         ("correction_mean", "Correction"),
                         ("projection_std", "Projection std"),
                         ("fit_r2", "Fit R²"),
@@ -2205,7 +2275,7 @@ def write_report(path: Path, *, payload: dict) -> None:
             [
                 "## Winner Batch Audit",
                 "",
-                "After family selection, calibration reruns a short curve-aware batch audit on the selected preset. This is where the operating batch is allowed to move away from the anchor preset's device constant when a different `db/tb` pair projects to a better `300s` outcome once optimizer-step cadence and accumulation cost are visible.",
+                f"After family selection, calibration reruns a short curve-aware batch audit on the selected preset. This is where the operating batch is allowed to move away from the anchor preset's device constant when a different `db/tb` pair projects to a better `{objective_name}` outcome once optimizer-step cadence and accumulation cost are visible.",
                 "",
                 markdown_table(
                     winner_batch_audit_rows,
@@ -2213,7 +2283,7 @@ def write_report(path: Path, *, payload: dict) -> None:
                         ("device_batch_size", "Device batch"),
                         ("total_batch_size", "Total batch"),
                         ("grad_accum_steps", "Grad accum"),
-                        ("projected_val_bpb", "Projected 300s val_bpb"),
+                        ("projected_val_bpb", projected_objective_label),
                         ("projected_optimizer_steps", "Projected opt steps"),
                         ("projected_microsteps", "Projected microsteps"),
                         ("observed_val_bpb", "Observed val_bpb"),
@@ -2285,7 +2355,7 @@ def write_report(path: Path, *, payload: dict) -> None:
             [
                 "## Finalist Ranking",
                 "",
-                "The top projected candidate families are rerun again at a longer budget and projected to `300s`. This stage resolves whether the first projection leader still wins once more real training time has been observed.",
+                f"The top projected candidate families are rerun again at a longer budget and projected to `{objective_name}`. This stage resolves whether the first projection leader still wins once more real training time has been observed.",
                 "",
                 markdown_table(
                     finalist_rows,
@@ -2294,7 +2364,7 @@ def write_report(path: Path, *, payload: dict) -> None:
                         ("device_batch_size", "Device batch"),
                         ("total_batch_size", "Total batch"),
                         ("curve_points", "Curve points"),
-                        ("projected_val_bpb", "Projected 300s val_bpb"),
+                        ("projected_val_bpb", projected_objective_label),
                         ("correction_mean", "Correction"),
                         ("projection_std", "Projection std"),
                         ("fit_r2", "Fit R²"),
@@ -2372,7 +2442,7 @@ def write_report(path: Path, *, payload: dict) -> None:
             [
                 "## Confirmation Ranking",
                 "",
-                "If the finalist stage still lacks enough signal at the `300s` target, calibration reruns the strongest finalists at the suggested next horizon and uses that result as the deciding family stage before local search.",
+                f"If the finalist stage still lacks enough signal at the `{objective_name}` target, calibration reruns the strongest finalists at the suggested next horizon and uses that result as the deciding family stage before local search.",
                 "",
                 markdown_table(
                     confirmation_rows,
@@ -2381,7 +2451,7 @@ def write_report(path: Path, *, payload: dict) -> None:
                         ("device_batch_size", "Device batch"),
                         ("total_batch_size", "Total batch"),
                         ("curve_points", "Curve points"),
-                        ("projected_val_bpb", "Projected 300s val_bpb"),
+                        ("projected_val_bpb", projected_objective_label),
                         ("correction_mean", "Correction"),
                         ("projection_std", "Projection std"),
                         ("fit_r2", "Fit R²"),
@@ -2452,12 +2522,12 @@ def write_report(path: Path, *, payload: dict) -> None:
                 "",
             ]
         )
-    if scaling_confirmation_rows:
+    if target_budget_mode == TARGET_BUDGET_SECONDS and scaling_confirmation_rows:
         report.extend(
             [
                 "## Longer-Horizon Confirmation",
                 "",
-                "When the longer-horizon summary projects a crossover beyond `300s` but the evidence is still low-confidence, calibration reruns the strict `300s` winner against the projected longer-horizon leader at the deeper target horizon.",
+                f"When the longer-horizon summary projects a crossover beyond `{objective_name}` but the evidence is still low-confidence, calibration reruns the strict `{objective_name}` winner against the projected longer-horizon leader at the deeper target horizon.",
                 "",
                 markdown_table(
                     scaling_confirmation_rows,
@@ -2466,7 +2536,7 @@ def write_report(path: Path, *, payload: dict) -> None:
                         ("device_batch_size", "Device batch"),
                         ("total_batch_size", "Total batch"),
                         ("curve_points", "Curve points"),
-                        ("projected_val_bpb", "Projected 900s val_bpb"),
+                        ("projected_val_bpb", f"Projected {SCALING_TARGET_SECONDS:.0f}s val_bpb"),
                         ("correction_mean", "Correction"),
                         ("projection_std", "Projection std"),
                         ("fit_r2", "Fit R²"),
@@ -2486,7 +2556,7 @@ def write_report(path: Path, *, payload: dict) -> None:
                 "",
             ]
         )
-    if scaling_confirmation_horizon_rows:
+    if target_budget_mode == TARGET_BUDGET_SECONDS and scaling_confirmation_horizon_rows:
         report.extend(
             [
                 "### Longer-Horizon Confirmation Table",
@@ -2518,7 +2588,7 @@ def write_report(path: Path, *, payload: dict) -> None:
                 "",
             ]
         )
-    if isinstance(scaling_confirmation_next_horizon, dict):
+    if target_budget_mode == TARGET_BUDGET_SECONDS and isinstance(scaling_confirmation_next_horizon, dict):
         report.extend(
             [
                 "### Longer-Horizon Next Horizon",
@@ -2574,12 +2644,12 @@ def write_report(path: Path, *, payload: dict) -> None:
                 "",
             ]
         )
-    if isinstance(scaling_candidate, dict):
+    if target_budget_mode == TARGET_BUDGET_SECONDS and isinstance(scaling_candidate, dict):
         report.extend(
             [
                 "## Scaling Candidate",
                 "",
-                "The strict winner above remains the only thing that decides the default. This secondary pass looks for a larger near-frontier family whose completed truth curves stay close enough at `300s` that it may be the better long-horizon scaling bet.",
+                f"The strict winner above remains the only thing that decides the default. This secondary pass looks for a larger near-frontier family whose completed truth curves stay close enough at `{objective_name}` that it may be the better long-horizon scaling bet.",
                 "",
                 markdown_table(
                     [scaling_candidate],
@@ -2588,9 +2658,9 @@ def write_report(path: Path, *, payload: dict) -> None:
                         ("candidate_preset", "Scaling candidate"),
                         ("candidate_device_batch_size", "Candidate device batch"),
                         ("candidate_total_batch_size", "Candidate total batch"),
-                        ("strict_winner_val_bpb", "Winner 300s val_bpb"),
-                        ("candidate_val_bpb", "Candidate 300s val_bpb"),
-                        ("candidate_gap_at_target", "Gap at 300s"),
+                        ("strict_winner_val_bpb", f"Winner {objective_name} val_bpb"),
+                        ("candidate_val_bpb", f"Candidate {objective_name} val_bpb"),
+                        ("candidate_gap_at_target", f"Gap at {objective_name}"),
                         ("strict_projected_val_bpb", "Winner projected longer"),
                         ("candidate_projected_val_bpb", "Candidate projected longer"),
                         ("projected_gap_at_scaling_target", "Projected gap"),
@@ -2603,26 +2673,26 @@ def write_report(path: Path, *, payload: dict) -> None:
                 "",
             ]
         )
-    if isinstance(longer_horizon_projection, dict):
+    if target_budget_mode == TARGET_BUDGET_SECONDS and isinstance(longer_horizon_projection, dict):
         report.extend(
             [
                 "## Longer-Horizon Projection",
                 "",
-                "This secondary summary asks a different question from the strict default choice above: if you project beyond the `300s` calibration target, which family appears to lead at the deeper horizon and how trustworthy is that projection?",
+                f"This secondary summary asks a different question from the strict default choice above: if you project beyond the `{objective_name}` calibration target, which family appears to lead at the deeper horizon and how trustworthy is that projection?",
                 "",
                 markdown_table(
                     [longer_horizon_projection],
                     [
-                        ("target_winner_preset", "300s winner"),
-                        ("target_winner_val_bpb", "300s val_bpb"),
+                        ("target_winner_preset", f"{objective_name} winner"),
+                        ("target_winner_val_bpb", f"{objective_name} val_bpb"),
                         ("scaling_winner_preset", "Longer-horizon leader"),
                         ("scaling_winner_val_bpb", "Projected longer val_bpb"),
                         ("scaling_winner_device_batch_size", "Leader device batch"),
                         ("scaling_winner_total_batch_size", "Leader total batch"),
-                        ("scaling_gap_at_target", "Leader gap at 300s"),
-                        ("target_gap_at_scaling", "300s winner gap at longer horizon"),
-                        ("target_winner_rank_at_scaling", "300s winner rank later"),
-                        ("scaling_winner_rank_at_target", "Longer leader rank at 300s"),
+                        ("scaling_gap_at_target", f"Leader gap at {objective_name}"),
+                        ("target_gap_at_scaling", f"{objective_name} winner gap later"),
+                        ("target_winner_rank_at_scaling", f"{objective_name} winner rank later"),
+                        ("scaling_winner_rank_at_target", f"Longer leader rank at {objective_name}"),
                         ("scaling_winner_probability", "Winner p"),
                         ("scaling_margin_to_second", "Margin to second"),
                         ("scaling_margin_snr", "Margin SNR"),
@@ -2707,7 +2777,10 @@ def write_report(path: Path, *, payload: dict) -> None:
 def run_platform_calibration(args) -> dict:
     set_friendly_progress(not args.plain_progress)
     mode = args.mode
-    scaling_confirmation_enabled = args.enable_scaling_confirmation
+    target_budget_mode = args.target_budget_mode
+    target_seconds = args.target_seconds if target_budget_mode == TARGET_BUDGET_SECONDS else None
+    target_tokens = float(args.target_tokens) if target_budget_mode == TARGET_BUDGET_TOKENS else None
+    scaling_confirmation_enabled = args.enable_scaling_confirmation if target_budget_mode == TARGET_BUDGET_SECONDS else False
     coarse_time_budget = resolved_budget(args.coarse_time_budget, mode=mode, field="coarse_time_budget")
     ranking_time_budget = resolved_budget(args.ranking_time_budget, mode=mode, field="ranking_time_budget")
     projection_time_budget = resolved_budget(args.projection_time_budget, mode=mode, field="projection_time_budget")
@@ -2734,14 +2807,20 @@ def run_platform_calibration(args) -> dict:
         output_dir=output_dir,
         engine_name=engine.name,
         hardware_key=hardware.hardware_key,
-        target_seconds=PROJECTION_TARGET_SECONDS,
+        target_seconds=target_seconds,
+        target_tokens=target_tokens,
     )
     truth_eval_contract = infer_truth_eval_contract(truth_curves)
-    projection_calibration = build_projection_calibration(truth_curves, target_seconds=PROJECTION_TARGET_SECONDS)
+    projection_calibration = build_projection_calibration(
+        truth_curves,
+        target_seconds=target_seconds,
+        target_tokens=target_tokens,
+    )
     phase_estimates = estimate_calibration_phases(
         engine=engine,
         presets=presets,
         mode=mode,
+        target_budget_mode=target_budget_mode,
         batch_profile_time_budget=min(5.0, ranking_time_budget),
         coarse_time_budget=coarse_time_budget,
         projection_time_budget=projection_time_budget,
@@ -2757,6 +2836,9 @@ def run_platform_calibration(args) -> dict:
         engine=engine,
         hardware_key=hardware.hardware_key,
         mode=mode,
+        target_budget_mode=target_budget_mode,
+        target_seconds=target_seconds,
+        target_tokens=target_tokens,
         output_dir=output_dir,
         presets=presets,
         truth_curves_dir=resolved_truth_curves_dir,
@@ -2933,9 +3015,11 @@ def run_platform_calibration(args) -> dict:
     projection_inputs = {
         "schema_version": PLATFORM_CALIBRATION_SCHEMA_VERSION,
         "mode": mode,
+        "target_budget_mode": target_budget_mode,
         "presets": ranking_presets,
         "time_budget": projection_time_budget,
-        "target_seconds": PROJECTION_TARGET_SECONDS,
+        "target_seconds": target_seconds,
+        "target_tokens": target_tokens,
         "hardware_key": hardware.hardware_key,
         "truth_eval_contract": truth_eval_contract,
         "batch_profile": (
@@ -2950,7 +3034,7 @@ def run_platform_calibration(args) -> dict:
     }
     projection_started = phase_start(
         "projection ranking",
-        detail=f"{len(ranking_presets)} presets projected to {int(PROJECTION_TARGET_SECONDS)}s",
+        detail=f"{len(ranking_presets)} presets projected to {objective_text(target_budget_mode=target_budget_mode, target_seconds=target_seconds, target_tokens=target_tokens)}",
         estimate_seconds=len(ranking_presets) * projection_time_budget,
     )
     projection_phase = load_phase_if_matching(output_dir, "projection_ranking", projection_inputs, force=args.force)
@@ -2974,33 +3058,51 @@ def run_platform_calibration(args) -> dict:
         projection_curves = load_probe_curve_artifacts(projection_probe_rows)
         projected_rows, projection_decision = compare_projected_curves(
             projection_curves,
-            target_seconds=PROJECTION_TARGET_SECONDS,
+            target_seconds=target_seconds,
+            target_tokens=target_tokens,
             calibration=projection_calibration,
             truth_curves=truth_curves,
             winner_probability_threshold=args.winner_probability_threshold,
             projected_margin_threshold=args.projected_margin_threshold,
         )
-        projection_horizon_rows, projection_horizon_decisions = build_horizon_projection_table(
-            projection_curves,
-            horizons_seconds=REPORT_HORIZONS,
-            calibration=projection_calibration,
-            truth_curves=truth_curves,
-            winner_probability_threshold=args.winner_probability_threshold,
-            projected_margin_threshold=args.projected_margin_threshold,
-        )
-        projection_control_decision = resolve_horizon_control_decision(
-            projection_horizon_decisions,
-            target_seconds=PROJECTION_TARGET_SECONDS,
-        )
-        projection_next_horizon = asdict(
-            suggest_next_horizon(
-                projection_horizon_rows,
-                projection_horizon_decisions,
-                target_seconds=PROJECTION_TARGET_SECONDS,
-                candidate_horizons=REPORT_HORIZONS,
+        if target_budget_mode == TARGET_BUDGET_SECONDS:
+            projection_horizon_rows, projection_horizon_decisions = build_horizon_projection_table(
+                projection_curves,
+                horizons_seconds=REPORT_HORIZONS,
+                calibration=projection_calibration,
+                truth_curves=truth_curves,
+                winner_probability_threshold=args.winner_probability_threshold,
+                projected_margin_threshold=args.projected_margin_threshold,
             )
-        )
-        projection_target_horizon_rows = [asdict(row) for row in rows_for_horizon(projection_horizon_rows, PROJECTION_TARGET_SECONDS)]
+            projection_control_decision = resolve_horizon_control_decision(
+                projection_horizon_decisions,
+                target_seconds=target_seconds,
+            )
+            projection_next_horizon = asdict(
+                suggest_next_horizon(
+                    projection_horizon_rows,
+                    projection_horizon_decisions,
+                    target_seconds=target_seconds,
+                    candidate_horizons=REPORT_HORIZONS,
+                )
+            )
+            projection_target_horizon_rows = [asdict(row) for row in rows_for_horizon(projection_horizon_rows, target_seconds)]
+        else:
+            projection_horizon_rows = []
+            projection_horizon_decisions = []
+            projection_control_decision = None if projection_decision is None else {
+                "target_seconds": None,
+                "target_tokens": target_tokens,
+                "top_preset": projection_decision.top_preset,
+                "top_projected_tokens": projection_decision.top_projected_tokens,
+                "top_winner_probability": projection_decision.top_winner_probability,
+                "top_margin_to_second": projection_decision.top_margin_to_second,
+                "top_margin_snr": projection_decision.top_margin_snr,
+                "enough_signal": projection_decision.enough_signal,
+                "confidence_reason": projection_decision.confidence_reason,
+            }
+            projection_next_horizon = None
+            projection_target_horizon_rows = []
         projection_phase_winner = (
             projection_target_horizon_rows[0]
             if projection_target_horizon_rows
@@ -3045,10 +3147,18 @@ def run_platform_calibration(args) -> dict:
             inputs=projection_inputs,
             payload={
                 "time_budget": projection_time_budget,
-                "target_seconds": PROJECTION_TARGET_SECONDS,
+                "target_budget_mode": target_budget_mode,
+                "target_seconds": target_seconds,
+                "target_tokens": target_tokens,
                 "probe_rows": [asdict(row) for row in projection_probe_rows],
                 "decision": None if projection_decision is None else asdict(projection_decision),
-                "control_decision": None if projection_control_decision is None else asdict(projection_control_decision),
+                "control_decision": (
+                    None
+                    if projection_control_decision is None
+                    else asdict(projection_control_decision)
+                    if not isinstance(projection_control_decision, dict)
+                    else projection_control_decision
+                ),
                 "rows": [projected_row_to_dict(item) for item in projected_rows],
                 "horizon_rows": [asdict(row) for row in projection_horizon_rows],
                 "horizon_decisions": [asdict(item) for item in projection_horizon_decisions],
@@ -3094,34 +3204,51 @@ def run_platform_calibration(args) -> dict:
     projection_curves = load_probe_curve_artifacts(projection_probe_rows)
     projection_estimates, projection_decision = compare_projected_curves(
         projection_curves,
-        target_seconds=PROJECTION_TARGET_SECONDS,
+        target_seconds=target_seconds,
+        target_tokens=target_tokens,
         calibration=projection_calibration,
         truth_curves=truth_curves,
         winner_probability_threshold=args.winner_probability_threshold,
         projected_margin_threshold=args.projected_margin_threshold,
     )
-    projection_horizon_rows, projection_horizon_decisions = build_horizon_projection_table(
-        projection_curves,
-        horizons_seconds=REPORT_HORIZONS,
-        calibration=projection_calibration,
-        truth_curves=truth_curves,
-        winner_probability_threshold=args.winner_probability_threshold,
-        projected_margin_threshold=args.projected_margin_threshold,
-    )
-    projection_control_decision = resolve_horizon_control_decision(
-        projection_horizon_decisions,
-        target_seconds=PROJECTION_TARGET_SECONDS,
-    )
-    projection_next_horizon = asdict(
-        suggest_next_horizon(
-            projection_horizon_rows,
-            projection_horizon_decisions,
-            target_seconds=PROJECTION_TARGET_SECONDS,
-            candidate_horizons=REPORT_HORIZONS,
+    if target_budget_mode == TARGET_BUDGET_SECONDS:
+        projection_horizon_rows, projection_horizon_decisions = build_horizon_projection_table(
+            projection_curves,
+            horizons_seconds=REPORT_HORIZONS,
+            calibration=projection_calibration,
+            truth_curves=truth_curves,
+            winner_probability_threshold=args.winner_probability_threshold,
+            projected_margin_threshold=args.projected_margin_threshold,
         )
-    )
+        projection_control_decision = resolve_horizon_control_decision(
+            projection_horizon_decisions,
+            target_seconds=target_seconds,
+        )
+        projection_next_horizon = asdict(
+            suggest_next_horizon(
+                projection_horizon_rows,
+                projection_horizon_decisions,
+                target_seconds=target_seconds,
+                candidate_horizons=REPORT_HORIZONS,
+            )
+        )
+        projection_target_horizon_rows = [asdict(row) for row in rows_for_horizon(projection_horizon_rows, target_seconds)]
+    else:
+        projection_horizon_rows, projection_horizon_decisions = [], []
+        projection_control_decision = None if projection_decision is None else {
+            "target_seconds": None,
+            "target_tokens": target_tokens,
+            "top_preset": projection_decision.top_preset,
+            "top_projected_tokens": projection_decision.top_projected_tokens,
+            "top_winner_probability": projection_decision.top_winner_probability,
+            "top_margin_to_second": projection_decision.top_margin_to_second,
+            "top_margin_snr": projection_decision.top_margin_snr,
+            "enough_signal": projection_decision.enough_signal,
+            "confidence_reason": projection_decision.confidence_reason,
+        }
+        projection_next_horizon = None
+        projection_target_horizon_rows = []
     projection_rows = [projected_row_to_dict(item) for item in projection_estimates]
-    projection_target_horizon_rows = [asdict(row) for row in rows_for_horizon(projection_horizon_rows, PROJECTION_TARGET_SECONDS)]
     projection_winner = projection_target_horizon_rows[0] if projection_target_horizon_rows else (projection_rows[0] if projection_rows else None)
     projected_presets = [row["preset"] for row in projection_target_horizon_rows] if projection_target_horizon_rows else [row["preset"] for row in projection_rows]
     projection_probe_metadata_by_preset = {item.probe.preset: item for item in projection_ranked_metadata}
@@ -3149,16 +3276,18 @@ def run_platform_calibration(args) -> dict:
     ):
         candidate_family = projection_probe_metadata_by_preset[projection_winner["preset"]]
         calibration_progress(
-            f"Projection already has enough signal at {int(PROJECTION_TARGET_SECONDS)}s; "
+            f"Projection already has enough signal at {objective_text(target_budget_mode=target_budget_mode, target_seconds=target_seconds, target_tokens=target_tokens)}; "
             f"skipping finalist rerank and using {candidate_family.probe.preset}."
         )
     elif len(finalist_presets) > 1:
         finalist_inputs = {
             "schema_version": PLATFORM_CALIBRATION_SCHEMA_VERSION,
             "mode": mode,
+            "target_budget_mode": target_budget_mode,
             "presets": finalist_presets,
             "time_budget": finalist_time_budget,
-            "target_seconds": PROJECTION_TARGET_SECONDS,
+            "target_seconds": target_seconds,
+            "target_tokens": target_tokens,
             "hardware_key": hardware.hardware_key,
             "truth_eval_contract": truth_eval_contract,
             "batch_profile": (
@@ -3203,33 +3332,50 @@ def run_platform_calibration(args) -> dict:
             finalist_estimates, finalist_decision, finalist_diagnostics = compare_multi_horizon_curves(
                 projection_curves,
                 finalist_curves,
-                target_seconds=PROJECTION_TARGET_SECONDS,
+                target_seconds=target_seconds,
+                target_tokens=target_tokens,
                 calibration=projection_calibration,
                 truth_curves=truth_curves,
                 winner_probability_threshold=args.winner_probability_threshold,
                 projected_margin_threshold=args.projected_margin_threshold,
             )
-            finalist_horizon_rows, finalist_horizon_decisions = build_horizon_projection_table(
-                finalist_curves,
-                horizons_seconds=REPORT_HORIZONS,
-                calibration=projection_calibration,
-                truth_curves=truth_curves,
-                winner_probability_threshold=args.winner_probability_threshold,
-                projected_margin_threshold=args.projected_margin_threshold,
-            )
-            finalist_control_decision = resolve_horizon_control_decision(
-                finalist_horizon_decisions,
-                target_seconds=PROJECTION_TARGET_SECONDS,
-            )
-            finalist_next_horizon = asdict(
-                suggest_next_horizon(
-                    finalist_horizon_rows,
-                    finalist_horizon_decisions,
-                    target_seconds=PROJECTION_TARGET_SECONDS,
-                    candidate_horizons=REPORT_HORIZONS,
+            if target_budget_mode == TARGET_BUDGET_SECONDS:
+                finalist_horizon_rows, finalist_horizon_decisions = build_horizon_projection_table(
+                    finalist_curves,
+                    horizons_seconds=REPORT_HORIZONS,
+                    calibration=projection_calibration,
+                    truth_curves=truth_curves,
+                    winner_probability_threshold=args.winner_probability_threshold,
+                    projected_margin_threshold=args.projected_margin_threshold,
                 )
-            )
-            finalist_target_horizon_rows = [asdict(row) for row in rows_for_horizon(finalist_horizon_rows, PROJECTION_TARGET_SECONDS)]
+                finalist_control_decision = resolve_horizon_control_decision(
+                    finalist_horizon_decisions,
+                    target_seconds=target_seconds,
+                )
+                finalist_next_horizon = asdict(
+                    suggest_next_horizon(
+                        finalist_horizon_rows,
+                        finalist_horizon_decisions,
+                        target_seconds=target_seconds,
+                        candidate_horizons=REPORT_HORIZONS,
+                    )
+                )
+                finalist_target_horizon_rows = [asdict(row) for row in rows_for_horizon(finalist_horizon_rows, target_seconds)]
+            else:
+                finalist_horizon_rows, finalist_horizon_decisions = [], []
+                finalist_control_decision = None if finalist_decision is None else {
+                    "target_seconds": None,
+                    "target_tokens": target_tokens,
+                    "top_preset": finalist_decision.top_preset,
+                    "top_projected_tokens": finalist_decision.top_projected_tokens,
+                    "top_winner_probability": finalist_decision.top_winner_probability,
+                    "top_margin_to_second": finalist_decision.top_margin_to_second,
+                    "top_margin_snr": finalist_decision.top_margin_snr,
+                    "enough_signal": finalist_decision.enough_signal,
+                    "confidence_reason": finalist_decision.confidence_reason,
+                }
+                finalist_next_horizon = None
+                finalist_target_horizon_rows = []
             finalist_phase_winner = (
                 finalist_target_horizon_rows[0]
                 if finalist_target_horizon_rows
@@ -3248,11 +3394,19 @@ def run_platform_calibration(args) -> dict:
                 inputs=finalist_inputs,
                 payload={
                     "time_budget": finalist_time_budget,
-                    "target_seconds": PROJECTION_TARGET_SECONDS,
+                    "target_budget_mode": target_budget_mode,
+                    "target_seconds": target_seconds,
+                    "target_tokens": target_tokens,
                     "probe_rows": [asdict(row) for row in finalist_probe_rows],
                     "ranked_rows": [ranked_probe_to_dict(item) for item in finalist_candidates],
                     "decision": None if finalist_decision is None else asdict(finalist_decision),
-                    "control_decision": None if finalist_control_decision is None else asdict(finalist_control_decision),
+                    "control_decision": (
+                        None
+                        if finalist_control_decision is None
+                        else asdict(finalist_control_decision)
+                        if not isinstance(finalist_control_decision, dict)
+                        else finalist_control_decision
+                    ),
                     "diagnostics": [asdict(item) for item in finalist_diagnostics],
                     "rows": [projected_row_to_dict(item) for item in finalist_estimates],
                     "horizon_rows": [asdict(row) for row in finalist_horizon_rows],
@@ -3288,43 +3442,62 @@ def run_platform_calibration(args) -> dict:
         finalist_estimates, finalist_decision, finalist_diagnostics = compare_multi_horizon_curves(
             projection_curves,
             finalist_curves,
-            target_seconds=PROJECTION_TARGET_SECONDS,
+            target_seconds=target_seconds,
+            target_tokens=target_tokens,
             calibration=projection_calibration,
             truth_curves=truth_curves,
             winner_probability_threshold=args.winner_probability_threshold,
             projected_margin_threshold=args.projected_margin_threshold,
         )
-        finalist_horizon_rows, finalist_horizon_decisions = build_horizon_projection_table(
-            finalist_curves,
-            horizons_seconds=REPORT_HORIZONS,
-            calibration=projection_calibration,
-            truth_curves=truth_curves,
-            winner_probability_threshold=args.winner_probability_threshold,
-            projected_margin_threshold=args.projected_margin_threshold,
-        )
-        finalist_control_decision = resolve_horizon_control_decision(
-            finalist_horizon_decisions,
-            target_seconds=PROJECTION_TARGET_SECONDS,
-        )
-        finalist_next_horizon = asdict(
-            suggest_next_horizon(
-                finalist_horizon_rows,
-                finalist_horizon_decisions,
-                target_seconds=PROJECTION_TARGET_SECONDS,
-                candidate_horizons=REPORT_HORIZONS,
+        if target_budget_mode == TARGET_BUDGET_SECONDS:
+            finalist_horizon_rows, finalist_horizon_decisions = build_horizon_projection_table(
+                finalist_curves,
+                horizons_seconds=REPORT_HORIZONS,
+                calibration=projection_calibration,
+                truth_curves=truth_curves,
+                winner_probability_threshold=args.winner_probability_threshold,
+                projected_margin_threshold=args.projected_margin_threshold,
             )
-        )
+            finalist_control_decision = resolve_horizon_control_decision(
+                finalist_horizon_decisions,
+                target_seconds=target_seconds,
+            )
+            finalist_next_horizon = asdict(
+                suggest_next_horizon(
+                    finalist_horizon_rows,
+                    finalist_horizon_decisions,
+                    target_seconds=target_seconds,
+                    candidate_horizons=REPORT_HORIZONS,
+                )
+            )
+            finalist_target_horizon_rows = [asdict(row) for row in rows_for_horizon(finalist_horizon_rows, target_seconds)]
+        else:
+            finalist_horizon_rows, finalist_horizon_decisions = [], []
+            finalist_control_decision = None if finalist_decision is None else {
+                "target_seconds": None,
+                "target_tokens": target_tokens,
+                "top_preset": finalist_decision.top_preset,
+                "top_projected_tokens": finalist_decision.top_projected_tokens,
+                "top_winner_probability": finalist_decision.top_winner_probability,
+                "top_margin_to_second": finalist_decision.top_margin_to_second,
+                "top_margin_snr": finalist_decision.top_margin_snr,
+                "enough_signal": finalist_decision.enough_signal,
+                "confidence_reason": finalist_decision.confidence_reason,
+            }
+            finalist_next_horizon = None
+            finalist_target_horizon_rows = []
         finalist_rows = [projected_row_to_dict(item) for item in finalist_estimates]
-        finalist_target_horizon_rows = [asdict(row) for row in rows_for_horizon(finalist_horizon_rows, PROJECTION_TARGET_SECONDS)]
         finalist_probe_metadata_by_preset = {item.probe.preset: item for item in finalist_candidates}
         finalist_winner = finalist_target_horizon_rows[0] if finalist_target_horizon_rows else (finalist_rows[0] if finalist_rows else None)
         confirmation_needed = (
+            target_budget_mode == TARGET_BUDGET_SECONDS
+            and
             finalist_control_decision is not None
             and not decision_enough_signal(finalist_control_decision)
             and isinstance(finalist_next_horizon, dict)
             and isinstance(finalist_next_horizon.get("suggested_seconds"), (int, float))
             and finalist_next_horizon.get("suggested_seconds") > finalist_time_budget
-            and finalist_next_horizon.get("suggested_seconds") <= PROJECTION_TARGET_SECONDS
+            and finalist_next_horizon.get("suggested_seconds") <= target_seconds
         )
         if confirmation_needed:
             confirmation_presets = [
@@ -3344,7 +3517,7 @@ def run_platform_calibration(args) -> dict:
                     "mode": mode,
                     "presets": confirmation_presets,
                     "time_budget": confirmation_time_budget,
-                    "target_seconds": PROJECTION_TARGET_SECONDS,
+                    "target_seconds": target_seconds,
                     "hardware_key": hardware.hardware_key,
                     "truth_eval_contract": truth_eval_contract,
                     "batch_profile": (
@@ -3390,7 +3563,7 @@ def run_platform_calibration(args) -> dict:
                     confirmation_estimates, confirmation_decision, confirmation_diagnostics = compare_multi_horizon_curves(
                         finalist_curves,
                         confirmation_curves,
-                        target_seconds=PROJECTION_TARGET_SECONDS,
+                        target_seconds=target_seconds,
                         calibration=projection_calibration,
                         truth_curves=truth_curves,
                         winner_probability_threshold=args.winner_probability_threshold,
@@ -3406,18 +3579,18 @@ def run_platform_calibration(args) -> dict:
                     )
                     confirmation_control_decision = resolve_horizon_control_decision(
                         confirmation_horizon_decisions,
-                        target_seconds=PROJECTION_TARGET_SECONDS,
+                        target_seconds=target_seconds,
                     )
                     confirmation_next_horizon = asdict(
                         suggest_next_horizon(
                             confirmation_horizon_rows,
                             confirmation_horizon_decisions,
-                            target_seconds=PROJECTION_TARGET_SECONDS,
+                            target_seconds=target_seconds,
                             candidate_horizons=REPORT_HORIZONS,
                         )
                     )
                     confirmation_target_horizon_rows = [
-                        asdict(row) for row in rows_for_horizon(confirmation_horizon_rows, PROJECTION_TARGET_SECONDS)
+                        asdict(row) for row in rows_for_horizon(confirmation_horizon_rows, target_seconds)
                     ]
                     confirmation_phase_winner = (
                         confirmation_target_horizon_rows[0]
@@ -3430,7 +3603,7 @@ def run_platform_calibration(args) -> dict:
                         inputs=confirmation_inputs,
                         payload={
                             "time_budget": confirmation_time_budget,
-                            "target_seconds": PROJECTION_TARGET_SECONDS,
+                            "target_seconds": target_seconds,
                             "probe_rows": [asdict(row) for row in confirmation_probe_rows],
                             "decision": None if confirmation_decision is None else asdict(confirmation_decision),
                             "control_decision": None if confirmation_control_decision is None else asdict(confirmation_control_decision),
@@ -3460,7 +3633,7 @@ def run_platform_calibration(args) -> dict:
                 confirmation_estimates, confirmation_decision, confirmation_diagnostics = compare_multi_horizon_curves(
                     finalist_curves,
                     confirmation_curves,
-                    target_seconds=PROJECTION_TARGET_SECONDS,
+                    target_seconds=target_seconds,
                     calibration=projection_calibration,
                     truth_curves=truth_curves,
                     winner_probability_threshold=args.winner_probability_threshold,
@@ -3475,7 +3648,7 @@ def run_platform_calibration(args) -> dict:
                     projected_margin_threshold=args.projected_margin_threshold,
                 )
                 confirmation_target_horizon_rows = [
-                    asdict(row) for row in rows_for_horizon(confirmation_horizon_rows, PROJECTION_TARGET_SECONDS)
+                    asdict(row) for row in rows_for_horizon(confirmation_horizon_rows, target_seconds)
                 ]
                 confirmation_probe_metadata_by_preset = {
                     probe.preset: probe for probe in confirmation_probe_rows
@@ -3505,11 +3678,15 @@ def run_platform_calibration(args) -> dict:
     deepest_horizon_rows = confirmation_horizon_rows or finalist_horizon_rows or projection_horizon_rows
     deepest_horizon_decisions = confirmation_horizon_decisions or finalist_horizon_decisions or projection_horizon_decisions
 
-    longer_horizon_projection = summarize_longer_horizon_projection(
-        deepest_horizon_rows,
-        deepest_horizon_decisions,
-        target_seconds=PROJECTION_TARGET_SECONDS,
-        scaling_target_seconds=SCALING_TARGET_SECONDS,
+    longer_horizon_projection = (
+        summarize_longer_horizon_projection(
+            deepest_horizon_rows,
+            deepest_horizon_decisions,
+            target_seconds=target_seconds,
+            scaling_target_seconds=SCALING_TARGET_SECONDS,
+        )
+        if target_budget_mode == TARGET_BUDGET_SECONDS and target_seconds is not None
+        else None
     )
 
     scaling_confirmation_needed = (
@@ -3533,7 +3710,7 @@ def run_platform_calibration(args) -> dict:
     ):
         calibration_progress(
             f"Longer-horizon crossover is projected ({longer_horizon_projection.target_winner_preset} at "
-            f"{int(PROJECTION_TARGET_SECONDS)}s, {longer_horizon_projection.scaling_winner_preset} at "
+            f"{int(target_seconds)}s, {longer_horizon_projection.scaling_winner_preset} at "
             f"{int(SCALING_TARGET_SECONDS)}s), but deeper scaling confirmation is disabled by default."
         )
     if scaling_confirmation_needed:
@@ -3604,7 +3781,7 @@ def run_platform_calibration(args) -> dict:
             )
             scaling_confirmation_horizon_rows, scaling_confirmation_horizon_decisions = build_horizon_projection_table(
                 scaling_confirmation_curves,
-                horizons_seconds=(PROJECTION_TARGET_SECONDS, SCALING_TARGET_SECONDS),
+                horizons_seconds=(target_seconds, SCALING_TARGET_SECONDS),
                 calibration=None,
                 truth_curves=truth_curves,
                 winner_probability_threshold=args.winner_probability_threshold,
@@ -3619,7 +3796,7 @@ def run_platform_calibration(args) -> dict:
                     scaling_confirmation_horizon_rows,
                     scaling_confirmation_horizon_decisions,
                     target_seconds=SCALING_TARGET_SECONDS,
-                    candidate_horizons=(PROJECTION_TARGET_SECONDS, SCALING_TARGET_SECONDS),
+                    candidate_horizons=(target_seconds, SCALING_TARGET_SECONDS),
                 )
             )
             scaling_confirmation_target_rows = [
@@ -3679,14 +3856,14 @@ def run_platform_calibration(args) -> dict:
         )
         scaling_confirmation_horizon_rows, scaling_confirmation_horizon_decisions = build_horizon_projection_table(
             scaling_confirmation_curves,
-            horizons_seconds=(PROJECTION_TARGET_SECONDS, SCALING_TARGET_SECONDS),
+            horizons_seconds=(target_seconds, SCALING_TARGET_SECONDS),
             calibration=None,
             truth_curves=truth_curves,
             winner_probability_threshold=args.winner_probability_threshold,
             projected_margin_threshold=args.projected_margin_threshold,
         )
         merged_longer_horizon_rows = (
-            rows_for_horizon(deepest_horizon_rows, PROJECTION_TARGET_SECONDS)
+            rows_for_horizon(deepest_horizon_rows, target_seconds)
             + rows_for_horizon(scaling_confirmation_horizon_rows, SCALING_TARGET_SECONDS)
         )
         merged_longer_horizon_decisions = [
@@ -3694,7 +3871,7 @@ def run_platform_calibration(args) -> dict:
             for item in (
                 resolve_horizon_control_decision(
                     deepest_horizon_decisions,
-                    target_seconds=PROJECTION_TARGET_SECONDS,
+                    target_seconds=target_seconds,
                 ),
                 resolve_horizon_control_decision(
                     scaling_confirmation_horizon_decisions,
@@ -3706,16 +3883,20 @@ def run_platform_calibration(args) -> dict:
         longer_horizon_projection = summarize_longer_horizon_projection(
             merged_longer_horizon_rows,
             merged_longer_horizon_decisions,
-            target_seconds=PROJECTION_TARGET_SECONDS,
+            target_seconds=target_seconds,
             scaling_target_seconds=SCALING_TARGET_SECONDS,
         )
 
-    scaling_candidate = select_scaling_candidate(
-        projection_estimates,
-        truth_curves=truth_curves,
-        preset_order=presets,
-        target_seconds=PROJECTION_TARGET_SECONDS,
-        scaling_target_seconds=SCALING_TARGET_SECONDS,
+    scaling_candidate = (
+        select_scaling_candidate(
+            projection_estimates,
+            truth_curves=truth_curves,
+            preset_order=presets,
+            target_seconds=target_seconds,
+            scaling_target_seconds=SCALING_TARGET_SECONDS,
+        )
+        if target_budget_mode == TARGET_BUDGET_SECONDS and target_seconds is not None
+        else None
     )
 
     winner_batch_audit_phase: dict | None = None
@@ -3729,9 +3910,11 @@ def run_platform_calibration(args) -> dict:
         winner_batch_audit_inputs = {
             "schema_version": PLATFORM_CALIBRATION_SCHEMA_VERSION,
             "mode": mode,
+            "target_budget_mode": target_budget_mode,
             "preset": candidate_family.probe.preset,
             "time_budget": batch_audit_time_budget,
-            "target_seconds": PROJECTION_TARGET_SECONDS,
+            "target_seconds": target_seconds,
+            "target_tokens": target_tokens,
             "anchor_batch": {
                 "device_batch_size": candidate_family.probe.device_batch_size,
                 "total_batch_size": candidate_family.probe.total_batch_size,
@@ -3757,7 +3940,8 @@ def run_platform_calibration(args) -> dict:
             )
             winner_batch_profile, audit_rows, winner_row = select_best_batch_audit_row(
                 batch_audit_payload["rows"],
-                target_seconds=PROJECTION_TARGET_SECONDS,
+                target_seconds=target_seconds,
+                target_tokens=target_tokens,
                 calibration=projection_calibration,
                 truth_curves=truth_curves,
                 artifact_dir=logs_dir,
@@ -3768,7 +3952,9 @@ def run_platform_calibration(args) -> dict:
                 inputs=winner_batch_audit_inputs,
                 payload={
                     "time_budget": batch_audit_time_budget,
-                    "target_seconds": PROJECTION_TARGET_SECONDS,
+                    "target_budget_mode": target_budget_mode,
+                    "target_seconds": target_seconds,
+                    "target_tokens": target_tokens,
                     "anchor_rows": [asdict(row) for row in batch_audit_payload["anchor_rows"]],
                     "coarse_rows": [asdict(row) for row in batch_audit_payload["coarse_rows"]],
                     "refinement_rows": [asdict(row) for row in batch_audit_payload["refinement_rows"]],
@@ -3992,9 +4178,12 @@ def run_platform_calibration(args) -> dict:
         },
         "selection_basis": {
             "family_selection_stage": "finalist-projection" if finalist_phase is not None else "projection",
+            "target_budget_mode": target_budget_mode,
+            "target_seconds": target_seconds,
+            "target_tokens": target_tokens,
             "family_selection_val_bpb": candidate_family.probe.val_bpb,
             "family_selection_steady_state_tok_per_sec": candidate_family.probe.steady_state_tok_per_sec,
-            "family_selection_projected_300s_val_bpb": (
+            "family_selection_projected_val_bpb": (
                 get_projected_val_bpb(finalist_phase["payload"]["winner"])
                 if finalist_phase is not None
                 else get_projected_val_bpb(projection_winner)
@@ -4049,6 +4238,11 @@ def run_platform_calibration(args) -> dict:
         "schema_version": PLATFORM_CALIBRATION_SCHEMA_VERSION,
         "output_dir": str(output_dir),
         "mode": mode,
+        "objective": {
+            "target_budget_mode": target_budget_mode,
+            "target_seconds": target_seconds,
+            "target_tokens": target_tokens,
+        },
         "scaling_confirmation_enabled": scaling_confirmation_enabled,
         "truth_curves_dir": None if resolved_truth_curves_dir is None else str(resolved_truth_curves_dir),
         "calibration_signatures": calibration_signatures,
@@ -4065,7 +4259,9 @@ def run_platform_calibration(args) -> dict:
         },
         "projection_ranking": {
             "time_budget": projection_time_budget,
-            "target_seconds": PROJECTION_TARGET_SECONDS,
+            "target_budget_mode": target_budget_mode,
+            "target_seconds": target_seconds,
+            "target_tokens": target_tokens,
             "rows": projection_rows,
             "horizon_rows": [asdict(row) for row in projection_horizon_rows],
             "horizon_decisions": [asdict(item) for item in projection_horizon_decisions],
@@ -4077,7 +4273,9 @@ def run_platform_calibration(args) -> dict:
         "finalist_projection": (
             {
                 "time_budget": finalist_time_budget,
-                "target_seconds": PROJECTION_TARGET_SECONDS,
+                "target_budget_mode": target_budget_mode,
+                "target_seconds": target_seconds,
+                "target_tokens": target_tokens,
                 "rows": finalist_phase["payload"]["rows"],
                 "horizon_rows": [asdict(row) for row in finalist_horizon_rows],
                 "horizon_decisions": [asdict(item) for item in finalist_horizon_decisions],
@@ -4093,7 +4291,9 @@ def run_platform_calibration(args) -> dict:
         "confirmation_projection": (
             {
                 "time_budget": confirmation_phase["payload"]["time_budget"],
-                "target_seconds": PROJECTION_TARGET_SECONDS,
+                "target_budget_mode": target_budget_mode,
+                "target_seconds": target_seconds,
+                "target_tokens": target_tokens,
                 "rows": confirmation_phase["payload"]["rows"],
                 "horizon_rows": [asdict(row) for row in confirmation_horizon_rows],
                 "horizon_decisions": [asdict(item) for item in confirmation_horizon_decisions],
@@ -4109,7 +4309,9 @@ def run_platform_calibration(args) -> dict:
         "scaling_confirmation": (
             {
                 "time_budget": scaling_confirmation_phase["payload"]["time_budget"],
+                "target_budget_mode": target_budget_mode,
                 "target_seconds": SCALING_TARGET_SECONDS,
+                "target_tokens": None,
                 "rows": scaling_confirmation_phase["payload"]["rows"],
                 "horizon_rows": scaling_confirmation_phase["payload"]["horizon_rows"],
                 "horizon_decisions": scaling_confirmation_phase["payload"]["horizon_decisions"],
@@ -4260,7 +4462,25 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--projection-time-budget",
         type=float,
-        help="All-family curve-run budget used to project which family is most likely to win at 300s. Defaults from --mode.",
+        help="All-family curve-run budget used to project which family is most likely to win at the chosen primary objective. Defaults from --mode.",
+    )
+    parser.add_argument(
+        "--target-budget-mode",
+        choices=(TARGET_BUDGET_SECONDS, TARGET_BUDGET_TOKENS),
+        default=TARGET_BUDGET_SECONDS,
+        help="Primary calibration objective. 'seconds' keeps the current fixed-wall-clock bring-up path; 'tokens' compares families at a fixed token target instead.",
+    )
+    parser.add_argument(
+        "--target-seconds",
+        type=float,
+        default=PROJECTION_TARGET_SECONDS,
+        help="Primary fixed-time objective used when --target-budget-mode=seconds.",
+    )
+    parser.add_argument(
+        "--target-tokens",
+        type=float,
+        default=TOKEN_TARGET_DEFAULT,
+        help="Primary fixed-token objective used when --target-budget-mode=tokens. Defaults to 100M tokens.",
     )
     parser.add_argument(
         "--finalist-time-budget",
@@ -4279,7 +4499,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--truth-curves-dir",
-        help="Optional directory of completed truth-curve artifacts used to calibrate and project the 300s winner.",
+        help="Optional directory of completed truth-curve artifacts used to calibrate and project the chosen primary objective.",
     )
     parser.add_argument(
         "--enable-scaling-confirmation",
