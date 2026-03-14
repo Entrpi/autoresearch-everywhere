@@ -21,6 +21,16 @@ Initial development was validated against an M5 MacBook Pro, so there are ready-
 
 **Default path requirements:** Apple Silicon, macOS, Python 3.10+, and [uv](https://docs.astral.sh/uv/). That is the deepest bring-up path today. NVIDIA CUDA is also a first-class path behind the same top-level commands, with a different hardware/runtime envelope.
 
+## Running an Agent
+
+Point your coding agent at `program.md` first.
+
+Example prompt:
+
+```text
+Read program.md, verify the setup, and start a new experiment loop. NEVER STOP EXPERIMENTING.
+```
+
 ### New Hardware Bring-Up
 
 If you are on unfamiliar hardware, start here:
@@ -98,6 +108,8 @@ The first full FA4-backed fast bring-up on a real GB10 system selected `m5-balan
 - `device_batch_size=32`
 - `total_batch_size=32768`
 
+For the concrete DGX Spark / GB10 host, container, FA4, and profiling setup path, see [docs/dgx-spark-setup.md](docs/dgx-spark-setup.md).
+
 ## How It Is Organized
 
 The repo now has a simple top-level surface:
@@ -140,6 +152,52 @@ On known hardware, the trainer can reuse measured evaluation tradeoffs. On unkno
 The MLX prepare path also builds token caches and prepacked caches by default, so the shipped presets can use the fast data path without extra manual setup.
 
 If you want more detail about the calibration logic beneath those defaults, see [docs/preset-calibration.md](docs/preset-calibration.md).
+
+## Presets
+
+The preset system exists to give you a clear scale reference between what works best on a ~$2,000 Apple M5 laptop vs a ~$20,000 H100 datacenter GPU. `calibrate.py` then shows you where your machine fits on that spectrum.
+
+If you are on a base M4 or M5 Mac and want to start quickly, use:
+
+- `m5-small` if you want the best default starting point
+- `m5-tiny` if you want the fastest cheap experiment loop
+- `m5-balanced` if you want the best current validation-centered local run
+- `m5-large` if you want something closer to the upstream model shape without jumping all the way to xlarge
+- `m5-xlarge` if you want the largest practical local model on this class of machine
+
+If you are on an M4 Pro, M4 Max, M5 Pro, M5 Max, or anything outside that reference class, run `calibrate.py` first. The bring-up report is the better answer for both productivity and comparison; the table below is just rough orientation.
+
+`upstream` is not a normal starting preset. It is the literal upstream-shaped reference: the H100-oriented starting point Karpathy hand-shaped in the original project. Keep it around for comparison, not as the usual first thing to run locally.
+
+### Preset Reference (metrics are results from an M5 Mac)
+
+| Preset          | Best first use                        | Seq len  | Depth / d_model / heads | Params    | Batch (device / total tokens) | Window    | Approx. tok/sec | 5-min steps | Approx. peak memory | 5-min `val_bpb` | 5-min last loss |
+| --------------- | ------------------------------------- | -------- | ----------------------- | --------- | ----------------------------- | --------- | --------------- | ----------- | ------------------- | ----------------- | --------------- |
+| `m5-tiny`     | Fast iteration                        | `256`  | `2 / 128 / 1`         | `3.5M`  | `4 / 12288`                 | `L`     | `~103k`       | `2516`    | `~282 MB`         | `1.715180`      | `4.134272`    |
+| `m5-small`    | Default starting point                | `512`  | `4 / 256 / 2`         | `11.5M` | `4 / 12288`                 | `L`     | `~46k`        | `1066`    | `~1.01 GB`        | `1.441619`      | `3.939787`    |
+| `m5-balanced` | Best validation target                | `1024` | `6 / 384 / 3`         | `26.3M` | `4 / 12288`                 | `SSSSL` | `~18.2k`      | `444`     | `~2.77 GB`        | `1.428708`      | `4.162026`    |
+| `m5-large`    | Upstream-leaning bridge run           | `512`  | `8 / 512 / 4`         | `50.3M` | `4 / 16384`                 | `SSSSL` | `~13.5k`      | `250`     | `~2.66 GB`        | `1.606594`      | `4.521518`    |
+| `m5-xlarge`   | Largest practical local run           | `2048` | `8 / 512 / 4`         | `50.3M` | `4 / 16384`                 | `L`     | `~8.8k`       | `162`     | `~7.44 GB`        | `1.748045`      | `4.933070`    |
+| `upstream`    | Too heavy for laptops, abysmally slow | `2048` | `8 / 512 / 4`         | `50.3M` | `8 / 65536`                 | `SSSL`  | `n/a`         | `n/a`     | `n/a`             | `n/a`           | `n/a`         |
+
+Window legend: `L` = full causal attention at that layer; `S` = local sliding-window attention; patterns such as `SSSL` repeat across layers with the last layer forced to `L`.
+
+Examples:
+
+```bash
+uv run train.py --preset m5-tiny
+uv run train.py --preset m5-small
+uv run train.py --preset m5-balanced
+uv run train.py --preset m5-large
+uv run train.py --preset m5-xlarge
+uv run train.py --preset upstream
+```
+
+These presets may be revised after profiling on newer Apple Silicon systems and on non-Apple hardware as the broader calibration flow gets more adoption.
+
+The throughput figures above are approximate session-average numbers from fresh 5-minute local runs on the tested 32 GB / 10-core-GPU M5 MacBook Pro with token caches enabled. The batch column is `device_batch_size / total_batch_size`, where `total_batch_size` is tokens per optimizer step after gradient accumulation. The `5-min steps` column is the total optimizer-step count completed in that fixed budget. The `5-min val_bpb` column is the canonical comparison metric from the final evaluation, and `5-min last loss` is the final debiased smoothed training loss printed at the end of the run. `m5-xlarge` and `m5-large` use `16384` total tokens because `12288` is not divisible by `4 × 2048`, and the new `m5-balanced` row uses `SSSSL` because that long-context local-window mix beat dense `L` on both `val_bpb` and throughput in matched 5-minute reruns. `m5-large` is intentionally shipped before it has a checked-in eval ladder row, so it currently uses the explicit canonical fallback path until that calibration is added. The names now describe where a preset sits relative to the current best validation-centered local target, not just raw parameter count.
+
+`m5-xlarge` is the practical way to test the upstream-scale `50.3M` / `2048` model on this machine. `upstream` is kept as the literal reference port, including the H100-shaped batch and `SSSL` attention pattern Karpathy chose upstream, so it is useful for comparison but usually not the right first thing to run.
 
 ## Kernel Lab
 
@@ -198,78 +256,6 @@ The practical difference between the backends is:
 
 The detailed workflows, target catalogs, GB10 setup notes, and profiling requirements live in [docs/kernel-lab.md](docs/kernel-lab.md).
 
-## Presets
-
-The preset system exists to give you a clear scale reference between what works best on a ~$2,000 Apple M5 laptop vs a ~$20,000 H100 datacenter GPU. `calibrate.py` then shows you where your machine fits on that spectrum.
-
-If you are on a base M4 or M5 Mac and want to start quickly, use:
-
-- `m5-small` if you want the best default starting point
-- `m5-tiny` if you want the fastest cheap experiment loop
-- `m5-balanced` if you want the best current validation-centered local run
-- `m5-large` if you want something closer to the upstream model shape without jumping all the way to xlarge
-- `m5-xlarge` if you want the largest practical local model on this class of machine
-
-If you are on an M4 Pro, M4 Max, M5 Pro, M5 Max, or anything outside that reference class, run `calibrate.py` first. The bring-up report is the better answer for both productivity and comparison; the table below is just rough orientation.
-
-`upstream` is not a normal starting preset. It is the literal upstream-shaped reference: the H100-oriented starting point Karpathy hand-shaped in the original project. Keep it around for comparison, not as the usual first thing to run locally.
-
-### Preset Reference (metrics are results from an M5 Mac)
-
-| Preset          | Best first use                        | Seq len  | Depth / d_model / heads | Params    | Batch (device / total tokens) | Window    | Approx. tok/sec | 5-min steps | Approx. peak memory | 5-min `val_bpb` | 5-min last loss |
-| --------------- | ------------------------------------- | -------- | ----------------------- | --------- | ----------------------------- | --------- | --------------- | ----------- | ------------------- | ----------------- | --------------- |
-| `m5-tiny`     | Fast iteration                        | `256`  | `2 / 128 / 1`         | `3.5M`  | `4 / 12288`                 | `L`     | `~103k`       | `2516`    | `~282 MB`         | `1.715180`      | `4.134272`    |
-| `m5-small`    | Default starting point                | `512`  | `4 / 256 / 2`         | `11.5M` | `4 / 12288`                 | `L`     | `~46k`        | `1066`    | `~1.01 GB`        | `1.441619`      | `3.939787`    |
-| `m5-balanced` | Best validation target                | `1024` | `6 / 384 / 3`         | `26.3M` | `4 / 12288`                 | `SSSSL` | `~18.2k`      | `444`     | `~2.77 GB`        | `1.428708`      | `4.162026`    |
-| `m5-large`    | Upstream-leaning bridge run           | `512`  | `8 / 512 / 4`         | `50.3M` | `4 / 16384`                 | `SSSSL` | `~13.5k`      | `250`     | `~2.66 GB`        | `1.606594`      | `4.521518`    |
-| `m5-xlarge`   | Largest practical local run           | `2048` | `8 / 512 / 4`         | `50.3M` | `4 / 16384`                 | `L`     | `~8.8k`       | `162`     | `~7.44 GB`        | `1.748045`      | `4.933070`    |
-| `upstream`    | Too heavy for laptops, abysmally slow | `2048` | `8 / 512 / 4`         | `50.3M` | `8 / 65536`                 | `SSSL`  | `n/a`         | `n/a`     | `n/a`             | `n/a`           | `n/a`         |
-
-Window legend: `L` = full causal attention at that layer; `S` = local sliding-window attention; patterns such as `SSSL` repeat across layers with the last layer forced to `L`.
-
-Examples:
-
-```bash
-uv run train.py --preset m5-tiny
-uv run train.py --preset m5-small
-uv run train.py --preset m5-balanced
-uv run train.py --preset m5-large
-uv run train.py --preset m5-xlarge
-uv run train.py --preset upstream
-```
-
-These presets may be revised after profiling on newer Apple Silicon systems and on non-Apple hardware as the broader calibration flow gets more adoption.
-
-The throughput figures above are approximate session-average numbers from fresh 5-minute local runs on the tested 32 GB / 10-core-GPU M5 MacBook Pro with token caches enabled. The batch column is `device_batch_size / total_batch_size`, where `total_batch_size` is tokens per optimizer step after gradient accumulation. The `5-min steps` column is the total optimizer-step count completed in that fixed budget. The `5-min val_bpb` column is the canonical comparison metric from the final evaluation, and `5-min last loss` is the final debiased smoothed training loss printed at the end of the run. `m5-xlarge` and `m5-large` use `16384` total tokens because `12288` is not divisible by `4 × 2048`, and the new `m5-balanced` row uses `SSSSL` because that long-context local-window mix beat dense `L` on both `val_bpb` and throughput in matched 5-minute reruns. `m5-large` is intentionally shipped before it has a checked-in eval ladder row, so it currently uses the explicit canonical fallback path until that calibration is added. The names now describe where a preset sits relative to the current best validation-centered local target, not just raw parameter count.
-
-`m5-xlarge` is the practical way to test the upstream-scale `50.3M` / `2048` model on this machine. `upstream` is kept as the literal reference port, including the H100-shaped batch and `SSSL` attention pattern Karpathy chose upstream, so it is useful for comparison but usually not the right first thing to run.
-
-## Manual Longer Sweeps
-
-If you want to let one machine grind through longer preset sweeps by hand, the repo also includes local sweep tooling under `tools/`. It is not part of the core training or bring-up path; it is there for cases where you want to manually run a longer workstation sweep and inspect the results afterward.
-
-Examples:
-
-```bash
-# 30-minute test
-./tools/launch_overnight_mlx.sh test30 0.5
-
-# 8-hour overnight run
-./tools/launch_overnight_mlx.sh overnight 8
-```
-
-Artifacts are written under `results/overnight/<run-tag>/`, and the summary ledger is appended to `results/results.tsv`. The sweep runner keeps or discards experiments using canonical `val_bpb`, not the preset-shaped proxy metric.
-
-## Running an Agent
-
-Point your coding agent at `program.md` first. Use `docs/program-mlx.md` as the MLX-specific supplement when the task is Apple-Silicon-first or otherwise MLX-specific.
-
-Example prompt:
-
-```text
-Read program.md, then docs/program-mlx.md if the task is MLX-specific, verify the setup, and start a new experiment loop.
-```
-
 ## Autonomy Golf
 
 [![Autonomy Golf Badge](docs/autonomy-golf-badge.svg)](https://github.com/Entrpi/autonomy-golf)
@@ -302,9 +288,9 @@ Current project snapshot from [CHANGELOG.md](CHANGELOG.md):
 | Metric | Value |
 | --- | --- |
 | Mean autonomy score | `3.13 / 6` |
-| Mean complexity | `6.48 / commit` |
-| Mean score per top-level bullet | `3.20 / 6` |
-| History covered | `84` commits across `14` subsystems |
+| Mean complexity | `6.62 / commit` |
+| Mean score per top-level bullet | `3.19 / 6` |
+| History covered | `85` commits across `14` subsystems |
 <!-- autonomy-golf-snapshot:end -->
 
 Refresh with:
@@ -318,6 +304,22 @@ For autonomy-history plotting:
 ```bash
 python3 tools/changelog_scores.py --group-by day --format csv --include-latest > autonomy_by_day.csv
 ```
+
+## Manual Longer Sweeps
+
+If you want to let one machine grind through longer preset sweeps by hand, the repo also includes local sweep tooling under `tools/`. It is not part of the core training or bring-up path; it is there for cases where you want to manually run a longer workstation sweep and inspect the results afterward.
+
+Examples:
+
+```bash
+# 30-minute test
+./tools/launch_overnight_mlx.sh test30 0.5
+
+# 8-hour overnight run
+./tools/launch_overnight_mlx.sh overnight 8
+```
+
+Artifacts are written under `results/overnight/<run-tag>/`, and the summary ledger is appended to `results/results.tsv`. The sweep runner keeps or discards experiments using canonical `val_bpb`, not the preset-shaped proxy metric
 
 ## Project Structure
 

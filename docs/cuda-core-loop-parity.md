@@ -199,8 +199,8 @@ The first real checkpoint-backed CUDA eval ladder on GB10 was run against an exa
 
 Artifacts:
 
-- markdown report: `/home/ent/autoresearch-everywhere/results/analysis/gb10_eval_calibration.md`
-- per-rung logs under `/home/ent/autoresearch-everywhere/results/analysis/cuda_resume_smoke/eval_calibration_logs/`
+- markdown report: `results/analysis/gb10_eval_calibration.md`
+- per-rung logs under `results/analysis/cuda_resume_smoke/eval_calibration_logs/`
 
 One nuance: this exact rung-validation pass ran in the minimal `vllm-node-tf5:latest` container plus the extra tokenizer/data dependencies needed for eval-only mode, so it resolved `torch-sdpa` rather than the separately validated FlashAttention 4 path. That still proves the rung runner and engine flow; it just should not be confused with the earlier FA4-enabled trainer smoke.
 
@@ -238,9 +238,9 @@ The completed fast bring-up also finished its reduced eval-rung pass on the cand
 
 Artifacts:
 
-- `/home/ent/autoresearch-everywhere-sync/results/analysis/cuda_fast_ladder_fa4/report.json`
-- `/home/ent/autoresearch-everywhere-sync/results/analysis/cuda_fast_ladder_fa4/report.md`
-- `/home/ent/autoresearch-everywhere-sync/results/analysis/cuda_fast_ladder_fa4/promotion/platform_default.json`
+- `results/analysis/cuda_fast_ladder_fa4/report.json`
+- `results/analysis/cuda_fast_ladder_fa4/report.md`
+- `results/analysis/cuda_fast_ladder_fa4/promotion/platform_default.json`
 
 The promotion bundle still marks eval calibration as not yet promotable, because fast mode ran `cheap` and `reference` but not `full`. Even so, the important platform-default result is now grounded: on GB10 with FA4, the shared CUDA ladder wants to start at `m5-small`, not `m5-tiny`.
 

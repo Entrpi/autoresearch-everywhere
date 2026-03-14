@@ -21,3 +21,6 @@ AGENTS.md
 # Experimental code/artifacts
 dev/
 .mplconfig/
+
+# System cruft
+.DS_Store

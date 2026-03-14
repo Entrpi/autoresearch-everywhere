@@ -234,6 +234,19 @@ class MultiHorizonProjectionDecision:
 
 
 @dataclass(frozen=True)
+class NextHorizonSuggestion:
+    target_seconds: float
+    current_observed_seconds: float | None
+    current_observed_tokens: float | None
+    suggested_seconds: float | None
+    top_preset: str | None
+    top_winner_probability: float | None
+    target_enough_signal: bool
+    target_confidence_reason: str | None
+    suggestion_reason: str
+
+
+@dataclass(frozen=True)
 class ScalingCandidate:
     target_seconds: float
     scaling_target_seconds: float
@@ -253,6 +266,31 @@ class ScalingCandidate:
     candidate_last_segment_gain: float | None
     source: str
     rationale: str
+
+
+@dataclass(frozen=True)
+class LongerHorizonProjection:
+    target_seconds: float
+    scaling_target_seconds: float
+    target_winner_preset: str
+    target_winner_val_bpb: float
+    scaling_winner_preset: str
+    scaling_winner_val_bpb: float
+    scaling_winner_device_batch_size: int | None
+    scaling_winner_total_batch_size: int | None
+    scaling_winner_probability: float | None
+    scaling_margin_to_second: float | None
+    scaling_margin_snr: float | None
+    scaling_enough_signal: bool
+    scaling_confidence_label: str
+    scaling_confidence_reason: str
+    scaling_projection_source: str
+    scaling_matched_truth_count: int
+    crossover_from_target: bool
+    target_gap_at_scaling: float | None
+    scaling_gap_at_target: float | None
+    target_winner_rank_at_scaling: int | None
+    scaling_winner_rank_at_target: int | None
 
 
 def final_training_seconds(curve: CurveArtifact) -> float | None:
@@ -1232,10 +1270,9 @@ def build_horizon_projection_table(
                 if (final_training_seconds(curve) or 0.0) >= horizon
             ]
         horizon_calibration = calibration
-        if (
-            horizon_calibration is None
-            or not math.isclose(horizon_calibration.target_seconds, horizon)
-        ) and horizon_calibration_truth_curves:
+        if horizon_calibration is not None and not math.isclose(horizon_calibration.target_seconds, horizon):
+            horizon_calibration = None
+        if horizon_calibration is None and horizon_calibration_truth_curves:
             horizon_calibration = build_projection_calibration(horizon_calibration_truth_curves, target_seconds=horizon)
         estimates, decision = compare_projected_curves(
             curves,
@@ -1312,6 +1349,176 @@ def build_horizon_projection_table(
                 )
             )
     return rows, decisions
+
+
+def summarize_longer_horizon_projection(
+    rows: list[HorizonProjectionRow],
+    decisions: list[HorizonProjectionDecision],
+    *,
+    target_seconds: float,
+    scaling_target_seconds: float,
+) -> LongerHorizonProjection | None:
+    target_rows = sorted(
+        (row for row in rows if math.isclose(row.target_seconds, target_seconds)),
+        key=lambda row: row.corrected_val_bpb,
+    )
+    scaling_rows = sorted(
+        (row for row in rows if math.isclose(row.target_seconds, scaling_target_seconds)),
+        key=lambda row: row.corrected_val_bpb,
+    )
+    if not target_rows or not scaling_rows:
+        return None
+    target_winner = target_rows[0]
+    scaling_winner = scaling_rows[0]
+    scaling_decision = next(
+        (item for item in decisions if math.isclose(item.target_seconds, scaling_target_seconds)),
+        None,
+    )
+    target_gap_at_scaling = None
+    target_winner_rank_at_scaling = None
+    for idx, row in enumerate(scaling_rows, start=1):
+        if row.preset == target_winner.preset:
+            target_winner_rank_at_scaling = idx
+            target_gap_at_scaling = row.corrected_val_bpb - scaling_winner.corrected_val_bpb
+            break
+    scaling_gap_at_target = None
+    scaling_winner_rank_at_target = None
+    for idx, row in enumerate(target_rows, start=1):
+        if row.preset == scaling_winner.preset:
+            scaling_winner_rank_at_target = idx
+            scaling_gap_at_target = row.corrected_val_bpb - target_winner.corrected_val_bpb
+            break
+    return LongerHorizonProjection(
+        target_seconds=target_seconds,
+        scaling_target_seconds=scaling_target_seconds,
+        target_winner_preset=target_winner.preset,
+        target_winner_val_bpb=target_winner.corrected_val_bpb,
+        scaling_winner_preset=scaling_winner.preset,
+        scaling_winner_val_bpb=scaling_winner.corrected_val_bpb,
+        scaling_winner_device_batch_size=scaling_winner.device_batch_size,
+        scaling_winner_total_batch_size=scaling_winner.total_batch_size,
+        scaling_winner_probability=(
+            scaling_decision.top_winner_probability if scaling_decision is not None else scaling_winner.winner_probability
+        ),
+        scaling_margin_to_second=(
+            scaling_decision.top_margin_to_second if scaling_decision is not None else None
+        ),
+        scaling_margin_snr=(
+            scaling_decision.top_margin_snr if scaling_decision is not None else None
+        ),
+        scaling_enough_signal=(
+            scaling_decision.enough_signal if scaling_decision is not None else bool(scaling_winner.enough_signal)
+        ),
+        scaling_confidence_label=scaling_winner.confidence_label,
+        scaling_confidence_reason=(
+            scaling_decision.confidence_reason if scaling_decision is not None else scaling_winner.confidence_reason
+        ),
+        scaling_projection_source=scaling_winner.projection_source,
+        scaling_matched_truth_count=scaling_winner.matched_truth_count,
+        crossover_from_target=scaling_winner.preset != target_winner.preset,
+        target_gap_at_scaling=target_gap_at_scaling,
+        scaling_gap_at_target=scaling_gap_at_target,
+        target_winner_rank_at_scaling=target_winner_rank_at_scaling,
+        scaling_winner_rank_at_target=scaling_winner_rank_at_target,
+    )
+
+
+def suggest_next_horizon(
+    rows: list[HorizonProjectionRow],
+    decisions: list[HorizonProjectionDecision],
+    *,
+    target_seconds: float,
+    candidate_horizons: Iterable[float] | None = None,
+) -> NextHorizonSuggestion | None:
+    target_decision = next(
+        (item for item in decisions if math.isclose(item.target_seconds, target_seconds)),
+        None,
+    )
+    if target_decision is None:
+        return None
+    target_rows = [row for row in rows if math.isclose(row.target_seconds, target_seconds)]
+    current_observed_seconds = max(
+        (row.observed_seconds for row in target_rows if row.observed_seconds is not None),
+        default=None,
+    )
+    current_observed_tokens = max(
+        (row.observed_tokens for row in target_rows if row.observed_tokens is not None),
+        default=None,
+    )
+    if target_decision.enough_signal:
+        return NextHorizonSuggestion(
+            target_seconds=target_seconds,
+            current_observed_seconds=current_observed_seconds,
+            current_observed_tokens=current_observed_tokens,
+            suggested_seconds=None,
+            top_preset=target_decision.top_preset,
+            top_winner_probability=target_decision.top_winner_probability,
+            target_enough_signal=True,
+            target_confidence_reason=target_decision.confidence_reason,
+            suggestion_reason="enough-signal",
+        )
+
+    horizon_candidates = sorted(
+        {
+            float(value)
+            for value in (candidate_horizons or [])
+            if float(value) > 0.0
+        }
+        | {float(target_seconds)}
+    )
+
+    if current_observed_seconds is None:
+        suggested_seconds = horizon_candidates[0] if horizon_candidates else target_seconds
+        return NextHorizonSuggestion(
+            target_seconds=target_seconds,
+            current_observed_seconds=None,
+            current_observed_tokens=None,
+            suggested_seconds=suggested_seconds,
+            top_preset=target_decision.top_preset,
+            top_winner_probability=target_decision.top_winner_probability,
+            target_enough_signal=False,
+            target_confidence_reason=target_decision.confidence_reason,
+            suggestion_reason="no-observed-horizon",
+        )
+
+    future_candidates = [value for value in horizon_candidates if value > current_observed_seconds]
+    if not future_candidates:
+        return NextHorizonSuggestion(
+            target_seconds=target_seconds,
+            current_observed_seconds=current_observed_seconds,
+            current_observed_tokens=current_observed_tokens,
+            suggested_seconds=None,
+            top_preset=target_decision.top_preset,
+            top_winner_probability=target_decision.top_winner_probability,
+            target_enough_signal=False,
+            target_confidence_reason=target_decision.confidence_reason,
+            suggestion_reason="no-larger-horizon-available",
+        )
+
+    confidence_reason = target_decision.confidence_reason or "insufficient-signal"
+    if current_observed_seconds < target_seconds:
+        desired_threshold = min(target_seconds, current_observed_seconds * 2.0)
+        suggested_seconds = next((value for value in future_candidates if value >= desired_threshold), future_candidates[-1])
+        suggestion_reason = (
+            "reach-target-horizon"
+            if math.isclose(suggested_seconds, target_seconds)
+            else f"extend-horizon:{confidence_reason}"
+        )
+    else:
+        suggested_seconds = future_candidates[0]
+        suggestion_reason = f"beyond-target:{confidence_reason}"
+
+    return NextHorizonSuggestion(
+        target_seconds=target_seconds,
+        current_observed_seconds=current_observed_seconds,
+        current_observed_tokens=current_observed_tokens,
+        suggested_seconds=suggested_seconds,
+        top_preset=target_decision.top_preset,
+        top_winner_probability=target_decision.top_winner_probability,
+        target_enough_signal=False,
+        target_confidence_reason=target_decision.confidence_reason,
+        suggestion_reason=suggestion_reason,
+    )
 
 
 def compare_multi_horizon_curves(

@@ -205,6 +205,8 @@ The concrete environment for that validation was eugr's vLLM container image, tr
 
 with the repo bind-mounted into `/workspace/autoresearch-everywhere`.
 
+For the full DGX Spark setup path as a standalone checklist, see [dgx-spark-setup.md](./dgx-spark-setup.md).
+
 The first grounded GB10 trace currently says:
 
 - dominant issue: `sync-bound`
@@ -313,10 +315,10 @@ The GB10 runs here were executed in the `vllm-node-tf5:latest` container, roughl
 docker run --gpus all \
   --cap-add=SYS_ADMIN \
   --ipc=host \
-  --shm-size=16g \
+  --shm-size=100g \
   --rm \
-  -v /home/ent/autoresearch-everywhere:/workspace/autoresearch-everywhere \
-  -v /home/ent/.cache/autoresearch:/root/.cache/autoresearch \
+  -v "$HOME/autoresearch-everywhere:/workspace/autoresearch-everywhere" \
+  -v "$HOME/.cache/autoresearch:/root/.cache/autoresearch" \
   -w /workspace/autoresearch-everywhere \
   vllm-node-tf5:latest ...
 ```

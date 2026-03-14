@@ -14,6 +14,7 @@ from autoresearch_platform.curve_projection import (
     HorizonProjectionDecision,
     MultiHorizonProjectionDecision,
     MultiHorizonProjectionDiagnostics,
+    NextHorizonSuggestion,
     ProjectionDecision,
     ProjectedCurveEstimate,
     build_horizon_projection_table,
@@ -23,6 +24,8 @@ from autoresearch_platform.curve_projection import (
     estimate_confidence_interval,
     load_curve_artifact,
     load_curve_artifacts_from_dir,
+    summarize_longer_horizon_projection,
+    suggest_next_horizon,
     summarize_curves,
 )
 
@@ -149,6 +152,28 @@ def horizon_row_to_dict(row) -> dict:
         "confidence_label": row.confidence_label,
         "confidence_reason": row.confidence_reason,
     }
+
+
+def next_horizon_to_dict(suggestion: NextHorizonSuggestion | None) -> dict | None:
+    if suggestion is None:
+        return None
+    return {
+        "target_seconds": suggestion.target_seconds,
+        "current_observed_seconds": suggestion.current_observed_seconds,
+        "current_observed_tokens": suggestion.current_observed_tokens,
+        "suggested_seconds": suggestion.suggested_seconds,
+        "top_preset": suggestion.top_preset,
+        "top_winner_probability": suggestion.top_winner_probability,
+        "target_enough_signal": suggestion.target_enough_signal,
+        "target_confidence_reason": suggestion.target_confidence_reason,
+        "suggestion_reason": suggestion.suggestion_reason,
+    }
+
+
+def longer_horizon_to_dict(summary) -> dict | None:
+    if summary is None:
+        return None
+    return summary.__dict__
 
 
 def _format_float(value: float | None, *, digits: int = 6, suffix: str = "") -> str:
@@ -399,6 +424,8 @@ def print_multi_horizon_markdown(
 def print_horizon_table_markdown(
     rows: list[dict],
     decisions: list[HorizonProjectionDecision],
+    suggestion: dict | None,
+    longer_horizon: dict | None,
 ) -> None:
     if decisions:
         print("| Horizon | Projected winner | Winner tokens | Winner p | Margin to second | Margin SNR | Reason | Enough signal |")
@@ -414,6 +441,32 @@ def print_horizon_table_markdown(
                 f"{getattr(decision, 'stability_reason', None) or decision.confidence_reason or 'n/a'} | "
                 f"{'yes' if decision.enough_signal else 'no'} |"
             )
+        print()
+    if suggestion is not None:
+        suggested_seconds = suggestion["suggested_seconds"]
+        suggested_text = f"{suggested_seconds:.0f}s" if suggested_seconds is not None else "none"
+        print(
+            f"Next horizon suggestion: `{suggested_text}`  \n"
+            f"Current observed horizon: `{_format_float(suggestion['current_observed_seconds'], digits=0, suffix='s')}`  \n"
+            f"Current observed tokens: `{_format_tokens(suggestion['current_observed_tokens'])}`  \n"
+            f"Top preset: `{suggestion['top_preset'] or 'n/a'}`  \n"
+            f"Top winner probability: `{_format_float(suggestion['top_winner_probability'], digits=3)}`  \n"
+            f"Target enough signal: `{str(bool(suggestion['target_enough_signal'])).lower()}`  \n"
+            f"Reason: `{suggestion['suggestion_reason']}`"
+        )
+        print()
+    if longer_horizon is not None:
+        print(
+            f"Longer-horizon leader at `{longer_horizon['scaling_target_seconds']:.0f}s`: "
+            f"`{longer_horizon['scaling_winner_preset']}`  \n"
+            f"Projected val_bpb: `{_format_float(longer_horizon['scaling_winner_val_bpb'])}`  \n"
+            f"Target-horizon winner: `{longer_horizon['target_winner_preset']}`  \n"
+            f"Crossover from target winner: `{str(bool(longer_horizon['crossover_from_target'])).lower()}`  \n"
+            f"Winner probability: `{_format_float(longer_horizon['scaling_winner_probability'], digits=3)}`  \n"
+            f"Confidence: `{longer_horizon['scaling_confidence_label']}`  \n"
+            f"Reason: `{longer_horizon['scaling_confidence_reason']}`  \n"
+            f"Source: `{longer_horizon['scaling_projection_source']}`"
+        )
         print()
 
     headers = [
@@ -590,19 +643,37 @@ def main() -> int:
             projected_margin_threshold=args.projected_margin_threshold,
         )
         payload_rows = [horizon_row_to_dict(row) for row in rows]
+        next_suggestion = next_horizon_to_dict(
+            suggest_next_horizon(
+                rows,
+                decisions,
+                target_seconds=args.target_seconds,
+                candidate_horizons=horizons,
+            )
+        )
+        longer_horizon = longer_horizon_to_dict(
+            summarize_longer_horizon_projection(
+                rows,
+                decisions,
+                target_seconds=args.target_seconds,
+                scaling_target_seconds=max(horizons),
+            )
+        )
         if args.json:
             print(
                 json.dumps(
                     {
                         "mode": "horizon-table",
                         "decisions": [decision.__dict__ for decision in decisions],
+                        "next_horizon": next_suggestion,
+                        "longer_horizon_projection": longer_horizon,
                         "rows": payload_rows,
                     },
                     indent=2,
                 )
             )
         else:
-            print_horizon_table_markdown(payload_rows, decisions)
+            print_horizon_table_markdown(payload_rows, decisions, next_suggestion, longer_horizon)
         return 0
 
     if args.long_inputs:

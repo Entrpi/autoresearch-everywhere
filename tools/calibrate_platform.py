@@ -6,7 +6,8 @@ import json
 import math
 import statistics
 import sys
-from dataclasses import asdict, dataclass
+import time
+from dataclasses import asdict, dataclass, is_dataclass
 from datetime import date, datetime
 from pathlib import Path
 
@@ -31,7 +32,10 @@ from autoresearch_platform.curve_projection import (  # noqa: E402
     compare_multi_horizon_curves,
     load_curve_artifact,
     load_curve_artifacts_from_dir,
+    project_curve,
     select_scaling_candidate,
+    summarize_longer_horizon_projection,
+    suggest_next_horizon,
 )
 
 try:  # noqa: E402
@@ -47,12 +51,28 @@ except Exception:  # pragma: no cover - exercised on non-MLX hosts
     HAS_MLX_CALIBRATION_SUPPORT = False
 
 M5_REFERENCE_DEFAULT_PRESET = "m5-small"
-PLATFORM_CALIBRATION_SCHEMA_VERSION = 5
-PLATEAU_FRACTION = 0.99
-SHARP_EDGE_DROP_FRACTION = 0.95
+PLATFORM_CALIBRATION_SCHEMA_VERSION = 6
+PLATEAU_FRACTION = 0.9
+SHARP_EDGE_DROP_FRACTION = 0.65
 PROJECTION_TARGET_SECONDS = 300.0
 SCALING_TARGET_SECONDS = 900.0
 REPORT_HORIZONS = (60.0, 120.0, PROJECTION_TARGET_SECONDS, SCALING_TARGET_SECONDS)
+FRIENDLY_PROGRESS_ENABLED = True
+
+PHASE_FRIENDLY_PREAMBLES = {
+    "hardware fingerprint": "I’m identifying your accelerator, runtime, and evaluation semantics so the rest of calibration stays comparable and reproducible.",
+    "anchor batch profile": "I’m finding a sensible machine batch shape on one representative preset first, because bad batch sizing can waste a lot of autoresearch time.",
+    "coarse envelope": "I’m doing quick coarse checks across the preset ladder to throw out obviously bad fits before the more expensive comparison phases.",
+    "projection ranking": "I’m running all candidate preset families long enough to project which one is most likely to win at the real 300-second objective on this hardware.",
+    "finalist rerank": "The leading projected families are getting extra time now so we do not lock onto a startup winner that fades at longer horizons.",
+    "winner confirmation": "The earlier horizons were not decisive enough, so I’m spending a bit more time on the top candidates before choosing the family.",
+    "scaling confirmation": "This deeper run checks whether a larger model is likely to overtake the 300-second winner at a much longer horizon. It is intentionally expensive.",
+    "winner batch audit": "Now that the family is chosen, I’m retesting batch shapes on just that family so the final operating point is tuned to the real winner rather than inherited from the anchor preset.",
+    "local search": "I’m tuning the winning family’s local shape knobs so the emitted default is a practical operating point, not just a family label.",
+    "candidate checkpoint": "I’m minting a checkpoint for the chosen operating point so later eval calibration and research runs can start from a known good state.",
+    "eval calibration": "I’m measuring the eval rungs that later reports and promotions rely on, so downstream autoresearch has trustworthy evaluation defaults.",
+    "final report": "I’m writing the final human-readable report and machine-readable summary so you can use the result immediately or inspect the details later.",
+}
 
 MODE_FAST = "fast"
 MODE_FULL = "full"
@@ -65,6 +85,7 @@ class PlatformModeSpec:
     projection_time_budget: float
     finalist_time_budget: float
     finalist_count: int
+    batch_audit_time_budget: float
     local_search_time_budget: float
     eval_train_seconds: float
     eval_rungs: tuple[str, ...]
@@ -77,6 +98,7 @@ MODE_SPECS = {
         projection_time_budget=30.0,
         finalist_time_budget=60.0,
         finalist_count=3,
+        batch_audit_time_budget=10.0,
         local_search_time_budget=5.0,
         eval_train_seconds=5.0,
         eval_rungs=("cheap", "reference"),
@@ -87,6 +109,7 @@ MODE_SPECS = {
         projection_time_budget=120.0,
         finalist_time_budget=300.0,
         finalist_count=3,
+        batch_audit_time_budget=60.0,
         local_search_time_budget=60.0,
         eval_train_seconds=300.0,
         eval_rungs=("cheap", "reference", "full"),
@@ -125,6 +148,31 @@ class RankedProbe:
     calibration_status: str | None
 
 
+def ranked_probe_from_probe(probe: ProbeResult, **overrides) -> RankedProbe:
+    payload = {
+        "probe": probe,
+        "quality_score": 0.0,
+        "throughput_score": 0.0,
+        "memory_score": 0.0,
+        "eval_overhead_score": 0.0,
+        "telemetry_score": 0.0,
+        "utility_score": 0.0,
+        "on_pareto_front": True,
+        "frontier_distance": 0.0,
+        "selection_distance": 0.0,
+        "estimated_eval_overhead_fraction": 0.0,
+        "memory_fraction": None,
+        "memory_pressure_band": "unknown",
+        "memory_tiebreak_penalty": 0.0,
+        "telemetry_count": 0,
+        "stable_rung_count": 0,
+        "effective_confidence": None,
+        "calibration_status": None,
+    }
+    payload.update(overrides)
+    return RankedProbe(**payload)
+
+
 def parse_string_list(value: str) -> list[str]:
     return [item.strip() for item in value.split(",") if item.strip()]
 
@@ -143,8 +191,20 @@ def read_json(path: Path) -> dict | list | None:
     return json.loads(path.read_text())
 
 
+def to_jsonable(value):
+    if is_dataclass(value):
+        return to_jsonable(asdict(value))
+    if isinstance(value, Path):
+        return str(value)
+    if isinstance(value, dict):
+        return {key: to_jsonable(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [to_jsonable(item) for item in value]
+    return value
+
+
 def write_json(path: Path, payload: dict | list) -> None:
-    path.write_text(json.dumps(payload, indent=2) + "\n")
+    path.write_text(json.dumps(to_jsonable(payload), indent=2) + "\n")
 
 
 def probe_from_dict(payload: dict) -> ProbeResult:
@@ -172,6 +232,181 @@ def save_phase(output_dir: Path, phase: str, *, inputs: dict, payload: dict) -> 
     wrapped = {"inputs": inputs, "payload": payload}
     write_json(phase_path(output_dir, phase), wrapped)
     return wrapped
+
+
+def format_duration(seconds: float | None) -> str:
+    if seconds is None:
+        return "unknown"
+    if seconds < 1.0:
+        return f"{seconds:.1f}s"
+    if seconds < 10.0:
+        return f"{seconds:.1f}s"
+    rounded = int(round(seconds))
+    if rounded < 60:
+        return f"{rounded}s"
+    minutes, secs = divmod(rounded, 60)
+    if minutes < 60:
+        return f"{minutes}m {secs:02d}s" if secs else f"{minutes}m"
+    hours, minutes = divmod(minutes, 60)
+    return f"{hours}h {minutes:02d}m" if minutes else f"{hours}h"
+
+
+def set_friendly_progress(enabled: bool) -> None:
+    global FRIENDLY_PROGRESS_ENABLED
+    FRIENDLY_PROGRESS_ENABLED = enabled
+
+
+def calibration_progress(message: str) -> None:
+    print(f"[calibrate] {message}", file=sys.stderr, flush=True)
+
+
+def phase_start(name: str, *, detail: str | None = None, estimate_seconds: float | None = None) -> float:
+    if FRIENDLY_PROGRESS_ENABLED:
+        headline = f"Starting {name}."
+        if estimate_seconds is not None:
+            headline += f" Expected time: about {format_duration(estimate_seconds)}."
+        calibration_progress(headline)
+        preamble = PHASE_FRIENDLY_PREAMBLES.get(name)
+        if preamble:
+            calibration_progress(preamble)
+        if detail:
+            calibration_progress(f"Current scope: {detail}.")
+    else:
+        parts = [f"Starting {name}"]
+        if detail:
+            parts.append(detail)
+        if estimate_seconds is not None:
+            parts.append(f"estimate {format_duration(estimate_seconds)}")
+        calibration_progress(" | ".join(parts))
+    return time.monotonic()
+
+
+def phase_done(name: str, started_at: float, *, detail: str | None = None) -> None:
+    elapsed = time.monotonic() - started_at
+    if FRIENDLY_PROGRESS_ENABLED:
+        message = f"Finished {name} in {format_duration(elapsed)}."
+        if detail:
+            message += f" Result: {detail}."
+        calibration_progress(message)
+    else:
+        parts = [f"Finished {name}", f"in {format_duration(elapsed)}"]
+        if detail:
+            parts.append(detail)
+        calibration_progress(" | ".join(parts))
+
+
+def phase_reused(name: str, *, detail: str | None = None) -> None:
+    if FRIENDLY_PROGRESS_ENABLED:
+        message = f"Reusing cached {name} results."
+        if detail:
+            message += f" Cached result: {detail}."
+        calibration_progress(message)
+    else:
+        parts = [f"Reusing {name}"]
+        if detail:
+            parts.append(detail)
+        calibration_progress(" | ".join(parts))
+
+
+def estimate_calibration_phases(
+    *,
+    engine: TrainingEngine,
+    presets: list[str],
+    mode: str,
+    batch_profile_time_budget: float,
+    coarse_time_budget: float,
+    projection_time_budget: float,
+    finalist_time_budget: float,
+    finalist_count: int,
+    batch_audit_time_budget: float,
+    local_search_time_budget: float,
+    eval_train_seconds: float,
+    eval_rungs: list[str],
+    scaling_confirmation_enabled: bool,
+) -> list[tuple[str, float | None]]:
+    estimates: list[tuple[str, float | None]] = [("hardware fingerprint", 1.0)]
+    if engine.capabilities.supports_local_search:
+        anchor = choose_batch_profile_anchor_preset(engine, presets)
+        anchor_seq_len = engine.preset_catalog()[anchor].seq_len
+        batch_candidates = len(engine.batch_profile_candidates(anchor, seq_len=anchor_seq_len))
+        estimates.append(("anchor batch profile", batch_candidates * batch_profile_time_budget))
+    estimates.append(("coarse envelope", len(presets) * coarse_time_budget))
+    estimates.append(("projection ranking", len(presets) * projection_time_budget))
+    if len(presets) > 1:
+        estimates.append(("finalist rerank", min(len(presets), finalist_count) * finalist_time_budget))
+        estimates.append(("winner confirmation", 2 * PROJECTION_TARGET_SECONDS))
+    if engine.capabilities.supports_local_search:
+        estimates.append(("winner batch audit", batch_audit_time_budget * 6))
+        estimates.append(("local search", local_search_time_budget * 4))
+    if engine.capabilities.supports_checkpoint_mint:
+        estimates.append(("candidate checkpoint", eval_train_seconds))
+    if engine.capabilities.supports_eval_calibration and engine.capabilities.supports_checkpoint_mint:
+        estimates.append(("eval calibration", 30.0 * len(eval_rungs)))
+    if scaling_confirmation_enabled:
+        estimates.append(("scaling confirmation", 2 * SCALING_TARGET_SECONDS))
+    estimates.append(("final report", 2.0))
+    return estimates
+
+
+def announce_calibration_story(
+    *,
+    engine: TrainingEngine,
+    hardware_key: str,
+    mode: str,
+    output_dir: Path,
+    presets: list[str],
+    truth_curves_dir: Path | None,
+    truth_curve_count: int,
+    phase_estimates: list[tuple[str, float | None]],
+    scaling_confirmation_enabled: bool,
+) -> None:
+    if not FRIENDLY_PROGRESS_ENABLED:
+        calibration_progress(
+            f"Starting {engine.name} calibration on {hardware_key} in {mode} mode."
+        )
+        calibration_progress(f"Output directory: {output_dir}")
+        calibration_progress(
+            f"Objective: lowest val_bpb at {int(PROJECTION_TARGET_SECONDS)}s. "
+            f"Scaling confirmation is {'enabled' if scaling_confirmation_enabled else 'disabled (opt-in)'}."
+        )
+        calibration_progress(f"Preset families: {', '.join(presets)}")
+        if truth_curves_dir is not None:
+            calibration_progress(
+                f"Truth curves: {truth_curve_count} loaded from {truth_curves_dir}"
+            )
+        else:
+            calibration_progress("Truth curves: none configured; projections will rely on generic fits.")
+        return
+
+    total_estimate = sum(seconds or 0.0 for _, seconds in phase_estimates)
+    calibration_progress(
+        "This is autoresearch-everywhere's calibration process. It determines sensible training defaults for your hardware so later autoresearch does not waste time on obviously bad batch shapes, model families, or eval settings."
+    )
+    calibration_progress(
+        f"You are calibrating the {engine.name} engine on {hardware_key} in {mode} mode. The main objective is the best validation BPB at {int(PROJECTION_TARGET_SECONDS)} seconds."
+    )
+    calibration_progress(
+        f"Expect roughly {format_duration(total_estimate)} for a fresh run before any cache reuse. Cached reruns are usually much faster."
+    )
+    calibration_progress(
+        f"Output will be written to {output_dir}. There will be a report at the end, plus updates through each phase."
+    )
+    calibration_progress(f"Preset families under consideration: {', '.join(presets)}.")
+    if truth_curves_dir is not None:
+        calibration_progress(
+            f"Truth-curve support is active from {truth_curves_dir} with {truth_curve_count} loaded curves, so horizon projection will be grounded where possible."
+        )
+    else:
+        calibration_progress(
+            "No truth-curve directory is configured, so longer-horizon projection will rely on generic fits instead of hardware-matched truth curves."
+        )
+    calibration_progress(
+        f"Deeper {int(SCALING_TARGET_SECONDS)}-second scaling confirmation is {'enabled' if scaling_confirmation_enabled else 'disabled by default'}."
+    )
+    calibration_progress("Planned phases:")
+    for index, (name, seconds) in enumerate(phase_estimates, start=1):
+        duration_text = format_duration(seconds) if seconds is not None else "unknown"
+        calibration_progress(f"  {index}. {name} (~{duration_text})")
 
 
 def run_train_probe(
@@ -570,7 +805,7 @@ def projected_row_to_dict(item) -> dict:
     payload = asdict(item.summary)
     payload.update(
         {
-            "projected_final_bpb": item.corrected_val_bpb,
+            "projected_val_bpb": item.corrected_val_bpb,
             "projection_std": item.projection_std,
             "fit_r2": item.fit_r2,
             "fit_sigma": item.fit_sigma,
@@ -591,12 +826,81 @@ def projected_row_to_dict(item) -> dict:
     return payload
 
 
+def get_projected_val_bpb(row: dict | None) -> float | None:
+    if row is None:
+        return None
+    return row.get("projected_val_bpb", row.get("projected_final_bpb"))
+
+
 def decision_enough_signal(decision) -> bool:
     if decision is None:
         return False
     if isinstance(decision, dict):
         return bool(decision.get("enough_signal"))
     return bool(getattr(decision, "enough_signal", False))
+
+
+def find_horizon_decision(decisions, target_seconds: float):
+    for item in decisions or []:
+        horizon = item.get("target_seconds") if isinstance(item, dict) else getattr(item, "target_seconds", None)
+        if horizon is not None and math.isclose(float(horizon), float(target_seconds)):
+            return item
+    return None
+
+
+def rows_for_horizon(rows, target_seconds: float) -> list:
+    matched = []
+    for item in rows or []:
+        horizon = item.get("target_seconds") if isinstance(item, dict) else getattr(item, "target_seconds", None)
+        if horizon is not None and math.isclose(float(horizon), float(target_seconds)):
+            matched.append(item)
+    return matched
+
+
+def resolve_horizon_control_decision(decisions, *, target_seconds: float):
+    target = find_horizon_decision(decisions, target_seconds)
+    if target is None:
+        return None
+    target_preset = target.get("top_preset") if isinstance(target, dict) else getattr(target, "top_preset", None)
+    if target_preset is None:
+        return target
+    disagreements = []
+    supporting = 0
+    for item in decisions or []:
+        horizon = item.get("target_seconds") if isinstance(item, dict) else getattr(item, "target_seconds", None)
+        if horizon is None or float(horizon) > float(target_seconds):
+            continue
+        if not decision_enough_signal(item):
+            continue
+        item_preset = item.get("top_preset") if isinstance(item, dict) else getattr(item, "top_preset", None)
+        if item_preset is None:
+            continue
+        if item_preset == target_preset:
+            supporting += 1
+        else:
+            disagreements.append(float(horizon))
+    enough_signal = decision_enough_signal(target) and not disagreements
+    confidence_reason = target.get("confidence_reason") if isinstance(target, dict) else getattr(target, "confidence_reason", None)
+    if disagreements:
+        disagreement_label = ", ".join(f"{value:.0f}s" for value in disagreements)
+        confidence_reason = f"horizon-disagreement:{disagreement_label}"
+    elif enough_signal:
+        confidence_reason = f"consistent-horizons:{supporting}"
+    if isinstance(target, dict):
+        resolved = dict(target)
+        resolved["enough_signal"] = enough_signal
+        resolved["confidence_reason"] = confidence_reason
+        return resolved
+    return target.__class__(
+        target_seconds=target.target_seconds,
+        top_preset=target.top_preset,
+        top_projected_tokens=target.top_projected_tokens,
+        top_winner_probability=target.top_winner_probability,
+        top_margin_to_second=target.top_margin_to_second,
+        top_margin_snr=target.top_margin_snr,
+        enough_signal=enough_signal,
+        confidence_reason=confidence_reason,
+    )
 
 
 def load_truth_curves(
@@ -614,6 +918,45 @@ def load_truth_curves(
         hardware_key=hardware_key,
         require_target_seconds=target_seconds,
     )
+
+
+def resolve_truth_curve_inputs(
+    *,
+    truth_curves_dir: str | None,
+    output_dir: Path,
+    engine_name: str,
+    hardware_key: str,
+    target_seconds: float,
+) -> tuple[Path | None, list]:
+    search_dirs: list[Path] = []
+    if truth_curves_dir:
+        search_dirs.append(Path(truth_curves_dir))
+    else:
+        search_dirs.extend(
+            [
+                output_dir / "truth_curves",
+                output_dir.parent / "truth_curves",
+                output_dir.parent / "curve_runs",
+                Path.home() / "curve_runs",
+                Path.home() / ".cache" / "autoresearch" / "truth_curves",
+                REPO_ROOT / "results" / "analysis" / "truth_curves",
+            ]
+        )
+    seen: set[Path] = set()
+    for candidate in search_dirs:
+        resolved = candidate.expanduser()
+        if resolved in seen:
+            continue
+        seen.add(resolved)
+        curves = load_truth_curves(
+            truth_curves_dir=resolved,
+            engine_name=engine_name,
+            hardware_key=hardware_key,
+            target_seconds=target_seconds,
+        )
+        if curves:
+            return resolved, curves
+    return (Path(truth_curves_dir).expanduser() if truth_curves_dir else None), []
 
 
 def infer_truth_eval_contract(truth_curves: list) -> dict[str, int] | None:
@@ -761,6 +1104,224 @@ def apply_batch_profile(*, seq_len: int, batch_profile: ProbeResult) -> tuple[in
     return device_batch_size, total_batch_size, grad_accum_steps
 
 
+def batch_profile_overrides_to_dict(
+    overrides: dict[str, tuple[int, int]],
+    *,
+    presets: list[str] | None = None,
+) -> dict[str, dict[str, int]]:
+    selected_presets = presets if presets is not None else list(overrides)
+    return {
+        preset: {
+            "device_batch_size": overrides[preset][0],
+            "total_batch_size": overrides[preset][1],
+        }
+        for preset in selected_presets
+        if preset in overrides
+    }
+
+
+def run_batch_profile_audit(
+    *,
+    engine: TrainingEngine,
+    preset: str,
+    time_budget: float,
+    logs_dir: Path,
+    anchor_batch_profile: ProbeResult,
+    eval_seq_len: int | None,
+    eval_tokens: int | None,
+    eval_batch_size: int | None,
+    stage: str = "winner-batch-audit",
+) -> dict:
+    preset_config = engine.preset_catalog()[preset]
+    seen: set[tuple[int, int]] = set()
+    curve_eval_seconds = (
+        (max(3.0, min(5.0, time_budget / 2.0)), time_budget)
+        if time_budget > 5.0
+        else (time_budget,)
+    )
+
+    def run_candidates(candidates: list[tuple[int, int]]) -> list[ProbeResult]:
+        rows: list[ProbeResult] = []
+        for device_batch, total_batch in candidates:
+            if (device_batch, total_batch) in seen:
+                continue
+            seen.add((device_batch, total_batch))
+            tokens_per_fwdbwd = preset_config.seq_len * device_batch
+            if total_batch % tokens_per_fwdbwd != 0:
+                continue
+            rows.append(
+                run_curve_train_probe(
+                    engine=engine,
+                    preset=preset,
+                    time_budget=time_budget,
+                    logs_dir=logs_dir,
+                    stage=stage,
+                    curve_eval_seconds=curve_eval_seconds,
+                    seq_len=preset_config.seq_len,
+                    window_pattern=preset_config.window_pattern,
+                    device_batch_size=device_batch,
+                    total_batch_size=total_batch,
+                    eval_seq_len=eval_seq_len,
+                    eval_tokens=eval_tokens,
+                    eval_batch_size=eval_batch_size,
+                )
+            )
+        return rows
+
+    anchor_device_batch, anchor_total_batch, _ = apply_batch_profile(
+        seq_len=preset_config.seq_len,
+        batch_profile=anchor_batch_profile,
+    )
+    anchor_rows = run_candidates([(anchor_device_batch, anchor_total_batch)])
+    coarse_rows = run_candidates(engine.batch_profile_candidates(preset, seq_len=preset_config.seq_len))
+    refinement_rows = run_candidates(
+        engine.batch_profile_refinement_candidates(
+            preset,
+            seq_len=preset_config.seq_len,
+            coarse_winner=(anchor_device_batch, anchor_total_batch),
+        )
+    )
+    all_rows = anchor_rows + coarse_rows + refinement_rows
+    return {
+        "anchor_rows": anchor_rows,
+        "coarse_rows": coarse_rows,
+        "refinement_rows": refinement_rows,
+        "rows": all_rows,
+        "anchor_batch": {
+            "device_batch_size": anchor_device_batch,
+            "total_batch_size": anchor_total_batch,
+        },
+    }
+
+
+def summarize_batch_audit_rows(
+    rows: list[ProbeResult],
+    *,
+    target_seconds: float,
+) -> list[dict]:
+    summarized: list[dict] = []
+    for row in rows:
+        projection = None
+        if row.curve_output_path:
+            curve_path = Path(row.curve_output_path)
+            if curve_path.exists():
+                try:
+                    projection = project_curve(load_curve_artifact(curve_path), target_seconds=target_seconds)
+                except Exception:
+                    projection = None
+        projected_tokens = (
+            projection.projected_tokens
+            if projection is not None
+            else (row.steady_state_tok_per_sec * target_seconds if row.steady_state_tok_per_sec is not None else None)
+        )
+        projected_optimizer_steps = (
+            projected_tokens / row.total_batch_size
+            if projected_tokens is not None and row.total_batch_size > 0
+            else None
+        )
+        tokens_per_fwdbwd = row.seq_len * row.device_batch_size
+        projected_microsteps = (
+            projected_tokens / tokens_per_fwdbwd
+            if projected_tokens is not None and tokens_per_fwdbwd > 0
+            else None
+        )
+        summarized.append(
+            {
+                "preset": row.preset,
+                "seq_len": row.seq_len,
+                "window_pattern": row.window_pattern,
+                "device_batch_size": row.device_batch_size,
+                "total_batch_size": row.total_batch_size,
+                "grad_accum_steps": row.grad_accum_steps,
+                "status": row.status,
+                "observed_val_bpb": row.val_bpb,
+                "projected_val_bpb": projection.projected_val_bpb if projection is not None else row.val_bpb,
+                "projected_tokens": projected_tokens,
+                "projected_optimizer_steps": projected_optimizer_steps,
+                "projected_microsteps": projected_microsteps,
+                "steady_state_tok_per_sec": row.steady_state_tok_per_sec,
+                "optimizer_percent": row.optimizer_percent,
+                "accum_percent": row.accum_percent,
+                "control_overhead_percent": row.control_overhead_percent,
+                "peak_vram_mb": row.peak_vram_mb,
+                "curve_points": row.curve_eval_points,
+                "projection_method": None if projection is None else projection.method,
+                "fit_r2": None if projection is None else projection.fit_r2,
+                "fit_sigma": None if projection is None else projection.fit_sigma,
+                "stdout_path": row.stdout_path,
+                "stderr_path": row.stderr_path,
+            }
+        )
+    return summarized
+
+
+def select_best_batch_audit_row(
+    rows: list[ProbeResult],
+    *,
+    target_seconds: float,
+) -> tuple[ProbeResult, list[dict], dict]:
+    audit_rows = summarize_batch_audit_rows(rows, target_seconds=target_seconds)
+    keyed = {
+        (row.device_batch_size, row.total_batch_size): row
+        for row in rows
+    }
+    projected_rows = [
+        row for row in audit_rows
+        if row["status"] == "ok" and row["projected_val_bpb"] is not None
+    ]
+    if projected_rows:
+        projected_rows.sort(
+            key=lambda row: (
+                row["projected_val_bpb"],
+                row["observed_val_bpb"] if row["observed_val_bpb"] is not None else float("inf"),
+                -(row["projected_optimizer_steps"] or 0.0),
+                row["grad_accum_steps"] if row["grad_accum_steps"] is not None else float("inf"),
+                row["accum_percent"] if row["accum_percent"] is not None else float("inf"),
+                row["control_overhead_percent"] if row["control_overhead_percent"] is not None else float("inf"),
+                -(row["steady_state_tok_per_sec"] or 0.0),
+                row["total_batch_size"],
+            )
+        )
+        winner = projected_rows[0]
+        ordered = projected_rows + [
+            row for row in audit_rows
+            if row not in projected_rows
+        ]
+        return keyed[(winner["device_batch_size"], winner["total_batch_size"])], ordered, winner
+
+    observed_rows = [
+        row for row in audit_rows
+        if row["status"] == "ok" and row["observed_val_bpb"] is not None
+    ]
+    if observed_rows:
+        observed_rows.sort(
+            key=lambda row: (
+                row["observed_val_bpb"],
+                -(row["projected_optimizer_steps"] or 0.0),
+                row["grad_accum_steps"] if row["grad_accum_steps"] is not None else float("inf"),
+                row["accum_percent"] if row["accum_percent"] is not None else float("inf"),
+                row["control_overhead_percent"] if row["control_overhead_percent"] is not None else float("inf"),
+                -(row["steady_state_tok_per_sec"] or 0.0),
+                row["total_batch_size"],
+            )
+        )
+        winner = observed_rows[0]
+        ordered = observed_rows + [
+            row for row in audit_rows
+            if row not in observed_rows
+        ]
+        return keyed[(winner["device_batch_size"], winner["total_batch_size"])], ordered, winner
+
+    throughput_winner = select_best_batch_profile_row(rows)
+    throughput_row = next(
+        row
+        for row in audit_rows
+        if row["device_batch_size"] == throughput_winner.device_batch_size
+        and row["total_batch_size"] == throughput_winner.total_batch_size
+    )
+    return throughput_winner, audit_rows, throughput_row
+
+
 def run_local_search(
     *,
     engine: TrainingEngine,
@@ -809,10 +1370,12 @@ def select_best_batch_profile_row(rows: list[ProbeResult]) -> ProbeResult:
     ]
     plateau_rows.sort(
         key=lambda row: (
-            -(row.total_batch_size),
+            row.grad_accum_steps if row.grad_accum_steps is not None else float("inf"),
+            row.accum_percent if row.accum_percent is not None else float("inf"),
             row.control_overhead_percent if row.control_overhead_percent is not None else float("inf"),
-            row.peak_vram_mb or float("inf"),
             -(row.steady_state_tok_per_sec or 0.0),
+            row.total_batch_size,
+            row.peak_vram_mb or float("inf"),
         )
     )
     return plateau_rows[0]
@@ -1246,12 +1809,76 @@ def write_report(path: Path, *, payload: dict) -> None:
     projection_payload = payload.get("projection_ranking")
     projection_rows = projection_payload["rows"] if isinstance(projection_payload, dict) else None
     projection_horizon_rows = projection_payload["horizon_rows"] if isinstance(projection_payload, dict) else None
+    projection_decision_for_report = (
+        projection_payload.get("control_decision")
+        if isinstance(projection_payload, dict) and isinstance(projection_payload.get("control_decision"), dict)
+        else projection_payload.get("decision")
+        if isinstance(projection_payload, dict)
+        else None
+    )
+    projection_next_horizon = (
+        projection_payload.get("next_horizon")
+        if isinstance(projection_payload, dict) and isinstance(projection_payload.get("next_horizon"), dict)
+        else None
+    )
     finalist_payload = payload.get("finalist_projection")
     finalist_rows = finalist_payload["rows"] if isinstance(finalist_payload, dict) else None
     finalist_horizon_rows = finalist_payload["horizon_rows"] if isinstance(finalist_payload, dict) else None
+    finalist_decision_for_report = (
+        finalist_payload.get("control_decision")
+        if isinstance(finalist_payload, dict) and isinstance(finalist_payload.get("control_decision"), dict)
+        else finalist_payload.get("decision")
+        if isinstance(finalist_payload, dict)
+        else None
+    )
+    finalist_next_horizon = (
+        finalist_payload.get("next_horizon")
+        if isinstance(finalist_payload, dict) and isinstance(finalist_payload.get("next_horizon"), dict)
+        else None
+    )
+    confirmation_payload = payload.get("confirmation_projection")
+    confirmation_rows = confirmation_payload["rows"] if isinstance(confirmation_payload, dict) else None
+    confirmation_horizon_rows = confirmation_payload["horizon_rows"] if isinstance(confirmation_payload, dict) else None
+    confirmation_decision_for_report = (
+        confirmation_payload.get("control_decision")
+        if isinstance(confirmation_payload, dict) and isinstance(confirmation_payload.get("control_decision"), dict)
+        else confirmation_payload.get("decision")
+        if isinstance(confirmation_payload, dict)
+        else None
+    )
+    confirmation_next_horizon = (
+        confirmation_payload.get("next_horizon")
+        if isinstance(confirmation_payload, dict) and isinstance(confirmation_payload.get("next_horizon"), dict)
+        else None
+    )
+    scaling_confirmation_payload = payload.get("scaling_confirmation")
+    scaling_confirmation_rows = scaling_confirmation_payload["rows"] if isinstance(scaling_confirmation_payload, dict) else None
+    scaling_confirmation_horizon_rows = (
+        scaling_confirmation_payload["horizon_rows"] if isinstance(scaling_confirmation_payload, dict) else None
+    )
+    scaling_confirmation_decision_for_report = (
+        scaling_confirmation_payload.get("control_decision")
+        if isinstance(scaling_confirmation_payload, dict) and isinstance(scaling_confirmation_payload.get("control_decision"), dict)
+        else scaling_confirmation_payload.get("decision")
+        if isinstance(scaling_confirmation_payload, dict)
+        else None
+    )
+    scaling_confirmation_next_horizon = (
+        scaling_confirmation_payload.get("next_horizon")
+        if isinstance(scaling_confirmation_payload, dict) and isinstance(scaling_confirmation_payload.get("next_horizon"), dict)
+        else None
+    )
+    winner_batch_audit_payload = payload.get("winner_batch_audit")
+    winner_batch_audit_rows = (
+        winner_batch_audit_payload.get("audit_rows")
+        if isinstance(winner_batch_audit_payload, dict)
+        else None
+    )
     local_rows = payload["local_search"]["rows"]
     candidate_default = payload["candidate_default"]
+    longer_horizon_projection = payload.get("longer_horizon_projection")
     scaling_candidate = payload.get("scaling_candidate")
+    scaling_confirmation_enabled = payload.get("scaling_confirmation_enabled", False)
     promotion_bundle = payload["promotion_bundle"]
     eval_rows = payload["eval_calibration"]["rows"]
     zones = payload["zones"]
@@ -1283,12 +1910,36 @@ def write_report(path: Path, *, payload: dict) -> None:
         f"- Selection confidence: `{candidate_default['selection_confidence']['eval_calibration_effective_confidence']}`",
         f"- Upstream-style reference zone: `{payload['reference_comparison']['upstream_style']['upstream_zone']}`",
         (
+            f"- Winner batch audit: `device_batch_size={winner_batch_audit_payload['winner']['device_batch_size']}`, "
+            f"`total_batch_size={winner_batch_audit_payload['winner']['total_batch_size']}`, "
+            f"`projected_300s_val_bpb={winner_batch_audit_payload['winner_row']['projected_val_bpb']:.6f}`"
+            if isinstance(winner_batch_audit_payload, dict)
+            and isinstance(winner_batch_audit_payload.get("winner"), dict)
+            and isinstance(winner_batch_audit_payload.get("winner_row"), dict)
+            and isinstance(winner_batch_audit_payload["winner_row"].get("projected_val_bpb"), (int, float))
+            else "- Winner batch audit: `not-run`"
+        ),
+        (
+            f"- Longer-horizon projected leader at `{int(longer_horizon_projection['scaling_target_seconds'])}s`: "
+            f"`{longer_horizon_projection['scaling_winner_preset']}` "
+            f"(`projected val_bpb={longer_horizon_projection['scaling_winner_val_bpb']:.6f}`, "
+            f"`confidence={longer_horizon_projection['scaling_confidence_label']}`, "
+            f"`source={longer_horizon_projection['scaling_projection_source']}`)"
+            if isinstance(longer_horizon_projection, dict)
+            else "- Longer-horizon projected leader: `none`"
+        ),
+        (
             f"- Secondary scaling candidate: `{scaling_candidate['candidate_preset']}` "
             f"(gap at `300s`: `{scaling_candidate['candidate_gap_at_target']:.6f}`, "
             f"projected gap at `{int(scaling_candidate['scaling_target_seconds'])}s`: "
             f"`{scaling_candidate['projected_gap_at_scaling_target']:.6f}`)"
             if isinstance(scaling_candidate, dict)
             else "- Secondary scaling candidate: `none`"
+        ),
+        (
+            "- Scaling confirmation: `enabled`"
+            if scaling_confirmation_enabled
+            else "- Scaling confirmation: `disabled (opt-in)`"
         ),
         "",
         "## Hardware Fingerprint",
@@ -1356,29 +2007,55 @@ def write_report(path: Path, *, payload: dict) -> None:
         ),
         "",
     ]
-    if isinstance(projection_payload, dict) and isinstance(projection_payload.get("decision"), dict):
+    if isinstance(projection_decision_for_report, dict):
         report.extend(
             [
                 "### Projection Decision",
                 "",
-                f"- Winner probability threshold met: `{projection_payload['decision'].get('enough_signal')}`",
-                f"- Stability reason: `{projection_payload['decision'].get('stability_reason') or projection_payload['decision'].get('confidence_reason')}`",
-                f"- Winner probability: `{projection_payload['decision'].get('top_winner_probability')}`",
-                f"- Margin to second: `{projection_payload['decision'].get('top_margin_to_second')}`",
-                f"- Margin SNR: `{projection_payload['decision'].get('top_margin_snr')}`",
+                f"- Winner probability threshold met: `{projection_decision_for_report.get('enough_signal')}`",
+                f"- Stability reason: `{projection_decision_for_report.get('stability_reason') or projection_decision_for_report.get('confidence_reason')}`",
+                f"- Winner probability: `{projection_decision_for_report.get('top_winner_probability')}`",
+                f"- Margin to second: `{projection_decision_for_report.get('top_margin_to_second')}`",
+                f"- Margin SNR: `{projection_decision_for_report.get('top_margin_snr')}`",
                 "",
             ]
         )
-    if isinstance(finalist_payload, dict) and isinstance(finalist_payload.get("decision"), dict):
+    if isinstance(finalist_decision_for_report, dict):
         report.extend(
             [
                 "### Finalist Decision",
                 "",
-                f"- Winner probability threshold met: `{finalist_payload['decision'].get('enough_signal')}`",
-                f"- Stability reason: `{finalist_payload['decision'].get('stability_reason') or finalist_payload['decision'].get('confidence_reason')}`",
-                f"- Winner probability: `{finalist_payload['decision'].get('top_winner_probability')}`",
-                f"- Margin to second: `{finalist_payload['decision'].get('top_margin_to_second')}`",
-                f"- Margin SNR: `{finalist_payload['decision'].get('top_margin_snr')}`",
+                f"- Winner probability threshold met: `{finalist_decision_for_report.get('enough_signal')}`",
+                f"- Stability reason: `{finalist_decision_for_report.get('stability_reason') or finalist_decision_for_report.get('confidence_reason')}`",
+                f"- Winner probability: `{finalist_decision_for_report.get('top_winner_probability')}`",
+                f"- Margin to second: `{finalist_decision_for_report.get('top_margin_to_second')}`",
+                f"- Margin SNR: `{finalist_decision_for_report.get('top_margin_snr')}`",
+                "",
+            ]
+        )
+    if isinstance(confirmation_decision_for_report, dict):
+        report.extend(
+            [
+                "### Confirmation Decision",
+                "",
+                f"- Winner probability threshold met: `{confirmation_decision_for_report.get('enough_signal')}`",
+                f"- Stability reason: `{confirmation_decision_for_report.get('stability_reason') or confirmation_decision_for_report.get('confidence_reason')}`",
+                f"- Winner probability: `{confirmation_decision_for_report.get('top_winner_probability')}`",
+                f"- Margin to second: `{confirmation_decision_for_report.get('top_margin_to_second')}`",
+                f"- Margin SNR: `{confirmation_decision_for_report.get('top_margin_snr')}`",
+                "",
+            ]
+        )
+    if isinstance(scaling_confirmation_decision_for_report, dict):
+        report.extend(
+            [
+                "### Longer-Horizon Confirmation Decision",
+                "",
+                f"- Winner probability threshold met: `{scaling_confirmation_decision_for_report.get('enough_signal')}`",
+                f"- Stability reason: `{scaling_confirmation_decision_for_report.get('stability_reason') or scaling_confirmation_decision_for_report.get('confidence_reason')}`",
+                f"- Winner probability: `{scaling_confirmation_decision_for_report.get('top_winner_probability')}`",
+                f"- Margin to second: `{scaling_confirmation_decision_for_report.get('top_margin_to_second')}`",
+                f"- Margin SNR: `{scaling_confirmation_decision_for_report.get('top_margin_snr')}`",
                 "",
             ]
         )
@@ -1387,7 +2064,7 @@ def write_report(path: Path, *, payload: dict) -> None:
             [
                 "## Projection Ranking",
                 "",
-                "All candidate families are run at a longer budget and projected against the `300s` objective using the shared truth-curve model. This is the first real decision stage: if it already has enough signal, calibration stops here; otherwise the top finalists are rerun longer.",
+                "All candidate families are run at a longer budget and projected against the `300s` objective using the shared truth-curve model. This establishes the leading family candidates before any deeper rerank or winner-specific batch audit happens.",
                 "",
                 markdown_table(
                     projection_rows,
@@ -1396,7 +2073,7 @@ def write_report(path: Path, *, payload: dict) -> None:
                         ("device_batch_size", "Device batch"),
                         ("total_batch_size", "Total batch"),
                         ("curve_points", "Curve points"),
-                        ("projected_final_bpb", "Projected 300s val_bpb"),
+                        ("projected_val_bpb", "Projected 300s val_bpb"),
                         ("correction_mean", "Correction"),
                         ("projection_std", "Projection std"),
                         ("fit_r2", "Fit R²"),
@@ -1411,6 +2088,33 @@ def write_report(path: Path, *, payload: dict) -> None:
                         ("extrapolation_ratio", "Ratio"),
                         ("projection_source", "Projection source"),
                         ("matched_truth_count", "Truth matches"),
+                    ],
+                ),
+                "",
+            ]
+        )
+    if winner_batch_audit_rows:
+        report.extend(
+            [
+                "## Winner Batch Audit",
+                "",
+                "After family selection, calibration reruns a short curve-aware batch audit on the selected preset. This is where the operating batch is allowed to move away from the anchor preset's device constant when a different `db/tb` pair projects to a better `300s` outcome once optimizer-step cadence and accumulation cost are visible.",
+                "",
+                markdown_table(
+                    winner_batch_audit_rows,
+                    [
+                        ("device_batch_size", "Device batch"),
+                        ("total_batch_size", "Total batch"),
+                        ("grad_accum_steps", "Grad accum"),
+                        ("projected_val_bpb", "Projected 300s val_bpb"),
+                        ("projected_optimizer_steps", "Projected opt steps"),
+                        ("projected_microsteps", "Projected microsteps"),
+                        ("observed_val_bpb", "Observed val_bpb"),
+                        ("accum_percent", "Accum %"),
+                        ("control_overhead_percent", "Control %"),
+                        ("steady_state_tok_per_sec", "Steady tok/s"),
+                        ("peak_vram_mb", "Peak MB"),
+                        ("projection_method", "Projection"),
                     ],
                 ),
                 "",
@@ -1450,12 +2154,31 @@ def write_report(path: Path, *, payload: dict) -> None:
                 "",
             ]
         )
+    if isinstance(projection_next_horizon, dict):
+        report.extend(
+            [
+                "### Projection Next Horizon",
+                "",
+                (
+                    f"- Suggested next horizon: `{projection_next_horizon.get('suggested_seconds')}s`"
+                    if projection_next_horizon.get("suggested_seconds") is not None
+                    else "- Suggested next horizon: `none`"
+                ),
+                f"- Current observed horizon: `{projection_next_horizon.get('current_observed_seconds')}s`",
+                f"- Current observed tokens: `{projection_next_horizon.get('current_observed_tokens')}`",
+                f"- Top preset: `{projection_next_horizon.get('top_preset')}`",
+                f"- Winner probability: `{projection_next_horizon.get('top_winner_probability')}`",
+                f"- Enough signal at target: `{projection_next_horizon.get('target_enough_signal')}`",
+                f"- Reason: `{projection_next_horizon.get('suggestion_reason')}`",
+                "",
+            ]
+        )
     if finalist_rows:
         report.extend(
             [
                 "## Finalist Ranking",
                 "",
-                "The top projected candidate families are rerun again at a longer budget and projected to `300s`. This stage is only used when the all-family projection stage still lacks enough signal.",
+                "The top projected candidate families are rerun again at a longer budget and projected to `300s`. This stage resolves whether the first projection leader still wins once more real training time has been observed.",
                 "",
                 markdown_table(
                     finalist_rows,
@@ -1464,7 +2187,7 @@ def write_report(path: Path, *, payload: dict) -> None:
                         ("device_batch_size", "Device batch"),
                         ("total_batch_size", "Total batch"),
                         ("curve_points", "Curve points"),
-                        ("projected_final_bpb", "Projected 300s val_bpb"),
+                        ("projected_val_bpb", "Projected 300s val_bpb"),
                         ("correction_mean", "Correction"),
                         ("projection_std", "Projection std"),
                         ("fit_r2", "Fit R²"),
@@ -1515,6 +2238,195 @@ def write_report(path: Path, *, payload: dict) -> None:
                         ("confidence_label", "Confidence"),
                     ],
                 ),
+                "",
+            ]
+        )
+    if isinstance(finalist_next_horizon, dict):
+        report.extend(
+            [
+                "### Finalist Next Horizon",
+                "",
+                (
+                    f"- Suggested next horizon: `{finalist_next_horizon.get('suggested_seconds')}s`"
+                    if finalist_next_horizon.get("suggested_seconds") is not None
+                    else "- Suggested next horizon: `none`"
+                ),
+                f"- Current observed horizon: `{finalist_next_horizon.get('current_observed_seconds')}s`",
+                f"- Current observed tokens: `{finalist_next_horizon.get('current_observed_tokens')}`",
+                f"- Top preset: `{finalist_next_horizon.get('top_preset')}`",
+                f"- Winner probability: `{finalist_next_horizon.get('top_winner_probability')}`",
+                f"- Enough signal at target: `{finalist_next_horizon.get('target_enough_signal')}`",
+                f"- Reason: `{finalist_next_horizon.get('suggestion_reason')}`",
+                "",
+            ]
+        )
+    if confirmation_rows:
+        report.extend(
+            [
+                "## Confirmation Ranking",
+                "",
+                "If the finalist stage still lacks enough signal at the `300s` target, calibration reruns the strongest finalists at the suggested next horizon and uses that result as the deciding family stage before local search.",
+                "",
+                markdown_table(
+                    confirmation_rows,
+                    [
+                        ("preset", "Preset"),
+                        ("device_batch_size", "Device batch"),
+                        ("total_batch_size", "Total batch"),
+                        ("curve_points", "Curve points"),
+                        ("projected_val_bpb", "Projected 300s val_bpb"),
+                        ("correction_mean", "Correction"),
+                        ("projection_std", "Projection std"),
+                        ("fit_r2", "Fit R²"),
+                        ("fit_sigma", "Fit σ"),
+                        ("winner_probability", "Winner p"),
+                        ("confidence_reason", "Reason"),
+                        ("final_val_bpb", "Observed val_bpb"),
+                        ("calibration_horizon_seconds", "Truth horizon"),
+                        ("calibration_horizon_tokens", "Truth tokens"),
+                        ("truth_anchor_seconds", "Anchor sec"),
+                        ("truth_anchor_tokens", "Anchor tokens"),
+                        ("extrapolation_ratio", "Ratio"),
+                        ("projection_source", "Projection source"),
+                        ("matched_truth_count", "Truth matches"),
+                    ],
+                ),
+                "",
+            ]
+        )
+    if confirmation_horizon_rows:
+        report.extend(
+            [
+                "### Confirmation Horizon Table",
+                "",
+                markdown_table(
+                    horizon_rows_for_report(confirmation_horizon_rows),
+                    [
+                        ("target_seconds", "Horizon"),
+                        ("preset", "Preset"),
+                        ("device_batch_size", "Device batch"),
+                        ("total_batch_size", "Total batch"),
+                        ("observed_tokens", "Observed tokens"),
+                        ("target_tokens", "Target tokens"),
+                        ("corrected_val_bpb", "Projected val_bpb"),
+                        ("correction_display", "Correction"),
+                        ("confidence_interval", "95% CI"),
+                        ("fit_r2_display", "Fit R²"),
+                        ("fit_sigma_display", "Fit σ"),
+                        ("winner_probability", "Winner p"),
+                        ("confidence_reason", "Reason"),
+                        ("truth_anchor_seconds", "Anchor sec"),
+                        ("truth_anchor_tokens", "Anchor tokens"),
+                        ("extrapolation_ratio_display", "Ratio"),
+                        ("projection_source", "Source"),
+                        ("matched_truth_count", "Truth"),
+                        ("confidence_label", "Confidence"),
+                    ],
+                ),
+                "",
+            ]
+        )
+    if isinstance(confirmation_next_horizon, dict):
+        report.extend(
+            [
+                "### Confirmation Next Horizon",
+                "",
+                (
+                    f"- Suggested next horizon: `{confirmation_next_horizon.get('suggested_seconds')}s`"
+                    if confirmation_next_horizon.get("suggested_seconds") is not None
+                    else "- Suggested next horizon: `none`"
+                ),
+                f"- Current observed horizon: `{confirmation_next_horizon.get('current_observed_seconds')}s`",
+                f"- Current observed tokens: `{confirmation_next_horizon.get('current_observed_tokens')}`",
+                f"- Top preset: `{confirmation_next_horizon.get('top_preset')}`",
+                f"- Winner probability: `{confirmation_next_horizon.get('top_winner_probability')}`",
+                f"- Enough signal at target: `{confirmation_next_horizon.get('target_enough_signal')}`",
+                f"- Reason: `{confirmation_next_horizon.get('suggestion_reason')}`",
+                "",
+            ]
+        )
+    if scaling_confirmation_rows:
+        report.extend(
+            [
+                "## Longer-Horizon Confirmation",
+                "",
+                "When the longer-horizon summary projects a crossover beyond `300s` but the evidence is still low-confidence, calibration reruns the strict `300s` winner against the projected longer-horizon leader at the deeper target horizon.",
+                "",
+                markdown_table(
+                    scaling_confirmation_rows,
+                    [
+                        ("preset", "Preset"),
+                        ("device_batch_size", "Device batch"),
+                        ("total_batch_size", "Total batch"),
+                        ("curve_points", "Curve points"),
+                        ("projected_val_bpb", "Projected 900s val_bpb"),
+                        ("correction_mean", "Correction"),
+                        ("projection_std", "Projection std"),
+                        ("fit_r2", "Fit R²"),
+                        ("fit_sigma", "Fit σ"),
+                        ("winner_probability", "Winner p"),
+                        ("confidence_reason", "Reason"),
+                        ("final_val_bpb", "Observed val_bpb"),
+                        ("calibration_horizon_seconds", "Truth horizon"),
+                        ("calibration_horizon_tokens", "Truth tokens"),
+                        ("truth_anchor_seconds", "Anchor sec"),
+                        ("truth_anchor_tokens", "Anchor tokens"),
+                        ("extrapolation_ratio", "Ratio"),
+                        ("projection_source", "Projection source"),
+                        ("matched_truth_count", "Truth matches"),
+                    ],
+                ),
+                "",
+            ]
+        )
+    if scaling_confirmation_horizon_rows:
+        report.extend(
+            [
+                "### Longer-Horizon Confirmation Table",
+                "",
+                markdown_table(
+                    horizon_rows_for_report(scaling_confirmation_horizon_rows),
+                    [
+                        ("target_seconds", "Horizon"),
+                        ("preset", "Preset"),
+                        ("device_batch_size", "Device batch"),
+                        ("total_batch_size", "Total batch"),
+                        ("observed_tokens", "Observed tokens"),
+                        ("target_tokens", "Target tokens"),
+                        ("corrected_val_bpb", "Projected val_bpb"),
+                        ("correction_display", "Correction"),
+                        ("confidence_interval", "95% CI"),
+                        ("fit_r2_display", "Fit R²"),
+                        ("fit_sigma_display", "Fit σ"),
+                        ("winner_probability", "Winner p"),
+                        ("confidence_reason", "Reason"),
+                        ("truth_anchor_seconds", "Anchor sec"),
+                        ("truth_anchor_tokens", "Anchor tokens"),
+                        ("extrapolation_ratio_display", "Ratio"),
+                        ("projection_source", "Source"),
+                        ("matched_truth_count", "Truth"),
+                        ("confidence_label", "Confidence"),
+                    ],
+                ),
+                "",
+            ]
+        )
+    if isinstance(scaling_confirmation_next_horizon, dict):
+        report.extend(
+            [
+                "### Longer-Horizon Next Horizon",
+                "",
+                (
+                    f"- Suggested next horizon: `{scaling_confirmation_next_horizon.get('suggested_seconds')}s`"
+                    if scaling_confirmation_next_horizon.get("suggested_seconds") is not None
+                    else "- Suggested next horizon: `none`"
+                ),
+                f"- Current observed horizon: `{scaling_confirmation_next_horizon.get('current_observed_seconds')}s`",
+                f"- Current observed tokens: `{scaling_confirmation_next_horizon.get('current_observed_tokens')}`",
+                f"- Top preset: `{scaling_confirmation_next_horizon.get('top_preset')}`",
+                f"- Winner probability: `{scaling_confirmation_next_horizon.get('top_winner_probability')}`",
+                f"- Enough signal at target: `{scaling_confirmation_next_horizon.get('target_enough_signal')}`",
+                f"- Reason: `{scaling_confirmation_next_horizon.get('suggestion_reason')}`",
                 "",
             ]
         )
@@ -1579,6 +2491,40 @@ def write_report(path: Path, *, payload: dict) -> None:
                         ("candidate_last_segment_gain", "Candidate late gain"),
                         ("source", "Source"),
                         ("rationale", "Rationale"),
+                    ],
+                ),
+                "",
+            ]
+        )
+    if isinstance(longer_horizon_projection, dict):
+        report.extend(
+            [
+                "## Longer-Horizon Projection",
+                "",
+                "This secondary summary asks a different question from the strict default choice above: if you project beyond the `300s` calibration target, which family appears to lead at the deeper horizon and how trustworthy is that projection?",
+                "",
+                markdown_table(
+                    [longer_horizon_projection],
+                    [
+                        ("target_winner_preset", "300s winner"),
+                        ("target_winner_val_bpb", "300s val_bpb"),
+                        ("scaling_winner_preset", "Longer-horizon leader"),
+                        ("scaling_winner_val_bpb", "Projected longer val_bpb"),
+                        ("scaling_winner_device_batch_size", "Leader device batch"),
+                        ("scaling_winner_total_batch_size", "Leader total batch"),
+                        ("scaling_gap_at_target", "Leader gap at 300s"),
+                        ("target_gap_at_scaling", "300s winner gap at longer horizon"),
+                        ("target_winner_rank_at_scaling", "300s winner rank later"),
+                        ("scaling_winner_rank_at_target", "Longer leader rank at 300s"),
+                        ("scaling_winner_probability", "Winner p"),
+                        ("scaling_margin_to_second", "Margin to second"),
+                        ("scaling_margin_snr", "Margin SNR"),
+                        ("scaling_enough_signal", "Enough signal"),
+                        ("scaling_confidence_label", "Confidence"),
+                        ("scaling_confidence_reason", "Reason"),
+                        ("scaling_projection_source", "Source"),
+                        ("scaling_matched_truth_count", "Truth matches"),
+                        ("crossover_from_target", "Crossover"),
                     ],
                 ),
                 "",
@@ -1652,11 +2598,14 @@ def write_report(path: Path, *, payload: dict) -> None:
 
 
 def run_platform_calibration(args) -> dict:
+    set_friendly_progress(not args.plain_progress)
     mode = args.mode
+    scaling_confirmation_enabled = args.enable_scaling_confirmation
     coarse_time_budget = resolved_budget(args.coarse_time_budget, mode=mode, field="coarse_time_budget")
     ranking_time_budget = resolved_budget(args.ranking_time_budget, mode=mode, field="ranking_time_budget")
     projection_time_budget = resolved_budget(args.projection_time_budget, mode=mode, field="projection_time_budget")
     finalist_time_budget = resolved_budget(args.finalist_time_budget, mode=mode, field="finalist_time_budget")
+    batch_audit_time_budget = resolved_budget(args.batch_audit_time_budget, mode=mode, field="batch_audit_time_budget")
     finalist_count = args.finalist_count if args.finalist_count is not None else resolve_mode_spec(mode).finalist_count
     local_search_time_budget = resolved_budget(
         args.local_search_time_budget,
@@ -1673,19 +2622,47 @@ def run_platform_calibration(args) -> dict:
     output_dir.mkdir(parents=True, exist_ok=True)
     logs_dir.mkdir(parents=True, exist_ok=True)
     calibration_signatures = engine.calibration_signatures()
-    truth_curves = load_truth_curves(
-        truth_curves_dir=Path(args.truth_curves_dir) if args.truth_curves_dir else None,
+    resolved_truth_curves_dir, truth_curves = resolve_truth_curve_inputs(
+        truth_curves_dir=args.truth_curves_dir,
+        output_dir=output_dir,
         engine_name=engine.name,
         hardware_key=hardware.hardware_key,
         target_seconds=PROJECTION_TARGET_SECONDS,
     )
     truth_eval_contract = infer_truth_eval_contract(truth_curves)
     projection_calibration = build_projection_calibration(truth_curves, target_seconds=PROJECTION_TARGET_SECONDS)
+    phase_estimates = estimate_calibration_phases(
+        engine=engine,
+        presets=presets,
+        mode=mode,
+        batch_profile_time_budget=min(5.0, ranking_time_budget),
+        coarse_time_budget=coarse_time_budget,
+        projection_time_budget=projection_time_budget,
+        finalist_time_budget=finalist_time_budget,
+        finalist_count=finalist_count,
+        batch_audit_time_budget=batch_audit_time_budget,
+        local_search_time_budget=local_search_time_budget,
+        eval_train_seconds=eval_train_seconds,
+        eval_rungs=eval_rungs,
+        scaling_confirmation_enabled=scaling_confirmation_enabled,
+    )
+    announce_calibration_story(
+        engine=engine,
+        hardware_key=hardware.hardware_key,
+        mode=mode,
+        output_dir=output_dir,
+        presets=presets,
+        truth_curves_dir=resolved_truth_curves_dir,
+        truth_curve_count=len(truth_curves),
+        phase_estimates=phase_estimates,
+        scaling_confirmation_enabled=scaling_confirmation_enabled,
+    )
 
     hardware_inputs = {
         "schema_version": PLATFORM_CALIBRATION_SCHEMA_VERSION,
         "hardware_key": hardware.hardware_key,
     }
+    hardware_started = phase_start("hardware fingerprint", detail=hardware.hardware_key)
     hardware_phase = load_phase_if_matching(output_dir, "hardware_fingerprint", hardware_inputs, force=args.force)
     if hardware_phase is None:
         hardware_phase = save_phase(
@@ -1694,6 +2671,9 @@ def run_platform_calibration(args) -> dict:
             inputs=hardware_inputs,
             payload=asdict(hardware),
         )
+        phase_done("hardware fingerprint", hardware_started)
+    else:
+        phase_reused("hardware fingerprint", detail=hardware.hardware_key)
 
     batch_profile_probe: ProbeResult | None = None
     batch_profile_phase: dict | None = None
@@ -1701,12 +2681,22 @@ def run_platform_calibration(args) -> dict:
     batch_profile_overrides: dict[str, tuple[int, int]] = {}
     if engine.capabilities.supports_local_search:
         batch_profile_anchor = choose_batch_profile_anchor_preset(engine, presets)
+        anchor_seq_len = engine.preset_catalog()[batch_profile_anchor].seq_len
+        batch_profile_estimate = (
+            len(engine.batch_profile_candidates(batch_profile_anchor, seq_len=anchor_seq_len))
+            * batch_profile_time_budget
+        )
         batch_profile_inputs = {
             "schema_version": PLATFORM_CALIBRATION_SCHEMA_VERSION,
             "mode": mode,
             "anchor_preset": batch_profile_anchor,
             "time_budget": batch_profile_time_budget,
         }
+        batch_profile_started = phase_start(
+            "anchor batch profile",
+            detail=f"anchor preset {batch_profile_anchor}",
+            estimate_seconds=batch_profile_estimate,
+        )
         batch_profile_phase = load_phase_if_matching(output_dir, "batch_profile", batch_profile_inputs, force=args.force)
         if batch_profile_phase is None:
             try:
@@ -1731,11 +2721,29 @@ def run_platform_calibration(args) -> dict:
                         "winner": asdict(batch_profile_probe),
                     },
                 )
+                phase_done(
+                    "anchor batch profile",
+                    batch_profile_started,
+                    detail=(
+                        f"winner db={batch_profile_probe.device_batch_size}, "
+                        f"tb={batch_profile_probe.total_batch_size}, "
+                        f"accum={batch_profile_probe.grad_accum_steps}"
+                    ),
+                )
             except Exception:
                 batch_profile_phase = None
                 batch_profile_probe = None
+                calibration_progress("Anchor batch profile failed; continuing without batch overrides.")
         elif batch_profile_phase is not None:
             batch_profile_probe = probe_from_dict(batch_profile_phase["payload"]["winner"])
+            phase_reused(
+                "anchor batch profile",
+                detail=(
+                    f"winner db={batch_profile_probe.device_batch_size}, "
+                    f"tb={batch_profile_probe.total_batch_size}, "
+                    f"accum={batch_profile_probe.grad_accum_steps}"
+                ),
+            )
 
         if batch_profile_probe is not None:
             for preset in presets:
@@ -1761,6 +2769,11 @@ def run_platform_calibration(args) -> dict:
             else None
         ),
     }
+    coarse_started = phase_start(
+        "coarse envelope",
+        detail=f"{len(presets)} presets",
+        estimate_seconds=len(presets) * coarse_time_budget,
+    )
     coarse_phase = load_phase_if_matching(output_dir, "coarse_envelope", coarse_inputs, force=args.force)
     if coarse_phase is None:
         coarse_rows = [
@@ -1783,6 +2796,14 @@ def run_platform_calibration(args) -> dict:
             inputs=coarse_inputs,
             payload={"time_budget": coarse_time_budget, "rows": [asdict(row) for row in coarse_rows]},
         )
+        successful = sum(1 for row in coarse_rows if row.status == "ok")
+        phase_done(
+            "coarse envelope",
+            coarse_started,
+            detail=f"{successful}/{len(coarse_rows)} presets succeeded",
+        )
+    else:
+        phase_reused("coarse envelope", detail=f"{len(presets)} presets")
     coarse_rows = [probe_from_dict(row) for row in coarse_phase["payload"]["rows"]]
     coarse_by_preset = {row.preset: row for row in coarse_rows}
 
@@ -1820,6 +2841,11 @@ def run_platform_calibration(args) -> dict:
             else None
         ),
     }
+    projection_started = phase_start(
+        "projection ranking",
+        detail=f"{len(ranking_presets)} presets projected to {int(PROJECTION_TARGET_SECONDS)}s",
+        estimate_seconds=len(ranking_presets) * projection_time_budget,
+    )
     projection_phase = load_phase_if_matching(output_dir, "projection_ranking", projection_inputs, force=args.force)
     if projection_phase is None:
         projection_probe_rows = [
@@ -1854,6 +2880,24 @@ def run_platform_calibration(args) -> dict:
             truth_curves=truth_curves,
             winner_probability_threshold=args.winner_probability_threshold,
             projected_margin_threshold=args.projected_margin_threshold,
+        )
+        projection_control_decision = resolve_horizon_control_decision(
+            projection_horizon_decisions,
+            target_seconds=PROJECTION_TARGET_SECONDS,
+        )
+        projection_next_horizon = asdict(
+            suggest_next_horizon(
+                projection_horizon_rows,
+                projection_horizon_decisions,
+                target_seconds=PROJECTION_TARGET_SECONDS,
+                candidate_horizons=REPORT_HORIZONS,
+            )
+        )
+        projection_target_horizon_rows = [asdict(row) for row in rows_for_horizon(projection_horizon_rows, PROJECTION_TARGET_SECONDS)]
+        projection_phase_winner = (
+            projection_target_horizon_rows[0]
+            if projection_target_horizon_rows
+            else projected_row_to_dict(projected_rows[0]) if projected_rows else None
         )
         projection_ranked_metadata = rank_candidate_families(
             projection_probe_rows,
@@ -1897,15 +2941,27 @@ def run_platform_calibration(args) -> dict:
                 "target_seconds": PROJECTION_TARGET_SECONDS,
                 "probe_rows": [asdict(row) for row in projection_probe_rows],
                 "decision": None if projection_decision is None else asdict(projection_decision),
+                "control_decision": None if projection_control_decision is None else asdict(projection_control_decision),
                 "rows": [projected_row_to_dict(item) for item in projected_rows],
                 "horizon_rows": [asdict(row) for row in projection_horizon_rows],
                 "horizon_decisions": [asdict(item) for item in projection_horizon_decisions],
-                "winner": projected_row_to_dict(projected_rows[0]) if projected_rows else None,
+                "next_horizon": projection_next_horizon,
+                "winner": projection_phase_winner,
             },
         )
         ranking_rows = projection_probe_rows
         ranked_candidates = projection_ranked_metadata
         ranking_winner = projection_ranked_metadata[0]
+        projection_winner_name = (
+            projection_phase_winner["preset"]
+            if isinstance(projection_phase_winner, dict)
+            else ranking_winner.probe.preset
+        )
+        phase_done(
+            "projection ranking",
+            projection_started,
+            detail=f"projected leader {projection_winner_name}",
+        )
     else:
         ranking_phase = read_json(phase_path(output_dir, "candidate_ranking"))
         projection_probe_rows = [
@@ -1924,6 +2980,10 @@ def run_platform_calibration(args) -> dict:
         ranking_rows = projection_probe_rows
         ranked_candidates = projection_ranked_metadata
         ranking_winner = projection_ranked_metadata[0]
+        phase_reused(
+            "projection ranking",
+            detail=f"projected leader {projection_phase['payload'].get('winner', {}).get('preset', ranking_winner.probe.preset)}",
+        )
     projection_curves = load_probe_curve_artifacts(projection_probe_rows)
     projection_estimates, projection_decision = compare_projected_curves(
         projection_curves,
@@ -1941,19 +3001,50 @@ def run_platform_calibration(args) -> dict:
         winner_probability_threshold=args.winner_probability_threshold,
         projected_margin_threshold=args.projected_margin_threshold,
     )
+    projection_control_decision = resolve_horizon_control_decision(
+        projection_horizon_decisions,
+        target_seconds=PROJECTION_TARGET_SECONDS,
+    )
+    projection_next_horizon = asdict(
+        suggest_next_horizon(
+            projection_horizon_rows,
+            projection_horizon_decisions,
+            target_seconds=PROJECTION_TARGET_SECONDS,
+            candidate_horizons=REPORT_HORIZONS,
+        )
+    )
     projection_rows = [projected_row_to_dict(item) for item in projection_estimates]
-    projection_winner = projection_rows[0] if projection_rows else None
-    projected_presets = [row["preset"] for row in projection_rows]
+    projection_target_horizon_rows = [asdict(row) for row in rows_for_horizon(projection_horizon_rows, PROJECTION_TARGET_SECONDS)]
+    projection_winner = projection_target_horizon_rows[0] if projection_target_horizon_rows else (projection_rows[0] if projection_rows else None)
+    projected_presets = [row["preset"] for row in projection_target_horizon_rows] if projection_target_horizon_rows else [row["preset"] for row in projection_rows]
     projection_probe_metadata_by_preset = {item.probe.preset: item for item in projection_ranked_metadata}
 
     finalist_phase: dict | None = None
     finalist_candidates = []
+    finalist_curves = []
     finalist_horizon_rows = []
     finalist_horizon_decisions = []
+    confirmation_phase: dict | None = None
+    confirmation_curves = []
+    confirmation_rows = []
+    confirmation_horizon_rows = []
+    confirmation_horizon_decisions = []
+    scaling_confirmation_phase: dict | None = None
+    scaling_confirmation_rows = []
+    scaling_confirmation_horizon_rows = []
+    scaling_confirmation_horizon_decisions = []
     finalist_presets = projected_presets[: max(1, finalist_count)]
     candidate_family = None
-    if projection_decision is not None and decision_enough_signal(projection_decision) and projection_winner is not None:
+    if (
+        projection_control_decision is not None
+        and decision_enough_signal(projection_control_decision)
+        and projection_winner is not None
+    ):
         candidate_family = projection_probe_metadata_by_preset[projection_winner["preset"]]
+        calibration_progress(
+            f"Projection already has enough signal at {int(PROJECTION_TARGET_SECONDS)}s; "
+            f"skipping finalist rerank and using {candidate_family.probe.preset}."
+        )
     elif len(finalist_presets) > 1:
         finalist_inputs = {
             "schema_version": PLATFORM_CALIBRATION_SCHEMA_VERSION,
@@ -1972,7 +3063,16 @@ def run_platform_calibration(args) -> dict:
                 if batch_profile_probe is not None and batch_profile_phase is not None
                 else None
             ),
+            "batch_profile_overrides": batch_profile_overrides_to_dict(
+                batch_profile_overrides,
+                presets=finalist_presets,
+            ),
         }
+        finalist_started = phase_start(
+            "finalist rerank",
+            detail=f"{len(finalist_presets)} presets",
+            estimate_seconds=len(finalist_presets) * finalist_time_budget,
+        )
         finalist_phase = load_phase_if_matching(output_dir, "finalist_projection", finalist_inputs, force=args.force)
         finalist_diagnostics = []
         if finalist_phase is None:
@@ -2010,6 +3110,24 @@ def run_platform_calibration(args) -> dict:
                 winner_probability_threshold=args.winner_probability_threshold,
                 projected_margin_threshold=args.projected_margin_threshold,
             )
+            finalist_control_decision = resolve_horizon_control_decision(
+                finalist_horizon_decisions,
+                target_seconds=PROJECTION_TARGET_SECONDS,
+            )
+            finalist_next_horizon = asdict(
+                suggest_next_horizon(
+                    finalist_horizon_rows,
+                    finalist_horizon_decisions,
+                    target_seconds=PROJECTION_TARGET_SECONDS,
+                    candidate_horizons=REPORT_HORIZONS,
+                )
+            )
+            finalist_target_horizon_rows = [asdict(row) for row in rows_for_horizon(finalist_horizon_rows, PROJECTION_TARGET_SECONDS)]
+            finalist_phase_winner = (
+                finalist_target_horizon_rows[0]
+                if finalist_target_horizon_rows
+                else projected_row_to_dict(finalist_estimates[0]) if finalist_estimates else None
+            )
             finalist_candidates = rank_candidate_families(
                 finalist_probe_rows,
                 engine=engine,
@@ -2027,12 +3145,24 @@ def run_platform_calibration(args) -> dict:
                     "probe_rows": [asdict(row) for row in finalist_probe_rows],
                     "ranked_rows": [ranked_probe_to_dict(item) for item in finalist_candidates],
                     "decision": None if finalist_decision is None else asdict(finalist_decision),
+                    "control_decision": None if finalist_control_decision is None else asdict(finalist_control_decision),
                     "diagnostics": [asdict(item) for item in finalist_diagnostics],
                     "rows": [projected_row_to_dict(item) for item in finalist_estimates],
                     "horizon_rows": [asdict(row) for row in finalist_horizon_rows],
                     "horizon_decisions": [asdict(item) for item in finalist_horizon_decisions],
-                    "winner": projected_row_to_dict(finalist_estimates[0]) if finalist_estimates else None,
+                    "next_horizon": finalist_next_horizon,
+                    "winner": finalist_phase_winner,
                 },
+            )
+            phase_done(
+                "finalist rerank",
+                finalist_started,
+                detail=f"leader {finalist_phase_winner['preset'] if isinstance(finalist_phase_winner, dict) else finalist_presets[0]}",
+            )
+        else:
+            phase_reused(
+                "finalist rerank",
+                detail=f"leader {finalist_phase['payload'].get('winner', {}).get('preset', finalist_presets[0])}",
             )
         finalist_probe_rows = [
             probe_from_dict(row)
@@ -2065,15 +3195,395 @@ def run_platform_calibration(args) -> dict:
             winner_probability_threshold=args.winner_probability_threshold,
             projected_margin_threshold=args.projected_margin_threshold,
         )
+        finalist_control_decision = resolve_horizon_control_decision(
+            finalist_horizon_decisions,
+            target_seconds=PROJECTION_TARGET_SECONDS,
+        )
+        finalist_next_horizon = asdict(
+            suggest_next_horizon(
+                finalist_horizon_rows,
+                finalist_horizon_decisions,
+                target_seconds=PROJECTION_TARGET_SECONDS,
+                candidate_horizons=REPORT_HORIZONS,
+            )
+        )
         finalist_rows = [projected_row_to_dict(item) for item in finalist_estimates]
+        finalist_target_horizon_rows = [asdict(row) for row in rows_for_horizon(finalist_horizon_rows, PROJECTION_TARGET_SECONDS)]
         finalist_probe_metadata_by_preset = {item.probe.preset: item for item in finalist_candidates}
-        finalist_winner = finalist_rows[0] if finalist_rows else None
-        if isinstance(finalist_winner, dict):
+        finalist_winner = finalist_target_horizon_rows[0] if finalist_target_horizon_rows else (finalist_rows[0] if finalist_rows else None)
+        confirmation_needed = (
+            finalist_control_decision is not None
+            and not decision_enough_signal(finalist_control_decision)
+            and isinstance(finalist_next_horizon, dict)
+            and isinstance(finalist_next_horizon.get("suggested_seconds"), (int, float))
+            and finalist_next_horizon.get("suggested_seconds") > finalist_time_budget
+            and finalist_next_horizon.get("suggested_seconds") <= PROJECTION_TARGET_SECONDS
+        )
+        if confirmation_needed:
+            confirmation_presets = [
+                row["preset"]
+                for row in finalist_target_horizon_rows[:2]
+                if isinstance(row, dict) and row.get("preset")
+            ]
+            if len(confirmation_presets) > 1:
+                confirmation_time_budget = float(finalist_next_horizon["suggested_seconds"])
+                confirmation_started = phase_start(
+                    "winner confirmation",
+                    detail=f"{' vs '.join(confirmation_presets)}",
+                    estimate_seconds=len(confirmation_presets) * confirmation_time_budget,
+                )
+                confirmation_inputs = {
+                    "schema_version": PLATFORM_CALIBRATION_SCHEMA_VERSION,
+                    "mode": mode,
+                    "presets": confirmation_presets,
+                    "time_budget": confirmation_time_budget,
+                    "target_seconds": PROJECTION_TARGET_SECONDS,
+                    "hardware_key": hardware.hardware_key,
+                    "truth_eval_contract": truth_eval_contract,
+                    "batch_profile": (
+                        {
+                            "anchor_preset": batch_profile_phase["payload"]["anchor_preset"],
+                            "device_batch_size": batch_profile_probe.device_batch_size,
+                            "total_batch_size": batch_profile_probe.total_batch_size,
+                        }
+                        if batch_profile_probe is not None and batch_profile_phase is not None
+                        else None
+                    ),
+                    "batch_profile_overrides": batch_profile_overrides_to_dict(
+                        batch_profile_overrides,
+                        presets=confirmation_presets,
+                    ),
+                }
+                confirmation_phase = load_phase_if_matching(
+                    output_dir,
+                    "confirmation_projection",
+                    confirmation_inputs,
+                    force=args.force,
+                )
+                if confirmation_phase is None:
+                    confirmation_probe_rows = [
+                        run_curve_train_probe(
+                            engine=engine,
+                            preset=preset,
+                            time_budget=confirmation_time_budget,
+                            logs_dir=logs_dir,
+                            stage="confirmation",
+                            curve_eval_seconds=(30.0, 60.0, confirmation_time_budget)
+                            if confirmation_time_budget > 60.0
+                            else (30.0, confirmation_time_budget),
+                            device_batch_size=batch_profile_overrides.get(preset, (None, None))[0],
+                            total_batch_size=batch_profile_overrides.get(preset, (None, None))[1],
+                            eval_seq_len=None if truth_eval_contract is None else truth_eval_contract["eval_seq_len"],
+                            eval_tokens=None if truth_eval_contract is None else truth_eval_contract["eval_tokens"],
+                            eval_batch_size=None if truth_eval_contract is None else truth_eval_contract["eval_batch_size"],
+                        )
+                        for preset in confirmation_presets
+                    ]
+                    confirmation_curves = load_probe_curve_artifacts(confirmation_probe_rows)
+                    confirmation_estimates, confirmation_decision, confirmation_diagnostics = compare_multi_horizon_curves(
+                        finalist_curves,
+                        confirmation_curves,
+                        target_seconds=PROJECTION_TARGET_SECONDS,
+                        calibration=projection_calibration,
+                        truth_curves=truth_curves,
+                        winner_probability_threshold=args.winner_probability_threshold,
+                        projected_margin_threshold=args.projected_margin_threshold,
+                    )
+                    confirmation_horizon_rows, confirmation_horizon_decisions = build_horizon_projection_table(
+                        confirmation_curves,
+                        horizons_seconds=REPORT_HORIZONS,
+                        calibration=projection_calibration,
+                        truth_curves=truth_curves,
+                        winner_probability_threshold=args.winner_probability_threshold,
+                        projected_margin_threshold=args.projected_margin_threshold,
+                    )
+                    confirmation_control_decision = resolve_horizon_control_decision(
+                        confirmation_horizon_decisions,
+                        target_seconds=PROJECTION_TARGET_SECONDS,
+                    )
+                    confirmation_next_horizon = asdict(
+                        suggest_next_horizon(
+                            confirmation_horizon_rows,
+                            confirmation_horizon_decisions,
+                            target_seconds=PROJECTION_TARGET_SECONDS,
+                            candidate_horizons=REPORT_HORIZONS,
+                        )
+                    )
+                    confirmation_target_horizon_rows = [
+                        asdict(row) for row in rows_for_horizon(confirmation_horizon_rows, PROJECTION_TARGET_SECONDS)
+                    ]
+                    confirmation_phase_winner = (
+                        confirmation_target_horizon_rows[0]
+                        if confirmation_target_horizon_rows
+                        else projected_row_to_dict(confirmation_estimates[0]) if confirmation_estimates else None
+                    )
+                    confirmation_phase = save_phase(
+                        output_dir,
+                        "confirmation_projection",
+                        inputs=confirmation_inputs,
+                        payload={
+                            "time_budget": confirmation_time_budget,
+                            "target_seconds": PROJECTION_TARGET_SECONDS,
+                            "probe_rows": [asdict(row) for row in confirmation_probe_rows],
+                            "decision": None if confirmation_decision is None else asdict(confirmation_decision),
+                            "control_decision": None if confirmation_control_decision is None else asdict(confirmation_control_decision),
+                            "diagnostics": [asdict(item) for item in confirmation_diagnostics],
+                            "rows": [projected_row_to_dict(item) for item in confirmation_estimates],
+                            "horizon_rows": [asdict(row) for row in confirmation_horizon_rows],
+                            "horizon_decisions": [asdict(item) for item in confirmation_horizon_decisions],
+                            "next_horizon": confirmation_next_horizon,
+                            "winner": confirmation_phase_winner,
+                        },
+                    )
+                    phase_done(
+                        "winner confirmation",
+                        confirmation_started,
+                        detail=f"leader {confirmation_phase_winner['preset'] if isinstance(confirmation_phase_winner, dict) else confirmation_presets[0]}",
+                    )
+                else:
+                    phase_reused(
+                        "winner confirmation",
+                        detail=f"leader {confirmation_phase['payload'].get('winner', {}).get('preset', confirmation_presets[0])}",
+                    )
+                confirmation_probe_rows = [
+                    probe_from_dict(row)
+                    for row in confirmation_phase["payload"].get("probe_rows", [])
+                ]
+                confirmation_curves = load_probe_curve_artifacts(confirmation_probe_rows)
+                confirmation_estimates, confirmation_decision, confirmation_diagnostics = compare_multi_horizon_curves(
+                    finalist_curves,
+                    confirmation_curves,
+                    target_seconds=PROJECTION_TARGET_SECONDS,
+                    calibration=projection_calibration,
+                    truth_curves=truth_curves,
+                    winner_probability_threshold=args.winner_probability_threshold,
+                    projected_margin_threshold=args.projected_margin_threshold,
+                )
+                confirmation_horizon_rows, confirmation_horizon_decisions = build_horizon_projection_table(
+                    confirmation_curves,
+                    horizons_seconds=REPORT_HORIZONS,
+                    calibration=projection_calibration,
+                    truth_curves=truth_curves,
+                    winner_probability_threshold=args.winner_probability_threshold,
+                    projected_margin_threshold=args.projected_margin_threshold,
+                )
+                confirmation_target_horizon_rows = [
+                    asdict(row) for row in rows_for_horizon(confirmation_horizon_rows, PROJECTION_TARGET_SECONDS)
+                ]
+                confirmation_probe_metadata_by_preset = {
+                    probe.preset: probe for probe in confirmation_probe_rows
+                }
+                confirmation_winner = (
+                    confirmation_target_horizon_rows[0]
+                    if confirmation_target_horizon_rows
+                    else projected_row_to_dict(confirmation_estimates[0]) if confirmation_estimates else None
+                )
+                confirmation_rows = [projected_row_to_dict(item) for item in confirmation_estimates]
+                if isinstance(confirmation_winner, dict):
+                    candidate_family = ranked_probe_from_probe(
+                        confirmation_probe_metadata_by_preset[confirmation_winner["preset"]]
+                    )
+        if candidate_family is None and isinstance(finalist_winner, dict):
             candidate_family = finalist_probe_metadata_by_preset[finalist_winner["preset"]]
     if candidate_family is None:
         if projection_winner is None:
             raise RuntimeError("Projection ranking produced no winner.")
         candidate_family = projection_probe_metadata_by_preset[projection_winner["preset"]]
+    calibration_progress(
+        f"Selected preset family: {candidate_family.probe.preset} "
+        f"(current batch db={candidate_family.probe.device_batch_size}, tb={candidate_family.probe.total_batch_size})."
+    )
+
+    deepest_projection_curves = confirmation_curves or finalist_curves or projection_curves
+    deepest_horizon_rows = confirmation_horizon_rows or finalist_horizon_rows or projection_horizon_rows
+    deepest_horizon_decisions = confirmation_horizon_decisions or finalist_horizon_decisions or projection_horizon_decisions
+
+    longer_horizon_projection = summarize_longer_horizon_projection(
+        deepest_horizon_rows,
+        deepest_horizon_decisions,
+        target_seconds=PROJECTION_TARGET_SECONDS,
+        scaling_target_seconds=SCALING_TARGET_SECONDS,
+    )
+
+    scaling_confirmation_needed = (
+        scaling_confirmation_enabled
+        and
+        longer_horizon_projection is not None
+        and longer_horizon_projection.crossover_from_target
+        and not longer_horizon_projection.scaling_enough_signal
+        and longer_horizon_projection.scaling_winner_preset != longer_horizon_projection.target_winner_preset
+        and max(
+            (row.observed_seconds for row in deepest_horizon_rows if row.observed_seconds is not None),
+            default=0.0,
+        )
+        < SCALING_TARGET_SECONDS
+    )
+    if (
+        not scaling_confirmation_enabled
+        and longer_horizon_projection is not None
+        and longer_horizon_projection.crossover_from_target
+        and longer_horizon_projection.scaling_winner_preset != longer_horizon_projection.target_winner_preset
+    ):
+        calibration_progress(
+            f"Longer-horizon crossover is projected ({longer_horizon_projection.target_winner_preset} at "
+            f"{int(PROJECTION_TARGET_SECONDS)}s, {longer_horizon_projection.scaling_winner_preset} at "
+            f"{int(SCALING_TARGET_SECONDS)}s), but deeper scaling confirmation is disabled by default."
+        )
+    if scaling_confirmation_needed:
+        scaling_confirmation_presets = [
+            longer_horizon_projection.target_winner_preset,
+            longer_horizon_projection.scaling_winner_preset,
+        ]
+        scaling_confirmation_time_budget = SCALING_TARGET_SECONDS
+        scaling_started = phase_start(
+            "scaling confirmation",
+            detail=f"{' vs '.join(scaling_confirmation_presets)} to {int(SCALING_TARGET_SECONDS)}s",
+            estimate_seconds=len(scaling_confirmation_presets) * scaling_confirmation_time_budget,
+        )
+        scaling_confirmation_inputs = {
+            "schema_version": PLATFORM_CALIBRATION_SCHEMA_VERSION,
+            "mode": mode,
+            "presets": scaling_confirmation_presets,
+            "time_budget": scaling_confirmation_time_budget,
+            "target_seconds": SCALING_TARGET_SECONDS,
+            "hardware_key": hardware.hardware_key,
+            "truth_eval_contract": truth_eval_contract,
+            "batch_profile": (
+                {
+                    "anchor_preset": batch_profile_phase["payload"]["anchor_preset"],
+                    "device_batch_size": batch_profile_probe.device_batch_size,
+                    "total_batch_size": batch_profile_probe.total_batch_size,
+                }
+                if batch_profile_probe is not None and batch_profile_phase is not None
+                else None
+            ),
+            "batch_profile_overrides": batch_profile_overrides_to_dict(
+                batch_profile_overrides,
+                presets=scaling_confirmation_presets,
+            ),
+        }
+        scaling_confirmation_phase = load_phase_if_matching(
+            output_dir,
+            "scaling_confirmation",
+            scaling_confirmation_inputs,
+            force=args.force,
+        )
+        if scaling_confirmation_phase is None:
+            scaling_confirmation_probe_rows = [
+                run_curve_train_probe(
+                    engine=engine,
+                    preset=preset,
+                    time_budget=scaling_confirmation_time_budget,
+                    logs_dir=logs_dir,
+                    stage="scaling",
+                    curve_eval_seconds=(300.0, 600.0, scaling_confirmation_time_budget),
+                    device_batch_size=batch_profile_overrides.get(preset, (None, None))[0],
+                    total_batch_size=batch_profile_overrides.get(preset, (None, None))[1],
+                    eval_seq_len=None if truth_eval_contract is None else truth_eval_contract["eval_seq_len"],
+                    eval_tokens=None if truth_eval_contract is None else truth_eval_contract["eval_tokens"],
+                    eval_batch_size=None if truth_eval_contract is None else truth_eval_contract["eval_batch_size"],
+                )
+                for preset in scaling_confirmation_presets
+            ]
+            scaling_confirmation_curves = load_probe_curve_artifacts(scaling_confirmation_probe_rows)
+            scaling_confirmation_estimates, scaling_confirmation_decision, scaling_confirmation_diagnostics = compare_multi_horizon_curves(
+                deepest_projection_curves,
+                scaling_confirmation_curves,
+                target_seconds=SCALING_TARGET_SECONDS,
+                calibration=None,
+                truth_curves=truth_curves,
+                winner_probability_threshold=args.winner_probability_threshold,
+                projected_margin_threshold=args.projected_margin_threshold,
+            )
+            scaling_confirmation_horizon_rows, scaling_confirmation_horizon_decisions = build_horizon_projection_table(
+                scaling_confirmation_curves,
+                horizons_seconds=(PROJECTION_TARGET_SECONDS, SCALING_TARGET_SECONDS),
+                calibration=None,
+                truth_curves=truth_curves,
+                winner_probability_threshold=args.winner_probability_threshold,
+                projected_margin_threshold=args.projected_margin_threshold,
+            )
+            scaling_confirmation_control_decision = resolve_horizon_control_decision(
+                scaling_confirmation_horizon_decisions,
+                target_seconds=SCALING_TARGET_SECONDS,
+            )
+            scaling_confirmation_next_horizon = asdict(
+                suggest_next_horizon(
+                    scaling_confirmation_horizon_rows,
+                    scaling_confirmation_horizon_decisions,
+                    target_seconds=SCALING_TARGET_SECONDS,
+                    candidate_horizons=(PROJECTION_TARGET_SECONDS, SCALING_TARGET_SECONDS),
+                )
+            )
+            scaling_confirmation_target_rows = [
+                asdict(row)
+                for row in rows_for_horizon(scaling_confirmation_horizon_rows, SCALING_TARGET_SECONDS)
+            ]
+            scaling_confirmation_phase_winner = (
+                scaling_confirmation_target_rows[0]
+                if scaling_confirmation_target_rows
+                else projected_row_to_dict(scaling_confirmation_estimates[0]) if scaling_confirmation_estimates else None
+            )
+            scaling_confirmation_phase = save_phase(
+                output_dir,
+                "scaling_confirmation",
+                inputs=scaling_confirmation_inputs,
+                payload={
+                    "time_budget": scaling_confirmation_time_budget,
+                    "target_seconds": SCALING_TARGET_SECONDS,
+                    "probe_rows": [asdict(row) for row in scaling_confirmation_probe_rows],
+                    "decision": None if scaling_confirmation_decision is None else asdict(scaling_confirmation_decision),
+                    "control_decision": None if scaling_confirmation_control_decision is None else asdict(scaling_confirmation_control_decision),
+                    "diagnostics": [asdict(item) for item in scaling_confirmation_diagnostics],
+                    "rows": [projected_row_to_dict(item) for item in scaling_confirmation_estimates],
+                    "horizon_rows": [asdict(row) for row in scaling_confirmation_horizon_rows],
+                    "horizon_decisions": [asdict(item) for item in scaling_confirmation_horizon_decisions],
+                    "next_horizon": scaling_confirmation_next_horizon,
+                    "winner": scaling_confirmation_phase_winner,
+                },
+            )
+            phase_done(
+                "scaling confirmation",
+                scaling_started,
+                detail=(
+                    f"leader {scaling_confirmation_phase_winner['preset'] if isinstance(scaling_confirmation_phase_winner, dict) else scaling_confirmation_presets[0]}"
+                ),
+            )
+        else:
+            phase_reused(
+                "scaling confirmation",
+                detail=f"leader {scaling_confirmation_phase['payload'].get('winner', {}).get('preset', scaling_confirmation_presets[0])}",
+            )
+        scaling_confirmation_probe_rows = [
+            probe_from_dict(row)
+            for row in scaling_confirmation_phase["payload"].get("probe_rows", [])
+        ]
+        if not scaling_confirmation_probe_rows:
+            raise RuntimeError("Scaling confirmation phase is missing probe_rows; rerun with --force to regenerate it.")
+        scaling_confirmation_curves = load_probe_curve_artifacts(scaling_confirmation_probe_rows)
+        scaling_confirmation_estimates, scaling_confirmation_decision, scaling_confirmation_diagnostics = compare_multi_horizon_curves(
+            deepest_projection_curves,
+            scaling_confirmation_curves,
+            target_seconds=SCALING_TARGET_SECONDS,
+            calibration=None,
+            truth_curves=truth_curves,
+            winner_probability_threshold=args.winner_probability_threshold,
+            projected_margin_threshold=args.projected_margin_threshold,
+        )
+        scaling_confirmation_horizon_rows, scaling_confirmation_horizon_decisions = build_horizon_projection_table(
+            scaling_confirmation_curves,
+            horizons_seconds=(PROJECTION_TARGET_SECONDS, SCALING_TARGET_SECONDS),
+            calibration=None,
+            truth_curves=truth_curves,
+            winner_probability_threshold=args.winner_probability_threshold,
+            projected_margin_threshold=args.projected_margin_threshold,
+        )
+        longer_horizon_projection = summarize_longer_horizon_projection(
+            scaling_confirmation_horizon_rows,
+            scaling_confirmation_horizon_decisions,
+            target_seconds=PROJECTION_TARGET_SECONDS,
+            scaling_target_seconds=SCALING_TARGET_SECONDS,
+        )
 
     scaling_candidate = select_scaling_candidate(
         projection_estimates,
@@ -2083,17 +3593,101 @@ def run_platform_calibration(args) -> dict:
         scaling_target_seconds=SCALING_TARGET_SECONDS,
     )
 
+    winner_batch_audit_phase: dict | None = None
+    winner_batch_profile = candidate_family.probe
+    if engine.capabilities.supports_local_search:
+        winner_batch_audit_started = phase_start(
+            "winner batch audit",
+            detail=f"preset {candidate_family.probe.preset}",
+            estimate_seconds=batch_audit_time_budget,
+        )
+        winner_batch_audit_inputs = {
+            "schema_version": PLATFORM_CALIBRATION_SCHEMA_VERSION,
+            "mode": mode,
+            "preset": candidate_family.probe.preset,
+            "time_budget": batch_audit_time_budget,
+            "target_seconds": PROJECTION_TARGET_SECONDS,
+            "anchor_batch": {
+                "device_batch_size": candidate_family.probe.device_batch_size,
+                "total_batch_size": candidate_family.probe.total_batch_size,
+            },
+            "truth_eval_contract": truth_eval_contract,
+        }
+        winner_batch_audit_phase = load_phase_if_matching(
+            output_dir,
+            "winner_batch_audit",
+            winner_batch_audit_inputs,
+            force=args.force,
+        )
+        if winner_batch_audit_phase is None:
+            batch_audit_payload = run_batch_profile_audit(
+                engine=engine,
+                preset=candidate_family.probe.preset,
+                time_budget=batch_audit_time_budget,
+                logs_dir=logs_dir,
+                anchor_batch_profile=candidate_family.probe,
+                eval_seq_len=None if truth_eval_contract is None else truth_eval_contract["eval_seq_len"],
+                eval_tokens=None if truth_eval_contract is None else truth_eval_contract["eval_tokens"],
+                eval_batch_size=None if truth_eval_contract is None else truth_eval_contract["eval_batch_size"],
+            )
+            winner_batch_profile, audit_rows, winner_row = select_best_batch_audit_row(
+                batch_audit_payload["rows"],
+                target_seconds=PROJECTION_TARGET_SECONDS,
+            )
+            winner_batch_audit_phase = save_phase(
+                output_dir,
+                "winner_batch_audit",
+                inputs=winner_batch_audit_inputs,
+                payload={
+                    "time_budget": batch_audit_time_budget,
+                    "target_seconds": PROJECTION_TARGET_SECONDS,
+                    "anchor_rows": [asdict(row) for row in batch_audit_payload["anchor_rows"]],
+                    "coarse_rows": [asdict(row) for row in batch_audit_payload["coarse_rows"]],
+                    "refinement_rows": [asdict(row) for row in batch_audit_payload["refinement_rows"]],
+                    "rows": [asdict(row) for row in batch_audit_payload["rows"]],
+                    "audit_rows": audit_rows,
+                    "winner": asdict(winner_batch_profile),
+                    "winner_row": winner_row,
+                    "anchor_batch": batch_audit_payload["anchor_batch"],
+                },
+            )
+            phase_done(
+                "winner batch audit",
+                winner_batch_audit_started,
+                detail=(
+                    f"winner db={winner_batch_profile.device_batch_size}, "
+                    f"tb={winner_batch_profile.total_batch_size}, "
+                    f"accum={winner_batch_profile.grad_accum_steps}"
+                ),
+            )
+        else:
+            winner_batch_profile = probe_from_dict(winner_batch_audit_phase["payload"]["winner"])
+            phase_reused(
+                "winner batch audit",
+                detail=(
+                    f"winner db={winner_batch_profile.device_batch_size}, "
+                    f"tb={winner_batch_profile.total_batch_size}, "
+                    f"accum={winner_batch_profile.grad_accum_steps}"
+                ),
+            )
+
     if engine.capabilities.supports_local_search:
         local_seq_lens = args.local_seq_lens or default_local_seq_lens(engine, candidate_family.probe.preset, mode=mode)
         local_window_patterns = args.local_window_patterns or default_local_window_patterns(engine, candidate_family.probe.preset, mode=mode)
+        local_variant_count = len(local_seq_lens) * len(local_window_patterns)
+        local_started = phase_start(
+            "local search",
+            detail=f"{local_variant_count} shape variants for {candidate_family.probe.preset}",
+            estimate_seconds=local_variant_count * local_search_time_budget,
+        )
         local_inputs = {
             "schema_version": PLATFORM_CALIBRATION_SCHEMA_VERSION,
             "mode": mode,
             "preset": candidate_family.probe.preset,
             "time_budget": local_search_time_budget,
             "batch_profile": {
-                "device_batch_size": candidate_family.probe.device_batch_size,
-                "total_batch_size": candidate_family.probe.total_batch_size,
+                "device_batch_size": winner_batch_profile.device_batch_size,
+                "total_batch_size": winner_batch_profile.total_batch_size,
             },
             "seq_lens": local_seq_lens,
             "window_patterns": local_window_patterns,
@@ -2105,7 +3699,7 @@ def run_platform_calibration(args) -> dict:
                 preset=candidate_family.probe.preset,
                 time_budget=local_search_time_budget,
                 logs_dir=logs_dir,
-                batch_profile=candidate_family.probe,
+                batch_profile=winner_batch_profile,
                 seq_lens=local_seq_lens,
                 window_patterns=local_window_patterns,
             )
@@ -2116,16 +3710,38 @@ def run_platform_calibration(args) -> dict:
                 inputs=local_inputs,
                 payload={"time_budget": local_search_time_budget, "rows": [asdict(row) for row in local_rows], "winner": asdict(best_local)},
             )
+            phase_done(
+                "local search",
+                local_started,
+                detail=(
+                    f"winner seq={best_local.seq_len}, wp={best_local.window_pattern}, "
+                    f"db={best_local.device_batch_size}, tb={best_local.total_batch_size}"
+                ),
+            )
+        else:
+            reused_winner = probe_from_dict(local_phase["payload"]["winner"])
+            phase_reused(
+                "local search",
+                detail=(
+                    f"winner seq={reused_winner.seq_len}, wp={reused_winner.window_pattern}, "
+                    f"db={reused_winner.device_batch_size}, tb={reused_winner.total_batch_size}"
+                ),
+            )
         local_rows = [probe_from_dict(row) for row in local_phase["payload"]["rows"]]
         best_local = probe_from_dict(local_phase["payload"]["winner"])
     else:
-        local_rows = [candidate_family.probe]
-        best_local = candidate_family.probe
+        local_rows = [winner_batch_profile]
+        best_local = winner_batch_profile
 
     candidate_checkpoint = output_dir / "candidate_checkpoint"
     checkpoint_probe = best_local
     if engine.capabilities.supports_checkpoint_mint:
         candidate_checkpoint.parent.mkdir(parents=True, exist_ok=True)
+        checkpoint_started = phase_start(
+            "candidate checkpoint",
+            detail=f"preset {candidate_family.probe.preset}",
+            estimate_seconds=eval_train_seconds,
+        )
         checkpoint_inputs = {
             "schema_version": PLATFORM_CALIBRATION_SCHEMA_VERSION,
             "mode": mode,
@@ -2161,10 +3777,21 @@ def run_platform_calibration(args) -> dict:
                 inputs=checkpoint_inputs,
                 payload=asdict(checkpoint_probe),
             )
+            phase_done(
+                "candidate checkpoint",
+                checkpoint_started,
+                detail=str(candidate_checkpoint),
+            )
+        else:
+            phase_reused("candidate checkpoint", detail=str(candidate_checkpoint))
         checkpoint_probe = probe_from_dict(checkpoint_phase["payload"])
 
     if engine.capabilities.supports_eval_calibration and engine.capabilities.supports_checkpoint_mint:
         eval_markdown_path = output_dir / "eval_rungs.md"
+        eval_started = phase_start(
+            "eval calibration",
+            detail=f"rungs {', '.join(eval_rungs)}",
+        )
         eval_inputs = {
             "schema_version": PLATFORM_CALIBRATION_SCHEMA_VERSION,
             "mode": mode,
@@ -2185,6 +3812,9 @@ def run_platform_calibration(args) -> dict:
                 markdown_path=eval_markdown_path,
             )
             eval_phase = save_phase(output_dir, "eval_calibration", inputs=eval_inputs, payload=eval_payload)
+            phase_done("eval calibration", eval_started, detail=str(eval_markdown_path))
+        else:
+            phase_reused("eval calibration", detail=str(eval_markdown_path))
         eval_payload = eval_phase["payload"]
     else:
         eval_payload = {
@@ -2234,9 +3864,9 @@ def run_platform_calibration(args) -> dict:
             "family_selection_val_bpb": candidate_family.probe.val_bpb,
             "family_selection_steady_state_tok_per_sec": candidate_family.probe.steady_state_tok_per_sec,
             "family_selection_projected_300s_val_bpb": (
-                finalist_phase["payload"]["winner"]["projected_final_bpb"]
+                get_projected_val_bpb(finalist_phase["payload"]["winner"])
                 if finalist_phase is not None
-                else projection_winner["projected_final_bpb"]
+                else get_projected_val_bpb(projection_winner)
             ),
             "family_selection_projected_winner_probability": (
                 finalist_phase["payload"]["winner"].get("winner_probability")
@@ -2254,6 +3884,9 @@ def run_platform_calibration(args) -> dict:
             "family_selection_memory_pressure_band": candidate_family.memory_pressure_band,
             "family_selection_memory_tiebreak_penalty": candidate_family.memory_tiebreak_penalty,
             "family_selection_estimated_eval_overhead_fraction": candidate_family.estimated_eval_overhead_fraction,
+            "winner_batch_audit_device_batch_size": winner_batch_profile.device_batch_size,
+            "winner_batch_audit_total_batch_size": winner_batch_profile.total_batch_size,
+            "winner_batch_audit_grad_accum_steps": winner_batch_profile.grad_accum_steps,
             "local_search_steady_state_tok_per_sec": best_local.steady_state_tok_per_sec,
             "local_search_optimizer_percent": best_local.optimizer_percent,
             "local_search_accum_percent": best_local.accum_percent,
@@ -2285,6 +3918,8 @@ def run_platform_calibration(args) -> dict:
         "schema_version": PLATFORM_CALIBRATION_SCHEMA_VERSION,
         "output_dir": str(output_dir),
         "mode": mode,
+        "scaling_confirmation_enabled": scaling_confirmation_enabled,
+        "truth_curves_dir": None if resolved_truth_curves_dir is None else str(resolved_truth_curves_dir),
         "calibration_signatures": calibration_signatures,
         "hardware_fingerprint": asdict(hardware),
         "coarse_envelope": {
@@ -2303,8 +3938,10 @@ def run_platform_calibration(args) -> dict:
             "rows": projection_rows,
             "horizon_rows": [asdict(row) for row in projection_horizon_rows],
             "horizon_decisions": [asdict(item) for item in projection_horizon_decisions],
+            "next_horizon": projection_next_horizon,
             "winner": projection_winner,
             "decision": projection_decision,
+            "control_decision": projection_control_decision,
         },
         "finalist_projection": (
             {
@@ -2313,11 +3950,45 @@ def run_platform_calibration(args) -> dict:
                 "rows": finalist_phase["payload"]["rows"],
                 "horizon_rows": [asdict(row) for row in finalist_horizon_rows],
                 "horizon_decisions": [asdict(item) for item in finalist_horizon_decisions],
+                "next_horizon": finalist_phase["payload"].get("next_horizon"),
                 "winner": finalist_phase["payload"]["winner"],
                 "decision": finalist_phase["payload"].get("decision"),
+                "control_decision": finalist_phase["payload"].get("control_decision"),
                 "diagnostics": finalist_phase["payload"].get("diagnostics", []),
             }
             if finalist_phase is not None
+            else None
+        ),
+        "confirmation_projection": (
+            {
+                "time_budget": confirmation_phase["payload"]["time_budget"],
+                "target_seconds": PROJECTION_TARGET_SECONDS,
+                "rows": confirmation_phase["payload"]["rows"],
+                "horizon_rows": [asdict(row) for row in confirmation_horizon_rows],
+                "horizon_decisions": [asdict(item) for item in confirmation_horizon_decisions],
+                "next_horizon": confirmation_phase["payload"].get("next_horizon"),
+                "winner": confirmation_phase["payload"]["winner"],
+                "decision": confirmation_phase["payload"].get("decision"),
+                "control_decision": confirmation_phase["payload"].get("control_decision"),
+                "diagnostics": confirmation_phase["payload"].get("diagnostics", []),
+            }
+            if confirmation_phase is not None
+            else None
+        ),
+        "scaling_confirmation": (
+            {
+                "time_budget": scaling_confirmation_phase["payload"]["time_budget"],
+                "target_seconds": SCALING_TARGET_SECONDS,
+                "rows": scaling_confirmation_phase["payload"]["rows"],
+                "horizon_rows": scaling_confirmation_phase["payload"]["horizon_rows"],
+                "horizon_decisions": scaling_confirmation_phase["payload"]["horizon_decisions"],
+                "next_horizon": scaling_confirmation_phase["payload"].get("next_horizon"),
+                "winner": scaling_confirmation_phase["payload"]["winner"],
+                "decision": scaling_confirmation_phase["payload"].get("decision"),
+                "control_decision": scaling_confirmation_phase["payload"].get("control_decision"),
+                "diagnostics": scaling_confirmation_phase["payload"].get("diagnostics", []),
+            }
+            if scaling_confirmation_phase is not None
             else None
         ),
         "batch_profile": (
@@ -2349,6 +4020,34 @@ def run_platform_calibration(args) -> dict:
             if batch_profile_probe is not None
             else None
         ),
+        "winner_batch_audit": (
+            {
+                "time_budget": winner_batch_audit_phase["payload"]["time_budget"],
+                "target_seconds": winner_batch_audit_phase["payload"]["target_seconds"],
+                "anchor_rows": [
+                    asdict(probe_from_dict(row))
+                    for row in winner_batch_audit_phase["payload"].get("anchor_rows", [])
+                ],
+                "coarse_rows": [
+                    asdict(probe_from_dict(row))
+                    for row in winner_batch_audit_phase["payload"].get("coarse_rows", [])
+                ],
+                "refinement_rows": [
+                    asdict(probe_from_dict(row))
+                    for row in winner_batch_audit_phase["payload"].get("refinement_rows", [])
+                ],
+                "rows": [
+                    asdict(probe_from_dict(row))
+                    for row in winner_batch_audit_phase["payload"].get("rows", [])
+                ],
+                "audit_rows": winner_batch_audit_phase["payload"].get("audit_rows", []),
+                "winner": asdict(probe_from_dict(winner_batch_audit_phase["payload"]["winner"])),
+                "winner_row": winner_batch_audit_phase["payload"].get("winner_row"),
+                "anchor_batch": winner_batch_audit_phase["payload"].get("anchor_batch"),
+            }
+            if winner_batch_audit_phase is not None
+            else None
+        ),
         "local_search": {
             "time_budget": local_search_time_budget,
             "rows": [asdict(row) for row in local_rows],
@@ -2356,6 +4055,9 @@ def run_platform_calibration(args) -> dict:
         },
         "candidate_checkpoint": asdict(checkpoint_probe),
         "candidate_default": candidate_default,
+        "longer_horizon_projection": (
+            None if longer_horizon_projection is None else asdict(longer_horizon_projection)
+        ),
         "scaling_candidate": None if scaling_candidate is None else asdict(scaling_candidate),
         "promotion_bundle": promotion_bundle,
         "zones": zones,
@@ -2376,8 +4078,19 @@ def run_platform_calibration(args) -> dict:
 
     report_path = output_dir / "report.md"
     json_path = output_dir / "report.json"
+    report_started = phase_start("final report", detail=str(report_path))
     write_report(report_path, payload=payload)
-    json_path.write_text(json.dumps(payload, indent=2) + "\n")
+    json_path.write_text(json.dumps(to_jsonable(payload), indent=2) + "\n")
+    phase_done(
+        "final report",
+        report_started,
+        detail=(
+            f"default {candidate_default['preset']} | "
+            f"seq={candidate_default['seq_len']} wp={candidate_default['window_pattern']} "
+            f"db={candidate_default['device_batch_size']} tb={candidate_default['total_batch_size']}"
+        ),
+    )
+    calibration_progress(f"JSON summary: {json_path}")
     return payload
 
 
@@ -2429,8 +4142,18 @@ def build_parser() -> argparse.ArgumentParser:
         help="How many top projected candidate families to rerank at the longer finalist budget. Defaults from --mode.",
     )
     parser.add_argument(
+        "--batch-audit-time-budget",
+        type=float,
+        help="Curve-run budget for the winner batch audit that retests `db/tb` on the selected family before local search. Defaults from --mode.",
+    )
+    parser.add_argument(
         "--truth-curves-dir",
         help="Optional directory of completed truth-curve artifacts used to calibrate and project the 300s winner.",
+    )
+    parser.add_argument(
+        "--enable-scaling-confirmation",
+        action="store_true",
+        help="Opt in to the deeper 900s scaling-confirmation head-to-head when the longer-horizon projection predicts a crossover but lacks confidence.",
     )
     parser.add_argument(
         "--winner-probability-threshold",
@@ -2484,6 +4207,11 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Ignore reusable phase artifacts in the output directory and recompute all stages.",
     )
+    parser.add_argument(
+        "--plain-progress",
+        action="store_true",
+        help="Disable the default friendly progress narration and emit the shorter technical progress messages instead.",
+    )
     return parser
 
 
@@ -2491,7 +4219,7 @@ def main() -> None:
     parser = build_parser()
     args = parser.parse_args()
     payload = run_platform_calibration(args)
-    print(json.dumps(payload, indent=2))
+    print(json.dumps(to_jsonable(payload), indent=2))
 
 
 if __name__ == "__main__":

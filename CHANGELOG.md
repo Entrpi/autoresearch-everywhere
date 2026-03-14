@@ -29,7 +29,73 @@ On this hardware, the default canonical matched benchmark window for optimizatio
 
 ## Latest
 
-### New commit — calibration: add multi-horizon truth-backed projection gating — score `3` — complexity `11`
+### New commit — calibration: turn truth-backed projection into a usable GB10 bring-up loop — score `3` — complexity `19`
+
+**AI-identified within brief, human-shaped (3)**
+
+- Turn the shared truth-backed horizon model into the real control loop for calibration instead of leaving it as a report-only appendix.
+  - Meaning: family selection, finalist reruns, and longer-horizon reporting now all flow through the same token-accounted projection table, so the logic that explains the winner is also the logic that chooses the winner.
+  - Motivation: once the GB10 truth corpus existed, the remaining gap was not better reporting. It was that `calibrate.py` could still make decisions using older heuristics and only explain them afterward with better projection tooling.
+  - Purpose: make the `300s val_bpb` objective the center of the calibration loop and keep longer-horizon guidance explicit but secondary.
+  - `tools/curve_report.py`, `autoresearch_platform/curve_projection.py`, and `tools/calibrate_platform.py` now share one multi-horizon table with next-horizon recommendations plus LR-style fit diagnostics such as damping, correction, fit quality, sigma/SNR, and horizon drift.
+  - `calibrate.py` now uses that table to decide whether the first projection pass is already decisive, whether finalists need a longer rerun, and whether a separate longer-horizon scaling candidate should be surfaced.
+  - The deeper `900s` scaling-confirmation path is now explicit and opt-in via `--enable-scaling-confirmation`, so the default path stays focused on the real `300s` objective while still reporting who looks strongest later.
+- Correct batch selection so the emitted operating point is chosen for the same long-horizon objective as family selection, not for a short throughput plateau on the anchor preset.
+  - Meaning: batch sizing is still anchored as a device-level first pass, but calibration now stops rewarding larger `total_batch_size` just because it sits near the throughput plateau and instead rechecks the selected family with a curve-aware audit before emitting an operating point.
+  - Motivation: the GB10 FA4 evidence exposed a real policy bug. `m5-balanced` at `32 / 32768` beat `8 / 49152` on both `300s val_bpb` and total tokens, but the old short anchor probe still drifted toward the larger-`tb` shape.
+  - Purpose: keep the cheap hardware-level batch profile, then correct it when the chosen family shows that optimizer-step cadence and accumulation cost matter more than a tiny short-run throughput difference.
+  - The anchor selector now uses a `>= 90%` plateau and a `< 65%` cliff, stops preferring larger `tb` inside the plateau, and breaks ties toward lower accumulation/control cost before considering raw batch size.
+  - After family selection, calibration now runs a dedicated `10s` winner batch audit on the chosen preset, revisiting both the current batch shape and the preset's broader candidate grid so better shapes like `32 / 32768` can re-enter even when the anchor drifted elsewhere.
+  - That winner batch audit now ranks candidates by projected `300s val_bpb` first, then projected optimizer-step count, lower `grad_accum`, lower accumulation/control overhead, and finally throughput.
+- Turn the GB10 / DGX Spark path into a reproducible FA4-backed bring-up and make calibration read like a front-door user workflow rather than an internal experiment harness.
+  - Meaning: the docs and runtime metadata now describe one coherent GB10 story: clone the public repo, build the FA4 image, verify `flash_attn` plus `rustbpe`, run calibration, and then start the research loop from the calibrated result.
+  - Motivation: the Spark path had become technically rich but narratively fragmented, with too much emphasis on side workflows and too little on the main user journey from first clone to a trustworthy calibrated CUDA default.
+  - Purpose: make the first CUDA bring-up on GB10 reproducible, explain the environment assumptions clearly, and make the long-running `calibrate.py` command feel like an intentional operator-facing tool.
+  - Blackwell runtime metadata now points GB10-class systems at the FA4 path (`Dao-AILab/flash-attention#2268`, `flash-attn4`) instead of the stale FlashAttention 3 labels.
+  - `docs/dgx-spark-setup.md` now reads as a cohesive tutorial: clone `Entrpi/autoresearch-everywhere`, mutate `vllm-node-tf5:latest` into an FA4-capable `vllm-node-tf5-fa4:sm120` image with `rustbpe`, reserve `100g` SHM, run trainer smoke, run calibration, then launch the research loop; kernel-lab is now an appendix instead of the main bring-up path.
+  - The Spark guide now includes a compact GB10 preset table grounded in the real `300s` runs and clearly distinguishes the emitted calibration operating point from the separate truth-curve comparison table so users do not confuse a short local-search probe with the full `300s` evidence.
+  - `calibrate.py` now narrates its own progress by default, opening with what calibration is for, the expected phases and rough runtime, and then giving human-readable phase preambles and completion summaries unless `--plain-progress` is requested.
+
+**Grounding**
+
+- Files:
+  - `CHANGELOG.md`
+  - `README.md`
+  - `autoresearch_cuda/runtime.py`
+  - `autoresearch_platform/curve_projection.py`
+  - `docs/cuda-core-loop-parity.md`
+  - `docs/dgx-spark-setup.md`
+  - `docs/kernel-lab.md`
+  - `tools/curve_report.py`
+  - `tools/calibrate_platform.py`
+- Validation:
+  - `python3 -m py_compile autoresearch_platform/curve_projection.py tools/curve_report.py tools/calibrate_platform.py`
+  - `python3 tools/curve_report.py /tmp/gb10_curve_runs/gb10_m5small_curve60.json /tmp/gb10_curve_runs/gb10_m5balanced_curve60.json --truth-curves-dir /tmp/gb10_curve_runs --horizons 60,120,300,900 --json`
+  - synthetic selector check covering `32 / 32768` vs `8 / 49152` through `select_best_batch_profile_row(...)` and `select_best_batch_audit_row(...)`
+  - `python3 -m py_compile tools/calibrate_platform.py`
+  - `python3 tools/changelog_scores.py --group-by entry --format csv --include-latest --verify`
+  - `python3 tools/render_autonomy_badge.py`
+- Measurements:
+  - the shared horizon table on the real GB10 `60s` `m5-small` vs `m5-balanced` pair now reports:
+    - `m5-balanced` as the projected winner at `60s`, `120s`, and `300s`
+    - winner probability `0.9731`
+    - `300s` source `truth-match`
+    - `900s` source `calibrated-extrapolation` with `confidence=low`
+  - the generic next-horizon recommendation on that same pair resolves to `suggested_seconds = none` with reason `enough-signal` for the `300s` target.
+  - the completed GB10 `300s` truth corpus that drove the new control policy is:
+    - `m5-balanced db=32 tb=32768` -> `1.162382`
+    - `m5-xlarge db=16 tb=32768` -> `1.169337`
+    - `m5-small db=32 tb=32768` -> `1.257603`
+    - `m5-large db=32 tb=32768` -> `1.285034`
+    - `m5-tiny db=32 tb=32768` -> `1.465999`
+  - the same truth corpus exposed the stale batch-policy failure that motivated the winner audit:
+    - `m5-balanced db=32 tb=32768` -> `val_bpb=1.162382`, `total_tokens=74.9M`
+    - `m5-balanced db=8 tb=49152` -> `val_bpb=1.204865`, `total_tokens=74.0M`
+  - the synthetic selector checks now choose `32 / 32768` over `8 / 49152` both for the anchor throughput plateau and for the new winner batch-audit path.
+
+## Committed History
+
+### March 14, 2026 — `c09e78c` — calibration: add token-accounted multi-horizon projection reporting — score `3` — complexity `11`
 
 **AI-identified within brief, human-shaped (3)**
 
@@ -50,9 +116,11 @@ On this hardware, the default canonical matched benchmark window for optimizatio
 
 - Files:
   - `CHANGELOG.md`
+  - `README.md`
   - `autoresearch_platform/curve_projection.py`
   - `tools/curve_report.py`
   - `tools/calibrate_platform.py`
+  - `docs/assets/autoresearch-everywhere.png`
 - Validation:
   - `python3 -m py_compile autoresearch_platform/curve_projection.py tools/calibrate_platform.py`
   - synthetic positive multi-horizon projection check using `/tmp/test_multi_horizon.py`
@@ -74,8 +142,6 @@ On this hardware, the default canonical matched benchmark window for optimizatio
     - `60s`, `120s`, and `300s` as `truth-match`
     - `900s` as `calibrated-projection`
     - winner `m5-balanced` with projected winner-token counts of `10.9M`, `27.1M`, `75.5M`, and `236.9M` respectively
-
-## Committed History
 
 ### March 14, 2026 — `9614d95` — calibration: add truth-backed CUDA horizon projection to bring-up — score `3` — complexity `6`
 

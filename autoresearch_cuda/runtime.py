@@ -91,13 +91,20 @@ def preferred_flash_attention_generation(capability: tuple[int, int]) -> int | N
     return None
 
 
-def select_flash_attention_repo(capability: tuple[int, int]) -> tuple[str, str]:
+def select_flash_attention_repo(
+    capability: tuple[int, int], *, device_name: str | None = None
+) -> tuple[str, str]:
     if capability == (8, 0):
         return ("Dao-AILab/flash-attention", "flash-attn2")
     if capability == (8, 9):
         return ("Dao-AILab/flash-attention", "flash-attn2")
     if capability == (9, 0):
         return ("varunneal/flash-attention-3", "flash-attn3")
+    if capability[0] >= 10:
+        normalized = _normalized_device_name(device_name)
+        if "gb10" in normalized or "dgx spark" in normalized:
+            return ("Dao-AILab/flash-attention#2268", "flash-attn4")
+        return ("Dao-AILab/flash-attention", "flash-attn4")
     return ("kernels-community/flash-attn3", "flash-attn3")
 
 
@@ -131,7 +138,7 @@ def reference_family_for_capability(capability: tuple[int, int], *, device_name:
 
 def detect_cuda_runtime_profile(capability: tuple[int, int], *, device_name: str | None = None) -> CudaArchitectureProfile:
     architecture_key, architecture_name = classify_cuda_architecture(*capability)
-    repo, backend = select_flash_attention_repo(capability)
+    repo, backend = select_flash_attention_repo(capability, device_name=device_name)
     return CudaArchitectureProfile(
         architecture_key=architecture_key,
         architecture_name=architecture_name,
