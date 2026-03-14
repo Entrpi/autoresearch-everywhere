@@ -31,7 +31,8 @@ class EvalTelemetryRecord:
     canonical_eval_batch_size: int
     canonical_eval_slices: int
     canonical_eval_reference_tokens: int | None
-    time_budget: float
+    time_budget: float | None
+    token_budget: int | None
     time_budget_mode: str
     training_seconds: float
     total_seconds: float

@@ -32,8 +32,14 @@ from autoresearch_mlx.constants import (
 )
 from autoresearch_mlx.checkpoint_policy import (
     AUTO_CHECKPOINT_MIN_TIME_BUDGET_SEC,
+    AUTO_CHECKPOINT_MIN_TOKEN_BUDGET,
+    checkpoint_interval_due,
     choose_auto_checkpoint_decision,
     default_auto_checkpoint_path,
+    default_token_budget_checkpoint_interval,
+    format_interval_label,
+    format_interval_spec,
+    parse_checkpoint_interval_spec,
 )
 from autoresearch_mlx.checkpoints import (
     CHECKPOINT_MODE_EXACT,
@@ -80,7 +86,8 @@ class RunPreset:
 @dataclass(frozen=True)
 class RunConfig:
     preset: str
-    time_budget: float
+    time_budget: float | None
+    token_budget: int | None
     time_budget_mode: str
     seq_len: int
     eval_tokens: int
@@ -125,7 +132,7 @@ class RunConfig:
     checkpoint_mode: str
     checkpoint_save_mode: str
     checkpoint_path: str | None
-    checkpoint_interval: float | None
+    checkpoint_interval: str | None
     resume_from: str | None
 
 
@@ -422,9 +429,10 @@ def resolve_eval_settings(
             f"({limited_by_text}); keeping default canonical eval settings"
         )
 
+    effective_time_budget = config.time_budget if config.time_budget is not None else TIME_BUDGET
     decision = choose_auto_eval_decision(
         config.preset,
-        time_budget_sec=config.time_budget,
+        time_budget_sec=effective_time_budget,
         hardware_key=config.eval_hardware_key,
     )
     if decision.freshness == "stale-age":
@@ -494,7 +502,7 @@ def resolve_eval_settings(
     reason = (
         f"{selected_label} {rung.spec.key} eval rung from {decision.calibration.label}; "
         f"projected overhead {decision.recommendation.projected_overhead_fraction * 100.0:.2f}% "
-        f"for time_budget={config.time_budget:.1f}s; effective_confidence={decision.effective_confidence}; "
+        f"for effective_time_budget={effective_time_budget:.1f}s; effective_confidence={decision.effective_confidence}; "
         f"freshness={decision.freshness}; telemetry_count={decision.telemetry_count}; "
         f"commit_count={decision.telemetry_commit_count}; day_count={decision.telemetry_day_count}; "
         f"stable_rungs={','.join(decision.stable_rungs) or 'none'}"
@@ -805,6 +813,7 @@ def resolve_run_config(args: argparse.Namespace) -> RunConfig:
     config = RunConfig(
         preset=preset_name,
         time_budget=TIME_BUDGET,
+        token_budget=None,
         time_budget_mode=TIME_BUDGET_MODE_TRAIN if args.time_budget_mode is None else args.time_budget_mode,
         seq_len=preset.seq_len,
         eval_tokens=preset.eval_tokens,
@@ -851,7 +860,11 @@ def resolve_run_config(args: argparse.Namespace) -> RunConfig:
             CHECKPOINT_SAVE_MODE_SYNC if args.checkpoint_save_mode is None else args.checkpoint_save_mode
         ),
         checkpoint_path=args.checkpoint_path,
-        checkpoint_interval=args.checkpoint_interval,
+        checkpoint_interval=(
+            format_interval_spec(parse_checkpoint_interval_spec(args.checkpoint_interval))
+            if args.checkpoint_interval is not None
+            else None
+        ),
         resume_from=args.resume_from,
     )
 
@@ -862,6 +875,7 @@ def resolve_run_config(args: argparse.Namespace) -> RunConfig:
         config = replace(
             config,
             time_budget=1.0,
+            token_budget=None,
             seq_len=smoke_seq_len,
             eval_tokens=smoke_seq_len * smoke_device_batch_size,
             canonical_eval_seq_len=smoke_seq_len,
@@ -876,6 +890,7 @@ def resolve_run_config(args: argparse.Namespace) -> RunConfig:
     overrides = {}
     for field in (
         "time_budget",
+        "token_budget",
         "seq_len",
         "eval_tokens",
         "canonical_eval_seq_len",
@@ -891,6 +906,8 @@ def resolve_run_config(args: argparse.Namespace) -> RunConfig:
             overrides[field] = value
     if overrides:
         config = replace(config, **overrides)
+    if args.token_budget is not None and args.time_budget is None:
+        config = replace(config, time_budget=None)
     explicit_canonical_overrides = any(
         getattr(args, field) is not None
         for field in ("canonical_eval_seq_len", "canonical_eval_tokens", "canonical_eval_batch_size")
@@ -935,7 +952,7 @@ def resolve_resume_config(args: argparse.Namespace) -> RunConfig:
     if disallowed:
         raise ValueError(
             "--resume-from restores the saved run configuration. Only "
-            "--time-budget, --time-budget-mode, --checkpoint-path, --checkpoint-interval, and --no-checkpoint may be overridden. "
+            "--time-budget, --token-budget, --time-budget-mode, --checkpoint-path, --checkpoint-interval, and --no-checkpoint may be overridden. "
             f"Got overrides for: {', '.join(disallowed)}"
         )
 
@@ -970,11 +987,15 @@ def resolve_resume_config(args: argparse.Namespace) -> RunConfig:
     run_config.setdefault("eval_calibration_limited_by", None)
     run_config.setdefault("eval_policy_version", EVAL_POLICY_VERSION)
     run_config.setdefault("time_budget_mode", TIME_BUDGET_MODE_TRAIN)
+    run_config.setdefault("token_budget", None)
     run_config.setdefault("checkpoint_mode", CHECKPOINT_MODE_EXACT)
     run_config.setdefault("checkpoint_save_mode", CHECKPOINT_SAVE_MODE_SYNC)
     run_config.setdefault("checkpoint_path", None)
     run_config.setdefault("checkpoint_interval", None)
     run_config["time_budget"] = args.time_budget if args.time_budget is not None else run_config["time_budget"]
+    run_config["token_budget"] = args.token_budget if args.token_budget is not None else run_config["token_budget"]
+    if args.token_budget is not None and args.time_budget is None:
+        run_config["time_budget"] = None
     run_config["time_budget_mode"] = (
         args.time_budget_mode
         if args.time_budget_mode is not None
@@ -1000,10 +1021,12 @@ def resolve_resume_config(args: argparse.Namespace) -> RunConfig:
             if args.checkpoint_path is not None
             else run_config["checkpoint_path"] or args.resume_from
         )
-        run_config["checkpoint_interval"] = (
-            args.checkpoint_interval
-            if args.checkpoint_interval is not None
-            else run_config["checkpoint_interval"]
+        run_config["checkpoint_interval"] = format_interval_spec(
+            parse_checkpoint_interval_spec(
+                args.checkpoint_interval
+                if args.checkpoint_interval is not None
+                else run_config["checkpoint_interval"]
+            )
         )
     run_config["resume_from"] = args.resume_from
     return RunConfig(**run_config)
@@ -1020,6 +1043,7 @@ def parse_args() -> RunConfig:
         help="Named runtime preset. Defaults to the M5-friendly small preset.",
     )
     parser.add_argument("--time-budget", type=float, help="Training budget in seconds.")
+    parser.add_argument("--token-budget", type=int, help="Training token budget.")
     parser.add_argument(
         "--time-budget-mode",
         choices=TIME_BUDGET_MODES,
@@ -1099,14 +1123,16 @@ def parse_args() -> RunConfig:
     )
     parser.add_argument(
         "--checkpoint-interval",
-        type=float,
-        help="Save a checkpoint every N training seconds. If no path is provided, an automatic checkpoint directory is used.",
+        type=str,
+        help="Save a checkpoint every N training seconds or tokens, for example '300', '5m', '50Mtok', or '300s,50Mtok'. If no path is provided, an automatic checkpoint directory is used.",
     )
     parser.add_argument(
         "--resume-from",
         help="Resume training from a checkpoint directory.",
     )
     args = parser.parse_args()
+    if args.time_budget is not None and args.token_budget is not None:
+        raise ValueError("--time-budget and --token-budget are mutually exclusive.")
     if args.resume_from:
         return resolve_resume_config(args)
     return resolve_run_config(args)
@@ -1128,33 +1154,58 @@ def resolve_checkpoint_settings(args: RunConfig, num_params: int) -> tuple[RunCo
     )
 
     if args.checkpoint_interval is not None:
+        interval = parse_checkpoint_interval_spec(args.checkpoint_interval)
+        resolved = replace(
+            args,
+            checkpoint_path=args.checkpoint_path or str(auto_path),
+            checkpoint_interval=format_interval_spec(interval),
+        )
         if args.checkpoint_path is None:
-            return replace(args, checkpoint_path=str(auto_path)), "auto-selected checkpoint path for explicit interval"
-        return args, None
+            return resolved, (
+                "auto-selected checkpoint path for explicit interval "
+                f"({format_interval_label(interval)})"
+            )
+        return resolved, None
 
-    if args.time_budget <= AUTO_CHECKPOINT_MIN_TIME_BUDGET_SEC:
-        return args, None
+    if args.time_budget is not None and args.time_budget > AUTO_CHECKPOINT_MIN_TIME_BUDGET_SEC:
+        decision = choose_auto_checkpoint_decision(
+            num_params / 1e6,
+            checkpoint_mode=args.checkpoint_mode,
+        )
+        checkpoint_path = args.checkpoint_path or str(auto_path)
+        resolved = replace(
+            args,
+            checkpoint_path=checkpoint_path,
+            checkpoint_interval=format_interval_spec(decision.recommendation.interval),
+        )
+        path_source = "existing path" if args.checkpoint_path is not None else "auto path"
+        reason = (
+            f"auto-enabled for time_budget>{AUTO_CHECKPOINT_MIN_TIME_BUDGET_SEC:.0f}s using "
+            f"{decision.calibration.label}; selected {decision.recommendation.interval_label} "
+            f"at {decision.recommendation.save_only_overhead_fraction * 100.0:.4f}% save-only overhead "
+            f"with {path_source}; time_budget_mode={args.time_budget_mode}; checkpoint_mode={args.checkpoint_mode}; "
+            f"checkpoint_save_mode={args.checkpoint_save_mode}; measured resume-ready penalty "
+            f"{decision.calibration.resume_ready_penalty_sec:.3f}s"
+        )
+        return resolved, reason
 
-    decision = choose_auto_checkpoint_decision(
-        num_params / 1e6,
-        checkpoint_mode=args.checkpoint_mode,
-    )
-    checkpoint_path = args.checkpoint_path or str(auto_path)
-    resolved = replace(
-        args,
-        checkpoint_path=checkpoint_path,
-        checkpoint_interval=decision.recommendation.interval_sec,
-    )
-    path_source = "existing path" if args.checkpoint_path is not None else "auto path"
-    reason = (
-        f"auto-enabled for time_budget>{AUTO_CHECKPOINT_MIN_TIME_BUDGET_SEC:.0f}s using "
-        f"{decision.calibration.label}; selected {decision.recommendation.interval_label} "
-        f"at {decision.recommendation.save_only_overhead_fraction * 100.0:.4f}% save-only overhead "
-        f"with {path_source}; time_budget_mode={args.time_budget_mode}; checkpoint_mode={args.checkpoint_mode}; "
-        f"checkpoint_save_mode={args.checkpoint_save_mode}; measured resume-ready penalty "
-        f"{decision.calibration.resume_ready_penalty_sec:.3f}s"
-    )
-    return resolved, reason
+    if args.token_budget is not None and args.token_budget >= AUTO_CHECKPOINT_MIN_TOKEN_BUDGET:
+        checkpoint_path = args.checkpoint_path or str(auto_path)
+        checkpoint_interval = default_token_budget_checkpoint_interval()
+        resolved = replace(
+            args,
+            checkpoint_path=checkpoint_path,
+            checkpoint_interval=format_interval_spec(checkpoint_interval),
+        )
+        path_source = "existing path" if args.checkpoint_path is not None else "auto path"
+        reason = (
+            f"auto-enabled for token_budget>={AUTO_CHECKPOINT_MIN_TOKEN_BUDGET:,} "
+            f"with earlier-of {format_interval_label(checkpoint_interval)} interval "
+            f"and {path_source}; checkpoint_mode={args.checkpoint_mode}; checkpoint_save_mode={args.checkpoint_save_mode}"
+        )
+        return resolved, reason
+
+    return args, None
 
 
 def describe_eval_policy(args: RunConfig) -> str:
@@ -1243,9 +1294,10 @@ def main() -> None:
     args, checkpoint_resolution = resolve_checkpoint_settings(args, num_params)
     print(f"Model config: {asdict(config)}")
     print(f"Run preset: {args.preset} ({PRESETS[args.preset].description})")
+    time_budget_label = f"{args.time_budget}s" if args.time_budget is not None else "None"
     print(
         "Run config: "
-        f"time_budget={args.time_budget}s, time_budget_mode={args.time_budget_mode}, "
+        f"time_budget={time_budget_label}, token_budget={args.token_budget}, time_budget_mode={args.time_budget_mode}, "
         f"seq_len={args.seq_len}, eval_tokens={args.eval_tokens}, "
         f"canonical_eval_seq_len={args.canonical_eval_seq_len}, "
         f"canonical_eval_tokens={args.canonical_eval_tokens}, "
@@ -1338,7 +1390,10 @@ def main() -> None:
     grad_step = make_grad_step_fn(model)
     apply_grads = make_apply_grads_fn(model, optimizer)
 
-    print(f"Time budget: {args.time_budget}s ({args.time_budget_mode})")
+    if args.token_budget is not None:
+        print(f"Token budget: {args.token_budget:,} tokens")
+    else:
+        print(f"Time budget: {args.time_budget}s ({args.time_budget_mode})")
     print(f"Gradient accumulation steps: {grad_accum_steps}")
     if args.checkpoint_interval is not None and args.checkpoint_path is None:
         raise ValueError("--checkpoint-interval requires --checkpoint-path")
@@ -1358,6 +1413,7 @@ def main() -> None:
     checkpoint_count = 0
     checkpoint_write_seconds = 0.0
     last_checkpoint_time = total_training_time
+    last_checkpoint_tokens = step * args.total_batch_size
     checkpoint_run_config = asdict(replace(args, resume_from=None))
     session_step_seconds: list[float] = []
     session_post_step_wall_seconds: list[float] = []
@@ -1373,18 +1429,41 @@ def main() -> None:
             return total_training_time
         return time.perf_counter() - t_budget_start
 
+    def budget_elapsed_tokens() -> int:
+        return step * args.total_batch_size
+
+    def budget_satisfied() -> bool:
+        if args.token_budget is not None:
+            return budget_elapsed_tokens() >= args.token_budget
+        return budget_elapsed_seconds() >= float(args.time_budget)
+
+    def budget_progress() -> float:
+        if args.token_budget is not None:
+            return min(budget_elapsed_tokens() / args.token_budget, 1.0)
+        return min(budget_elapsed_seconds() / float(args.time_budget), 1.0)
+
+    def budget_remaining_label() -> str:
+        if args.token_budget is not None:
+            return f"{max(0, args.token_budget - budget_elapsed_tokens()):,} tok"
+        return f"{max(0.0, float(args.time_budget) - budget_elapsed_seconds()):.0f}s"
+
     def maybe_save_checkpoint(*, force: bool = False) -> None:
-        nonlocal last_checkpoint_time, checkpoint_seconds, checkpoint_count, checkpoint_write_seconds
+        nonlocal last_checkpoint_time, last_checkpoint_tokens, checkpoint_seconds, checkpoint_count, checkpoint_write_seconds
         if args.checkpoint_path is None:
             return
         if async_checkpoint_writer is not None:
             async_checkpoint_writer.check_health()
-        if force and total_training_time == last_checkpoint_time:
+        total_tokens = step * args.total_batch_size
+        if force and total_training_time == last_checkpoint_time and total_tokens == last_checkpoint_tokens:
             return
         if not force:
             if args.checkpoint_interval is None:
                 return
-            if (total_training_time - last_checkpoint_time) < args.checkpoint_interval:
+            if not checkpoint_interval_due(
+                args.checkpoint_interval,
+                elapsed_seconds=total_training_time - last_checkpoint_time,
+                elapsed_tokens=total_tokens - last_checkpoint_tokens,
+            ):
                 return
         if async_checkpoint_writer is None:
             elapsed = save_checkpoint(
@@ -1431,9 +1510,10 @@ def main() -> None:
             checkpoint_count = async_checkpoint_writer.completed_count
             print(f"\nCheckpoint queued to {args.checkpoint_path} at step {step}.")
         last_checkpoint_time = total_training_time
+        last_checkpoint_tokens = total_tokens
 
-    while budget_elapsed_seconds() < args.time_budget:
-        progress = min(budget_elapsed_seconds() / args.time_budget, 1.0)
+    while not budget_satisfied():
+        progress = budget_progress()
         lrm = get_lr_multiplier(progress)
         muon_momentum = get_muon_momentum(step)
         muon_weight_decay = get_weight_decay(progress)
@@ -1471,13 +1551,13 @@ def main() -> None:
         pct_done = 100 * progress
         tok_per_sec = int(args.total_batch_size / dt)
         step_tflops = estimate_step_tflops(num_flops_per_token, args.total_batch_size, dt)
-        remaining = max(0.0, args.time_budget - budget_elapsed_seconds())
+        remaining = budget_remaining_label()
         step_util = percent(step_timing.compute_seconds, dt)
         print(
             f"\rstep {step:05d} ({pct_done:.1f}%) | loss: {debiased_smooth_loss:.6f} | "
             f"lrm: {lrm:.2f} | dt: {dt * 1000:.0f}ms | tok/sec: {tok_per_sec:,} | "
             f"util: {step_util:.1f}% | tflops: {step_tflops:.2f} | "
-            f"epoch: {epoch} | remaining: {remaining:.0f}s    ",
+            f"epoch: {epoch} | remaining: {remaining}    ",
             end="",
             flush=True,
         )
@@ -1593,6 +1673,7 @@ def main() -> None:
             canonical_eval_slices=args.canonical_eval_slices,
             canonical_eval_reference_tokens=args.canonical_eval_reference_tokens,
             time_budget=args.time_budget,
+            token_budget=args.token_budget,
             time_budget_mode=args.time_budget_mode,
             training_seconds=session_training_seconds,
             total_seconds=session_total_seconds,
@@ -1613,8 +1694,11 @@ def main() -> None:
         print(f"proxy_val_bpb:    {proxy_val_bpb:.6f}")
     print(f"training_seconds: {session_training_seconds:.1f}")
     print(f"total_seconds:    {session_total_seconds:.1f}")
+    print(f"time_budget:      {args.time_budget}")
+    print(f"token_budget:     {args.token_budget}")
     print(f"time_budget_mode: {args.time_budget_mode}")
     print(f"budget_elapsed_seconds: {budget_elapsed_at_cutoff:.1f}")
+    print(f"budget_elapsed_tokens_M: {total_tokens / 1e6:.3f}")
     print(f"canonical_rung:   {args.canonical_eval_rung}")
     print(f"eval_hardware_key: {args.eval_hardware_key}")
     print(f"eval_calibration_status: {args.eval_calibration_status}")

@@ -29,30 +29,33 @@ On this hardware, the default canonical matched benchmark window for optimizatio
 
 ## Latest
 
-### New commit — platform/checkpoints: align MLX and CUDA on a shared checkpoint-policy surface — score `3` — complexity `5`
+### New commit — platform/checkpoints: add token-budget checkpoint parity to the MLX trainer — score `3` — complexity `7`
 
 **AI-identified within brief, human-shaped (3)**
 
-- Move the generic checkpoint-policy machinery onto the shared platform surface so MLX and CUDA stop carrying parallel copies of the same interval and recommendation logic.
-  - Meaning: the two backends now speak one common language for checkpoint intervals, human-friendly formatting, calibrated interval recommendations, and auto-enable thresholds, instead of keeping those concepts split between an MLX-only policy file and a CUDA-only parser.
-  - Motivation: once CUDA gained token-budget checkpointing, the duplicated policy surface became the next source of drift. The recommendation logic in MLX was already backend-agnostic, while the new CUDA interval types were also generic enough to live above either runtime.
-  - Purpose: make future checkpoint behavior changes land once on a shared layer, while leaving only the genuinely backend-specific pieces behind.
-  - Add `autoresearch_platform/checkpoint_policy.py` as the shared home for checkpoint interval parsing/formatting, due-at-threshold logic, human-friendly interval recommendations, and the generic calibration/decision dataclasses used by both backends.
-  - Refactor `autoresearch_mlx.checkpoint_policy` and `autoresearch_cuda.checkpoint_policy` into thin backend adapters that keep only their calibration tables and auto-path builders, while reusing the shared platform policy surface everywhere else.
+- Finish the next checkpoint-parity step by giving MLX the same token-budget and token-aware checkpoint behavior that CUDA already has.
+  - Meaning: MLX can now run against a fixed token target, auto-enable checkpoints once that target is long enough to warrant resumability, and accept checkpoint cadence in the same shared forms as CUDA: time-only (`300s`), token-only (`50Mtok`), or hybrid earlier-of (`300s,50Mtok`).
+  - Motivation: after landing the shared checkpoint-policy surface, MLX still had two real parity gaps: it remained a wall-time-only trainer, and its checkpoint trigger still stored cadence as a bare float of seconds.
+  - Purpose: remove the last obvious budget-shape mismatch between MLX and CUDA, make token-denominated checkpoint cadence a first-class cross-backend feature, and ensure long fixed-token MLX runs get the same safe-by-default resumability as long CUDA runs.
+  - Extend `autoresearch_mlx/train.py` with `--token-budget`, token-budget stopping logic, token-aware progress/remaining reporting, and token-budget telemetry fields so MLX can now run fixed-token experiments instead of only fixed-second ones.
+  - Add the CUDA-style automatic checkpoint enablement on the MLX side for token-budgeted runs once `token_budget >= 50_000_000`, using the shared earlier-of `300s or 50M tok` default interval.
+  - Update the MLX trainer to store the canonical checkpoint interval spec string, parse and normalize explicit intervals on input and resume, and use the shared `checkpoint_interval_due(...)` logic instead of a hard-coded elapsed-seconds comparison.
+  - Re-export the shared interval parsing and formatting helpers from `autoresearch_mlx.checkpoint_policy` so the MLX surface stays symmetrical with CUDA while keeping MLX-specific calibration tables and path-building local.
 
 **Grounding**
 
 - Files:
   - `CHANGELOG.md`
-  - `autoresearch_platform/checkpoint_policy.py`
   - `autoresearch_mlx/checkpoint_policy.py`
-  - `autoresearch_cuda/checkpoint_policy.py`
+  - `autoresearch_mlx/eval_telemetry.py`
+  - `autoresearch_mlx/train.py`
 - Validation:
-  - `python3 -m py_compile autoresearch_platform/checkpoint_policy.py autoresearch_mlx/checkpoint_policy.py autoresearch_cuda/checkpoint_policy.py autoresearch_mlx/train.py autoresearch_cuda/train.py`
-  - `python3 - <<'PY' ...` shared-policy smoke covering hybrid interval parsing/formatting and CUDA wrapper reuse (`300s,50Mtok`, `50Mtok`, due-at-threshold behavior)
-  - local MLX runtime smoke remains limited to compile-time validation on this machine because importing the full `autoresearch_mlx` package requires the `mlx` runtime
+  - `python3 -m py_compile autoresearch_mlx/train.py autoresearch_mlx/checkpoint_policy.py autoresearch_platform/checkpoint_policy.py`
+  - `python3 - <<'PY' ...` shared-policy smoke covering hybrid interval parsing/formatting and due-at-threshold behavior (`300s,50Mtok`, `50Mtok`)
+  - `uv run python -m autoresearch_mlx.train --smoke --token-budget 4096 --checkpoint-interval 1024tok --checkpoint-path /tmp/autoresearch-mlx-token-smoke-XXXXXX/checkpoint --benchmark-skip-eval`
+  - `uv run python -m autoresearch_mlx.train --resume-from /tmp/autoresearch-mlx-token-smoke-XXXXXX/checkpoint --token-budget 8192`
 - Measurements:
-  - none yet; this slice is a shared-surface refactor intended to preserve existing behavior while reducing policy drift between MLX and CUDA.
+  - local MLX smoke run saved exact checkpoints repeatedly on the requested `1024tok` cadence and resumed cleanly from `step=8` to `step=16` under the widened `8192` token budget.
 
 ## Committed History
 
