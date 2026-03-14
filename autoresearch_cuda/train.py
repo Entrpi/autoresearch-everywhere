@@ -29,6 +29,7 @@ def build_parser():
         help="Directory containing a previously saved CUDA training checkpoint.",
     )
     parser.add_argument("--time-budget", type=float, help="Training time budget in seconds.")
+    parser.add_argument("--token-budget", type=int, help="Training token budget.")
     parser.add_argument("--seq-len", type=int, help="Sequence length override.")
     parser.add_argument("--window-pattern", type=str, help="Window pattern override.")
     parser.add_argument("--total-batch-size", type=int, help="Total batch size override.")
@@ -42,12 +43,17 @@ def build_parser():
     parser.add_argument(
         "--checkpoint-path",
         type=str,
-        help="Directory to write a final training checkpoint into.",
+        help="Directory to save a resumable training checkpoint. If omitted, eligible runs auto-select a checkpoint directory.",
+    )
+    parser.add_argument(
+        "--checkpoint-interval",
+        type=str,
+        help="Save a checkpoint every N training seconds or tokens, for example '300', '5m', '50Mtok', or '300s,50Mtok'. If no path is provided, an automatic checkpoint directory is used.",
     )
     parser.add_argument(
         "--no-checkpoint",
         action="store_true",
-        help="Disable checkpoint writing even if the runtime would otherwise request it.",
+        help="Disable checkpoint writing, including the automatic defaults for longer and token-budgeted runs.",
     )
     parser.add_argument(
         "--eval-only",
@@ -88,6 +94,8 @@ def build_parser():
 
 
 ARGS = build_parser().parse_args()
+if ARGS.time_budget is not None and ARGS.token_budget is not None:
+    raise SystemExit("--time-budget and --token-budget are mutually exclusive.")
 
 
 def _parse_curve_eval_seconds(value: str | None) -> list[float]:
@@ -128,6 +136,17 @@ from autoresearch_cuda.eval_policy import (
     find_calibration,
     has_calibration_for_preset,
 )
+from autoresearch_cuda.checkpoint_policy import (
+    AUTO_CHECKPOINT_MIN_TIME_BUDGET_SEC,
+    AUTO_CHECKPOINT_MIN_TOKEN_BUDGET,
+    checkpoint_interval_due,
+    default_auto_checkpoint_path,
+    default_time_budget_checkpoint_interval,
+    default_token_budget_checkpoint_interval,
+    format_interval_label,
+    format_interval_spec,
+    parse_checkpoint_interval_spec,
+)
 from autoresearch_cuda.checkpoints import (
     load_checkpoint_metadata,
     load_training_checkpoint,
@@ -148,6 +167,73 @@ def _resolved_run_config_from_checkpoint(checkpoint_dir: str):
     run_config = bundle["run_config"]
     training_state = bundle["training_state"]
     return metadata, bundle, run_config, training_state
+
+
+def _resolve_checkpoint_settings(
+    args,
+    *,
+    preset: str,
+    time_budget: float | None,
+    token_budget: int | None,
+    seq_len: int,
+    depth: int,
+    total_batch_size: int,
+    window_pattern: str,
+    resume_run_config: dict | None = None,
+):
+    if args.no_checkpoint:
+        return None, None, "disabled via --no-checkpoint"
+    auto_path = default_auto_checkpoint_path(
+        preset,
+        seq_len=seq_len,
+        depth=depth,
+        total_batch_size=total_batch_size,
+        window_pattern=window_pattern,
+    )
+    if args.checkpoint_interval is not None:
+        interval = parse_checkpoint_interval_spec(args.checkpoint_interval)
+        checkpoint_path = args.checkpoint_path or args.resume_from or str(auto_path)
+        path_source = (
+            "existing path"
+            if args.checkpoint_path is not None
+            else "resume path"
+            if args.resume_from
+            else "auto path"
+        )
+        reason = (
+            f"using explicit checkpoint interval {format_interval_label(interval)} "
+            f"with {path_source}"
+        )
+        return checkpoint_path, interval, reason
+    if args.resume_from:
+        checkpoint_path = args.checkpoint_path or (resume_run_config or {}).get("checkpoint_path") or args.resume_from
+        checkpoint_interval = parse_checkpoint_interval_spec((resume_run_config or {}).get("checkpoint_interval"))
+        if checkpoint_interval is not None:
+            reason = (
+                f"reusing resume checkpoint path and interval "
+                f"({format_interval_label(checkpoint_interval)})"
+            )
+            return checkpoint_path, checkpoint_interval, reason
+        return checkpoint_path, None, "reusing resume checkpoint path"
+    if time_budget is not None and time_budget > AUTO_CHECKPOINT_MIN_TIME_BUDGET_SEC:
+        checkpoint_path = args.checkpoint_path or str(auto_path)
+        checkpoint_interval = default_time_budget_checkpoint_interval()
+        reason = (
+            f"auto-enabled for time_budget>{AUTO_CHECKPOINT_MIN_TIME_BUDGET_SEC:.0f}s "
+            f"with {format_interval_label(checkpoint_interval)} interval"
+        )
+        return checkpoint_path, checkpoint_interval, reason
+    if token_budget is not None and token_budget >= AUTO_CHECKPOINT_MIN_TOKEN_BUDGET:
+        checkpoint_path = args.checkpoint_path or str(auto_path)
+        checkpoint_interval = default_token_budget_checkpoint_interval()
+        reason = (
+            f"auto-enabled for token_budget>={AUTO_CHECKPOINT_MIN_TOKEN_BUDGET:,} "
+            f"with earlier-of {format_interval_label(checkpoint_interval)} interval"
+        )
+        return checkpoint_path, checkpoint_interval, reason
+    if args.checkpoint_path is not None:
+        return args.checkpoint_path, None, "using explicit checkpoint path without periodic autosaves"
+    return None, None, None
 
 
 def _resolve_run_preset_with_resume(args):
@@ -860,6 +946,13 @@ class MuonAdamW(torch.optim.Optimizer):
 # Model architecture
 MAX_SEQ_LEN = RUN_PRESET.seq_len
 TIME_BUDGET = RUN_PRESET.time_budget
+TOKEN_BUDGET = (
+    int(ARGS.token_budget)
+    if ARGS.token_budget is not None
+    else int(RESUME_BUNDLE["run_config"].get("token_budget"))
+    if RESUME_BUNDLE is not None and RESUME_BUNDLE.get("run_config", {}).get("token_budget") is not None
+    else None
+)
 ASPECT_RATIO = RUN_PRESET.aspect_ratio
 HEAD_DIM = RUN_PRESET.head_dim
 WINDOW_PATTERN = RUN_PRESET.window_pattern
@@ -879,6 +972,46 @@ FINAL_LR_FRAC = RUN_PRESET.final_lr_frac
 # Model size
 DEPTH = RUN_PRESET.depth
 DEVICE_BATCH_SIZE = RUN_PRESET.device_batch_size
+CHECKPOINT_PATH, CHECKPOINT_INTERVAL, CHECKPOINT_DECISION_REASON = _resolve_checkpoint_settings(
+    ARGS,
+    preset=ARGS.preset,
+    time_budget=TIME_BUDGET,
+    token_budget=TOKEN_BUDGET,
+    seq_len=MAX_SEQ_LEN,
+    depth=DEPTH,
+    total_batch_size=TOTAL_BATCH_SIZE,
+    window_pattern=WINDOW_PATTERN,
+    resume_run_config=RESUME_BUNDLE.get("run_config") if RESUME_BUNDLE is not None else None,
+)
+ARGS.checkpoint_path = CHECKPOINT_PATH
+ARGS.checkpoint_interval = format_interval_spec(CHECKPOINT_INTERVAL)
+
+
+def active_budget_mode() -> str:
+    return "tokens" if TOKEN_BUDGET is not None else "seconds"
+
+
+def budget_progress(*, total_training_time: float, total_tokens: int) -> float:
+    if TOKEN_BUDGET is not None:
+        return min(total_tokens / max(TOKEN_BUDGET, 1), 1.0)
+    return min(total_training_time / max(TIME_BUDGET, 1e-9), 1.0)
+
+
+def budget_satisfied(*, total_training_time: float, total_tokens: int) -> bool:
+    if TOKEN_BUDGET is not None:
+        return total_tokens >= TOKEN_BUDGET
+    return total_training_time >= TIME_BUDGET
+
+
+def budget_remaining(*, total_training_time: float, total_tokens: int) -> str:
+    if TOKEN_BUDGET is not None:
+        remaining_tokens = max(0, TOKEN_BUDGET - total_tokens)
+        if remaining_tokens >= 1_000_000:
+            return f"{remaining_tokens / 1_000_000:.1f}M tok"
+        if remaining_tokens >= 1_000:
+            return f"{remaining_tokens / 1_000:.1f}K tok"
+        return f"{remaining_tokens} tok"
+    return f"{max(0.0, TIME_BUDGET - total_training_time):.0f}s"
 
 # ---------------------------------------------------------------------------
 # Setup: tokenizer, model, optimizer, dataloader
@@ -949,8 +1082,6 @@ tokens_per_fwdbwd = DEVICE_BATCH_SIZE * MAX_SEQ_LEN
 assert TOTAL_BATCH_SIZE % tokens_per_fwdbwd == 0
 grad_accum_steps = TOTAL_BATCH_SIZE // tokens_per_fwdbwd
 
-if not ARGS.no_compile:
-    model = torch.compile(model, dynamic=False)
 optimizer = None
 train_loader = None
 x = y = None
@@ -967,6 +1098,11 @@ steady_state_training_time = (
 )
 step = int(RESUME_TRAINING_STATE["step"]) if RESUME_TRAINING_STATE is not None else 0
 total_tokens = int(RESUME_TRAINING_STATE["total_tokens"]) if RESUME_TRAINING_STATE is not None else 0
+smooth_train_loss = (
+    float(RESUME_TRAINING_STATE.get("smooth_train_loss", 0.0))
+    if RESUME_TRAINING_STATE is not None
+    else 0.0
+)
 steady_state_step_count = (
     int(RESUME_TRAINING_STATE.get("steady_state_step_count", 0))
     if RESUME_TRAINING_STATE is not None
@@ -976,16 +1112,96 @@ timing_count_starts_after_step = 10 if RESUME_TRAINING_STATE is None else step
 curve_points: list[dict] = []
 curve_eval_total_seconds = 0.0
 curve_eval_index = 0
+last_train_loss = None
+last_smoothed_train_loss = None
 while curve_eval_index < len(CURVE_EVAL_SECONDS) and CURVE_EVAL_SECONDS[curve_eval_index] <= total_training_time:
     curve_eval_index += 1
+last_checkpoint_training_time = total_training_time
+last_checkpoint_tokens = total_tokens
+
+
+def maybe_save_checkpoint(*, force: bool = False):
+    global checkpoint_saved_to, last_checkpoint_training_time, last_checkpoint_tokens
+    if CHECKPOINT_PATH is None or ARGS.no_checkpoint or optimizer is None:
+        return
+    if not force:
+        if CHECKPOINT_INTERVAL is None:
+            return
+        if not checkpoint_interval_due(
+            CHECKPOINT_INTERVAL,
+            elapsed_seconds=total_training_time - last_checkpoint_training_time,
+            elapsed_tokens=total_tokens - last_checkpoint_tokens,
+        ):
+            return
+    elif (
+        checkpoint_saved_to is not None
+        and total_training_time == last_checkpoint_training_time
+        and total_tokens == last_checkpoint_tokens
+    ):
+        return
+
+    checkpoint_saved_to = save_training_checkpoint(
+        CHECKPOINT_PATH,
+        run_config={
+            "preset": ARGS.preset,
+            "time_budget": RUN_PRESET.time_budget,
+            "token_budget": TOKEN_BUDGET,
+            "seq_len": MAX_SEQ_LEN,
+            "depth": DEPTH,
+            "window_pattern": WINDOW_PATTERN,
+            "device_batch_size": DEVICE_BATCH_SIZE,
+            "total_batch_size": TOTAL_BATCH_SIZE,
+            "grad_accum_steps": grad_accum_steps,
+            "checkpoint_path": CHECKPOINT_PATH,
+            "checkpoint_interval": format_interval_spec(CHECKPOINT_INTERVAL),
+        },
+        training_state={
+            "step": step,
+            "total_training_time": total_training_time,
+            "steady_state_training_time": steady_state_training_time,
+            "steady_state_step_count": steady_state_step_count,
+            "total_tokens": total_tokens,
+            "smooth_train_loss": smooth_train_loss,
+            "epoch": epoch,
+            "hardware_key": hardware_key,
+            "accelerator_architecture": cuda_runtime.reference_family.family_key,
+            "accelerator_compute_capability": f"{cap[0]}.{cap[1]}",
+            "resolved_attention_backend": RESOLVED_ATTENTION_BACKEND,
+        },
+        model=model,
+        optimizer=optimizer,
+    )
+    interval_label = (
+        f" ({format_interval_label(CHECKPOINT_INTERVAL)} interval)"
+        if CHECKPOINT_INTERVAL is not None
+        else ""
+    )
+    last_checkpoint_training_time = total_training_time
+    last_checkpoint_tokens = total_tokens
+    print(f"\nCheckpoint saved to {CHECKPOINT_PATH} at step {step}{interval_label}.")
+    return checkpoint_saved_to
 
 resumed_from = None
+if RESUME_BUNDLE is not None:
+    model.load_state_dict(RESUME_BUNDLE["model_state_dict"])
+if not ARGS.no_compile:
+    model = torch.compile(model, dynamic=False)
+
 if ARGS.eval_only:
     if RESUME_BUNDLE is not None:
-        model.load_state_dict(RESUME_BUNDLE["model_state_dict"])
         resumed_from = ARGS.resume_from
         epoch = int(RESUME_TRAINING_STATE["epoch"])
-    print(f"Time budget: {TIME_BUDGET}s")
+    if TOKEN_BUDGET is not None:
+        print(f"Token budget: {TOKEN_BUDGET}")
+        print(f"Reference time budget: {TIME_BUDGET}s")
+    else:
+        print(f"Time budget: {TIME_BUDGET}s")
+    if CHECKPOINT_PATH is not None:
+        print(f"Checkpoint path: {CHECKPOINT_PATH}")
+    if CHECKPOINT_INTERVAL is not None:
+        print(f"Checkpoint interval: {format_interval_label(CHECKPOINT_INTERVAL)}")
+    if CHECKPOINT_DECISION_REASON is not None:
+        print(f"Checkpoint policy: {CHECKPOINT_DECISION_REASON}")
     print(f"Gradient accumulation steps: {grad_accum_steps}")
     print(f"Compile enabled: {str(not ARGS.no_compile).lower()}")
     print(
@@ -1014,7 +1230,6 @@ else:
     x, y, epoch = next(train_loader)  # prefetch first batch
 
     if RESUME_BUNDLE is not None:
-        model.load_state_dict(RESUME_BUNDLE["model_state_dict"])
         optimizer.load_state_dict(RESUME_BUNDLE["optimizer_state_dict"])
         resumed_from = ARGS.resume_from
         resume_step = int(RESUME_TRAINING_STATE["step"])
@@ -1028,7 +1243,17 @@ else:
                 f"Deterministic loader replay drifted: resumed epoch {epoch}, expected {resume_epoch}."
             )
 
-    print(f"Time budget: {TIME_BUDGET}s")
+    if TOKEN_BUDGET is not None:
+        print(f"Token budget: {TOKEN_BUDGET}")
+        print(f"Reference time budget: {TIME_BUDGET}s")
+    else:
+        print(f"Time budget: {TIME_BUDGET}s")
+    if CHECKPOINT_PATH is not None:
+        print(f"Checkpoint path: {CHECKPOINT_PATH}")
+    if CHECKPOINT_INTERVAL is not None:
+        print(f"Checkpoint interval: {format_interval_label(CHECKPOINT_INTERVAL)}")
+    if CHECKPOINT_DECISION_REASON is not None:
+        print(f"Checkpoint policy: {CHECKPOINT_DECISION_REASON}")
     print(f"Gradient accumulation steps: {grad_accum_steps}")
     print(f"Compile enabled: {str(not ARGS.no_compile).lower()}")
     if resumed_from is not None:
@@ -1036,10 +1261,12 @@ else:
             "Resume checkpoint: "
             f"{resumed_from} (step={RESUME_TRAINING_STATE['step']}, "
             f"training_seconds={RESUME_TRAINING_STATE['total_training_time']:.1f}, "
+            f"total_tokens={RESUME_TRAINING_STATE['total_tokens']}, "
             f"loader_batches={loader_advance_steps})"
         )
 
-# Schedules (all based on progress = training_time / TIME_BUDGET)
+# Schedules follow the active stop budget: time when using --time-budget,
+# tokens when using --token-budget.
 
 def get_lr_multiplier(progress):
     if progress < WARMUP_RATIO:
@@ -1163,15 +1390,19 @@ def maybe_run_curve_eval(
 # ---------------------------------------------------------------------------
 
 if not ARGS.eval_only:
-    if total_training_time >= TIME_BUDGET:
-        print(
-            f"Training budget already satisfied at resume point "
-            f"({total_training_time:.1f}s >= {TIME_BUDGET:.1f}s); skipping training loop."
-        )
+    if budget_satisfied(total_training_time=total_training_time, total_tokens=total_tokens):
+        if TOKEN_BUDGET is not None:
+            print(
+                f"Training budget already satisfied at resume point "
+                f"({total_tokens} >= {TOKEN_BUDGET}); skipping training loop."
+            )
+        else:
+            print(
+                f"Training budget already satisfied at resume point "
+                f"({total_training_time:.1f}s >= {TIME_BUDGET:.1f}s); skipping training loop."
+            )
 
-    while True:
-        if total_training_time >= TIME_BUDGET:
-            break
+    while not budget_satisfied(total_training_time=total_training_time, total_tokens=total_tokens):
         torch.cuda.synchronize()
         t0 = time.time()
         for _micro_step in range(grad_accum_steps):
@@ -1182,7 +1413,7 @@ if not ARGS.eval_only:
             loss.backward()
             x, y, epoch = next(train_loader)
 
-        progress = min(total_training_time / TIME_BUDGET, 1.0)
+        progress = budget_progress(total_training_time=total_training_time, total_tokens=total_tokens)
         lrm = get_lr_multiplier(progress)
         muon_momentum = get_muon_momentum(step)
         muon_weight_decay = get_weight_decay(progress)
@@ -1211,12 +1442,14 @@ if not ARGS.eval_only:
         ema_beta = 0.9
         smooth_train_loss = ema_beta * smooth_train_loss + (1 - ema_beta) * train_loss_f
         debiased_smooth_loss = smooth_train_loss / (1 - ema_beta**(step + 1))
+        last_train_loss = train_loss_f
+        last_smoothed_train_loss = debiased_smooth_loss
         pct_done = 100 * progress
         tok_per_sec = int(TOTAL_BATCH_SIZE / dt)
         mfu = 100 * num_flops_per_token * TOTAL_BATCH_SIZE / dt / H100_BF16_PEAK_FLOPS
-        remaining = max(0, TIME_BUDGET - total_training_time)
+        remaining = budget_remaining(total_training_time=total_training_time, total_tokens=total_tokens)
 
-        print(f"\rstep {step:05d} ({pct_done:.1f}%) | loss: {debiased_smooth_loss:.6f} | lrm: {lrm:.2f} | dt: {dt*1000:.0f}ms | tok/sec: {tok_per_sec:,} | mfu: {mfu:.1f}% | epoch: {epoch} | remaining: {remaining:.0f}s    ", end="", flush=True)
+        print(f"\rstep {step:05d} ({pct_done:.1f}%) | loss: {debiased_smooth_loss:.6f} | lrm: {lrm:.2f} | dt: {dt*1000:.0f}ms | tok/sec: {tok_per_sec:,} | mfu: {mfu:.1f}% | epoch: {epoch} | remaining: {remaining}    ", end="", flush=True)
 
         if step == 0:
             gc.collect()
@@ -1237,40 +1470,10 @@ if not ARGS.eval_only:
             curve_eval_total_seconds=curve_eval_total_seconds,
             curve_eval_index=curve_eval_index,
         )
-
-        if total_training_time >= TIME_BUDGET:
-            break
+        maybe_save_checkpoint()
 
     print()  # newline after \r training log
-
-    if ARGS.checkpoint_path and not ARGS.no_checkpoint:
-        checkpoint_saved_to = save_training_checkpoint(
-            ARGS.checkpoint_path,
-            run_config={
-                "preset": ARGS.preset,
-                "time_budget": RUN_PRESET.time_budget,
-                "seq_len": MAX_SEQ_LEN,
-                "depth": DEPTH,
-                "window_pattern": WINDOW_PATTERN,
-                "device_batch_size": DEVICE_BATCH_SIZE,
-                "total_batch_size": TOTAL_BATCH_SIZE,
-                "grad_accum_steps": grad_accum_steps,
-            },
-            training_state={
-                "step": step,
-                "total_training_time": total_training_time,
-                "steady_state_training_time": steady_state_training_time,
-                "steady_state_step_count": steady_state_step_count,
-                "total_tokens": total_tokens,
-                "epoch": epoch,
-                "hardware_key": hardware_key,
-                "accelerator_architecture": cuda_runtime.reference_family.family_key,
-                "accelerator_compute_capability": f"{cap[0]}.{cap[1]}",
-                "resolved_attention_backend": RESOLVED_ATTENTION_BACKEND,
-            },
-            model=model,
-            optimizer=optimizer,
-        )
+    maybe_save_checkpoint(force=True)
 
 # Final eval
 val_bpb = None
@@ -1308,6 +1511,7 @@ if CURVE_EVAL_SECONDS:
         "accelerator_compute_capability": f"{cap[0]}.{cap[1]}",
         "resolved_attention_backend": RESOLVED_ATTENTION_BACKEND,
         "time_budget": TIME_BUDGET,
+        "token_budget": TOKEN_BUDGET,
         "sequence_len": MAX_SEQ_LEN,
         "window_pattern": WINDOW_PATTERN,
         "depth": DEPTH,
@@ -1373,6 +1577,12 @@ if eval_calibration_limited_by is not None:
 if eval_policy_version is not None:
     print(f"eval_policy_version: {eval_policy_version}")
 print(f"eval_only:        {str(ARGS.eval_only).lower()}")
+if last_train_loss is not None:
+    print(f"last_train_loss:  {last_train_loss:.6f}")
+if last_smoothed_train_loss is not None:
+    print(f"smoothed_train_loss: {last_smoothed_train_loss:.6f}")
+if TOKEN_BUDGET is not None:
+    print(f"token_budget:     {TOKEN_BUDGET}")
 print(f"training_seconds: {total_training_time:.1f}")
 print(f"total_seconds:    {t_end - t_start:.1f}")
 print(f"peak_vram_mb:     {peak_vram_mb:.1f}")
@@ -1397,5 +1607,7 @@ print(f"preferred_flash_attention_repo: {cuda_runtime.selected_flash_attention_r
 print(f"resolved_attention_backend: {RESOLVED_ATTENTION_BACKEND}")
 if checkpoint_saved_to is not None:
     print(f"checkpoint_path:  {checkpoint_saved_to}")
+if CHECKPOINT_INTERVAL is not None:
+    print(f"checkpoint_interval: {format_interval_spec(CHECKPOINT_INTERVAL)}")
 if resumed_from is not None:
     print(f"resumed_from:     {resumed_from}")

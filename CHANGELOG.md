@@ -29,7 +29,48 @@ On this hardware, the default canonical matched benchmark window for optimizatio
 
 ## Latest
 
-### New commit — calibration: validate the refined GB10 default loop end to end — score `3` — complexity `12`
+### New commit — cuda/checkpoints: mirror MLX auto-checkpoint defaults in the CUDA trainer — score `3` — complexity `8`
+
+**AI-identified within brief, human-shaped (3)**
+
+- Bring the CUDA trainer up to MLX-style default checkpoint behavior for long runs, and extend the same defaulting path to token-budgeted runs.
+  - Meaning: standalone CUDA training runs now have a real notion of automatic resumability instead of relying on the user to remember `--checkpoint-path` every time.
+  - Motivation: the recent GB10 token-budget experiment showed the gap clearly. MLX would have defaulted to a resumable checkpoint for a long run, while the equivalent CUDA run produced only logs and curve JSON.
+  - Purpose: make long CUDA runs safe by default in the same way MLX runs already are, while preserving `--no-checkpoint` as the clear opt-out.
+  - Add a dedicated CUDA checkpoint-policy helper plus richer `--checkpoint-interval` parsing, auto path selection, and periodic checkpoint saves in `autoresearch_cuda/train.py`, so long wall-clock runs follow the same default-on checkpoint story as MLX while still accepting explicit human-friendly intervals such as `300`, `5m`, `50Mtok`, or `300s,50Mtok`.
+  - Extend that same resolution flow to token-budgeted runs with a default earlier-of trigger (`300s` wall time or `50M` tokens), so long fixed-token research runs become resumable by default without forcing short token-budget probes to save checkpoints too aggressively.
+  - Preserve resume compatibility by canonicalizing checkpoint interval specs into the checkpoint payload and teaching the CUDA trainer to reuse either older scalar second intervals or the new mixed time-and-token intervals on resume.
+  - Fix the operator-facing exact-resume path so saved CUDA checkpoints round-trip cleanly: the trainer now restores the plain model weights before `torch.compile`, persists `smooth_train_loss` in checkpoint state, and reports the checkpoint directory rather than the inner `checkpoint.pt` bundle file.
+  - Add `tools/profile_cuda_resume_convergence.py`, a CUDA-side convergence harness that runs `continuous 601s` versus `301s + exact resume to 601s`, captures the trainer's own final `val_bpb` and loss summaries, and writes a single JSON/Markdown bundle for GB10 validation.
+
+**Grounding**
+
+- Files:
+  - `CHANGELOG.md`
+  - `autoresearch_cuda/checkpoint_policy.py`
+  - `autoresearch_cuda/checkpoints.py`
+  - `autoresearch_cuda/train.py`
+  - `tools/profile_cuda_resume_convergence.py`
+- Validation:
+  - `python3 -m py_compile autoresearch_cuda/train.py autoresearch_cuda/checkpoint_policy.py autoresearch_cuda/checkpoints.py tools/profile_cuda_resume_convergence.py`
+  - `python3 - <<'PY' ...` policy smoke checking explicit interval parsing (`300`, `5m`, `50Mtok`, `300s,50Mtok`), due-at-threshold behavior, and mixed-interval round-tripping
+  - `PYTHONPATH=. python3 -m autoresearch_cuda.train --help`
+  - synced the current tree to `/home/ent/autoresearch-everywhere-sync` on the GB10 and ran `tools/profile_cuda_resume_convergence.py` inside `vllm-node-tf5-fa4:sm120`, with artifacts persisted under `/home/ent/results/analysis/cuda_resume_convergence_301_601_v3`
+- Measurements:
+  - the GB10 FA4 convergence benchmark now completes end to end:
+    - `continuous 601s`: `val_bpb=1.136824`, `last_train_loss=2.950929`, `smoothed_train_loss=2.996308`, `total_tokens=155.7M`, `num_steps=4753`
+    - `301s + exact resume to 601s`: `val_bpb=1.136700`, `last_train_loss=2.977801`, `smoothed_train_loss=3.028601`, `total_tokens=158.0M`, `num_steps=4822`
+  - the resumed-vs-continuous deltas on that run are:
+    - `val_bpb=-0.000124`
+    - `last_train_loss=+0.026872`
+    - `smoothed_train_loss=+0.032293`
+    - `total_tokens=+2.3M`
+    - `num_steps=+69`
+  - this validates that the auto-checkpointed exact-resume path is operational on GB10, but it is not yet a strict matched-step convergence proof because the resumed arm processed more steps/tokens by the final time-budget cutoff.
+
+## Committed History
+
+### March 14, 2026 — `066d4e6` — calibration: validate GB10 defaults and add token-budget projections — score `3` — complexity `18`
 
 **AI-identified within brief, human-shaped (3)**
 
@@ -47,18 +88,30 @@ On this hardware, the default canonical matched benchmark window for optimizatio
   - Purpose: make the README tell the same story the code and docs now support: MLX on M4/M5 and CUDA on DGX Spark / GB10 are both first-class on-ramps, while other hardware still goes through the more general calibration-first path.
   - Clean up the README `Project Structure` section into a grouped directory map so it reinforces the same top-level story instead of dumping a redundant flat file inventory.
   - Extend the DGX Spark setup guide with the grounded `900s` GB10 head-to-head reference so the doc now shows both the strict `300s` winner and the deeper longer-horizon crossover where `m5-xlarge` overtakes `m5-balanced`.
+- Add a token-target calibration mode so the same projection and batch-audit loop can choose defaults against a fixed training-signal budget, with `100M` tokens as the default target.
+  - Meaning: the shared curve machinery no longer assumes that calibration objectives are wall-clock horizons. The same truth-backed projection flow can now compare families at a fixed token budget, which is the first step toward the token-centric research path suggested by the Spark depth-scaling discussion.
+  - Motivation: the GB10 `300s` and `900s` curves already showed that crossover behavior is easier to reason about in token space than in wall-clock space, especially when deeper or larger models process different numbers of tokens by the same time horizon.
+  - Purpose: let calibration answer both “what wins at `300s`?” and “what wins by `100M` tokens?” without forking the projector, and keep the generic curve-report path aligned with the calibration runner.
+  - Generalize `autoresearch_platform/curve_projection.py` so projections, truth matching, calibration residuals, and multi-horizon comparisons can target either seconds or tokens while preserving observed-at-target and truth-match behavior.
+  - Wire `tools/calibrate_platform.py` and `tools/curve_report.py` through the same token-aware objective contract, including `--target-budget-mode tokens --target-tokens 100000000`, token-aware truth-curve loading, token-aware winner batch audit, and token-aware report labels while keeping the deeper seconds-based scaling confirmation as a separate opt-in path.
+  - Add real `--token-budget` stopping support to `autoresearch_cuda/train.py`, then use it on GB10 to run the `m5-xlarge depth=12 db=16 tb=32768` permutation to a measured `50.0M` tokens under FA4. That run finished at `val_bpb=1.104588`, which beats the fixed-`50M` `m5-balanced` interpolation (`1.237246`) and slightly improves on the earlier `m5-xlarge` depth-8 projections (`1.122165` at `db=16/tb=32768`, `1.129174` at `db=32/tb=65536`).
 
 **Grounding**
 
 - Validation:
   - `python3 -m py_compile autoresearch_platform/curve_projection.py tools/calibrate_platform.py`
+  - `python3 -m py_compile autoresearch_platform/curve_projection.py tools/calibrate_platform.py tools/curve_report.py`
   - `python3 tools/changelog_scores.py --group-by entry --format csv --include-latest --verify`
+  - `python3 tools/curve_report.py /tmp/gb10_token_truth/gb10_m5small_curve300.json /tmp/gb10_token_truth/scaling_m5-balanced_seq1024_db32_tb32768_SSSSL.curve.json /tmp/gb10_token_truth/scaling_m5-xlarge_seq2048_db32_tb65536_L.curve.json --truth-curves-dir /tmp/gb10_token_truth --target-budget-mode tokens --target-tokens 100000000`
+  - `python3 tools/calibrate_platform.py --help`
   - replayed `/home/ent/cuda_fast_projection_fa4_v18` on the GB10 host with the patched code synced to `/home/ent/autoresearch-everywhere-sync`
 - Measurements:
   - winner batch audit replay now picks `m5-balanced db=32 tb=32768` with exact-batch truth backing (`300s val_bpb=1.162382`)
   - merged longer-horizon replay now says `m5-balanced` at `300s` (`1.161863`) and `m5-xlarge` at `900s` (`1.094201`)
-
-## Committed History
+  - the new `100M` token projection replay over the GB10 truth corpus currently ranks:
+    - `m5-xlarge` -> `1.146323`
+    - `m5-balanced` -> `1.252032`
+    - `m5-small` -> `1.317671`
 
 ### March 14, 2026 — `9a0d5e6` — calibration: turn truth-backed projection into a usable GB10 bring-up loop — score `3` — complexity `19`
 

@@ -74,7 +74,7 @@ def save_training_checkpoint(
             "bundle": CHECKPOINT_BUNDLE,
         },
     )
-    return paths["bundle"]
+    return paths["root"]
 
 
 def load_checkpoint_metadata(checkpoint_dir: str | Path) -> dict[str, Any]:
