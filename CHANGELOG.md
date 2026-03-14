@@ -29,44 +29,30 @@ On this hardware, the default canonical matched benchmark window for optimizatio
 
 ## Latest
 
-### New commit — cuda/checkpoints: mirror MLX auto-checkpoint defaults in the CUDA trainer — score `3` — complexity `8`
+### New commit — platform/checkpoints: align MLX and CUDA on a shared checkpoint-policy surface — score `3` — complexity `5`
 
 **AI-identified within brief, human-shaped (3)**
 
-- Bring the CUDA trainer up to MLX-style default checkpoint behavior for long runs, and extend the same defaulting path to token-budgeted runs.
-  - Meaning: standalone CUDA training runs now have a real notion of automatic resumability instead of relying on the user to remember `--checkpoint-path` every time.
-  - Motivation: the recent GB10 token-budget experiment showed the gap clearly. MLX would have defaulted to a resumable checkpoint for a long run, while the equivalent CUDA run produced only logs and curve JSON.
-  - Purpose: make long CUDA runs safe by default in the same way MLX runs already are, while preserving `--no-checkpoint` as the clear opt-out.
-  - Add a dedicated CUDA checkpoint-policy helper plus richer `--checkpoint-interval` parsing, auto path selection, and periodic checkpoint saves in `autoresearch_cuda/train.py`, so long wall-clock runs follow the same default-on checkpoint story as MLX while still accepting explicit human-friendly intervals such as `300`, `5m`, `50Mtok`, or `300s,50Mtok`.
-  - Extend that same resolution flow to token-budgeted runs with a default earlier-of trigger (`300s` wall time or `50M` tokens), so long fixed-token research runs become resumable by default without forcing short token-budget probes to save checkpoints too aggressively.
-  - Preserve resume compatibility by canonicalizing checkpoint interval specs into the checkpoint payload and teaching the CUDA trainer to reuse either older scalar second intervals or the new mixed time-and-token intervals on resume.
-  - Fix the operator-facing exact-resume path so saved CUDA checkpoints round-trip cleanly: the trainer now restores the plain model weights before `torch.compile`, persists `smooth_train_loss` in checkpoint state, and reports the checkpoint directory rather than the inner `checkpoint.pt` bundle file.
-  - Add `tools/profile_cuda_resume_convergence.py`, a CUDA-side convergence harness that runs `continuous 601s` versus `301s + exact resume to 601s`, captures the trainer's own final `val_bpb` and loss summaries, and writes a single JSON/Markdown bundle for GB10 validation.
+- Move the generic checkpoint-policy machinery onto the shared platform surface so MLX and CUDA stop carrying parallel copies of the same interval and recommendation logic.
+  - Meaning: the two backends now speak one common language for checkpoint intervals, human-friendly formatting, calibrated interval recommendations, and auto-enable thresholds, instead of keeping those concepts split between an MLX-only policy file and a CUDA-only parser.
+  - Motivation: once CUDA gained token-budget checkpointing, the duplicated policy surface became the next source of drift. The recommendation logic in MLX was already backend-agnostic, while the new CUDA interval types were also generic enough to live above either runtime.
+  - Purpose: make future checkpoint behavior changes land once on a shared layer, while leaving only the genuinely backend-specific pieces behind.
+  - Add `autoresearch_platform/checkpoint_policy.py` as the shared home for checkpoint interval parsing/formatting, due-at-threshold logic, human-friendly interval recommendations, and the generic calibration/decision dataclasses used by both backends.
+  - Refactor `autoresearch_mlx.checkpoint_policy` and `autoresearch_cuda.checkpoint_policy` into thin backend adapters that keep only their calibration tables and auto-path builders, while reusing the shared platform policy surface everywhere else.
 
 **Grounding**
 
 - Files:
   - `CHANGELOG.md`
+  - `autoresearch_platform/checkpoint_policy.py`
+  - `autoresearch_mlx/checkpoint_policy.py`
   - `autoresearch_cuda/checkpoint_policy.py`
-  - `autoresearch_cuda/checkpoints.py`
-  - `autoresearch_cuda/train.py`
-  - `tools/profile_cuda_resume_convergence.py`
 - Validation:
-  - `python3 -m py_compile autoresearch_cuda/train.py autoresearch_cuda/checkpoint_policy.py autoresearch_cuda/checkpoints.py tools/profile_cuda_resume_convergence.py`
-  - `python3 - <<'PY' ...` policy smoke checking explicit interval parsing (`300`, `5m`, `50Mtok`, `300s,50Mtok`), due-at-threshold behavior, and mixed-interval round-tripping
-  - `PYTHONPATH=. python3 -m autoresearch_cuda.train --help`
-  - synced the current tree to `/home/ent/autoresearch-everywhere-sync` on the GB10 and ran `tools/profile_cuda_resume_convergence.py` inside `vllm-node-tf5-fa4:sm120`, with artifacts persisted under `/home/ent/results/analysis/cuda_resume_convergence_301_601_v3`
+  - `python3 -m py_compile autoresearch_platform/checkpoint_policy.py autoresearch_mlx/checkpoint_policy.py autoresearch_cuda/checkpoint_policy.py autoresearch_mlx/train.py autoresearch_cuda/train.py`
+  - `python3 - <<'PY' ...` shared-policy smoke covering hybrid interval parsing/formatting and CUDA wrapper reuse (`300s,50Mtok`, `50Mtok`, due-at-threshold behavior)
+  - local MLX runtime smoke remains limited to compile-time validation on this machine because importing the full `autoresearch_mlx` package requires the `mlx` runtime
 - Measurements:
-  - the GB10 FA4 convergence benchmark now completes end to end:
-    - `continuous 601s`: `val_bpb=1.136824`, `last_train_loss=2.950929`, `smoothed_train_loss=2.996308`, `total_tokens=155.7M`, `num_steps=4753`
-    - `301s + exact resume to 601s`: `val_bpb=1.136700`, `last_train_loss=2.977801`, `smoothed_train_loss=3.028601`, `total_tokens=158.0M`, `num_steps=4822`
-  - the resumed-vs-continuous deltas on that run are:
-    - `val_bpb=-0.000124`
-    - `last_train_loss=+0.026872`
-    - `smoothed_train_loss=+0.032293`
-    - `total_tokens=+2.3M`
-    - `num_steps=+69`
-  - this validates that the auto-checkpointed exact-resume path is operational on GB10, but it is not yet a strict matched-step convergence proof because the resumed arm processed more steps/tokens by the final time-budget cutoff.
+  - none yet; this slice is a shared-surface refactor intended to preserve existing behavior while reducing policy drift between MLX and CUDA.
 
 ## Committed History
 

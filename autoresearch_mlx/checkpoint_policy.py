@@ -1,48 +1,21 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
 from pathlib import Path
+
+from autoresearch_platform.checkpoint_policy import (
+    AUTO_CHECKPOINT_MIN_TIME_BUDGET_SEC,
+    DEFAULT_HUMAN_INTERVAL_POLICY,
+    AutoCheckpointDecision,
+    CheckpointCalibration,
+    CheckpointIntervalRecommendation,
+    HumanIntervalPolicy,
+    choose_auto_checkpoint_decision as choose_shared_auto_checkpoint_decision,
+    recommend_interval_for_cost,
+    select_checkpoint_calibration as select_shared_checkpoint_calibration,
+)
 
 from .constants import CHECKPOINT_DIR
 from .checkpoints import CHECKPOINT_MODE_EXACT, CHECKPOINT_MODE_WEIGHTS_ONLY
-
-
-AUTO_CHECKPOINT_MIN_TIME_BUDGET_SEC = 300.0
-
-
-@dataclass(frozen=True)
-class CheckpointCalibration:
-    key: str
-    label: str
-    checkpoint_mode: str
-    max_params_m: float
-    checkpoint_cost_sec: float
-    resume_ready_penalty_sec: float
-    source: str
-    resume_ready_source: str = ""
-    notes: str = ""
-
-
-@dataclass(frozen=True)
-class HumanIntervalPolicy:
-    label: str
-    anchor_interval_sec: float
-    save_only_overhead_cap_fraction: float
-    friendly_intervals_sec: tuple[float, ...]
-
-
-@dataclass(frozen=True)
-class CheckpointIntervalRecommendation:
-    interval_sec: float
-    interval_label: str
-    save_only_overhead_fraction: float
-    failed_shorter_interval_label: str | None
-
-
-@dataclass(frozen=True)
-class AutoCheckpointDecision:
-    calibration: CheckpointCalibration
-    recommendation: CheckpointIntervalRecommendation
 
 
 DEFAULT_CHECKPOINT_CALIBRATIONS = (
@@ -93,81 +66,15 @@ DEFAULT_CHECKPOINT_CALIBRATIONS = (
 )
 
 
-DEFAULT_HUMAN_INTERVAL_POLICY = HumanIntervalPolicy(
-    label="Generalized human-friendly interval scan anchored at hourly <= 0.1% save-only overhead",
-    anchor_interval_sec=3600.0,
-    save_only_overhead_cap_fraction=0.001,
-    friendly_intervals_sec=(
-        60.0,
-        120.0,
-        300.0,
-        600.0,
-        900.0,
-        1800.0,
-        3600.0,
-        7200.0,
-        14400.0,
-        28800.0,
-        43200.0,
-        86400.0,
-    ),
-)
-
-
-def save_only_overhead_fraction(*, checkpoint_cost_sec: float, interval_sec: float) -> float:
-    return checkpoint_cost_sec / interval_sec
-
-
-def format_interval_label(interval_sec: float) -> str:
-    if interval_sec < 3600.0:
-        return f"{interval_sec / 60.0:.0f}m"
-    if interval_sec < 86400.0:
-        return f"{interval_sec / 3600.0:.0f}h"
-    return f"{interval_sec / 86400.0:.0f}d"
-
-
 def select_checkpoint_calibration(
     num_params_m: float,
     checkpoint_mode: str,
     calibrations: tuple[CheckpointCalibration, ...] = DEFAULT_CHECKPOINT_CALIBRATIONS,
 ) -> CheckpointCalibration:
-    matching = tuple(
-        calibration
-        for calibration in calibrations
-        if calibration.checkpoint_mode == checkpoint_mode
-    )
-    if not matching:
-        raise ValueError(f"No checkpoint calibration registered for checkpoint_mode={checkpoint_mode!r}.")
-    for calibration in matching:
-        if num_params_m <= calibration.max_params_m:
-            return calibration
-    return matching[-1]
-
-
-def recommend_interval_for_cost(
-    checkpoint_cost_sec: float,
-    policy: HumanIntervalPolicy = DEFAULT_HUMAN_INTERVAL_POLICY,
-) -> CheckpointIntervalRecommendation:
-    last_fail_label = None
-    for interval_sec in policy.friendly_intervals_sec:
-        overhead_fraction = save_only_overhead_fraction(
-            checkpoint_cost_sec=checkpoint_cost_sec,
-            interval_sec=interval_sec,
-        )
-        if overhead_fraction <= policy.save_only_overhead_cap_fraction:
-            return CheckpointIntervalRecommendation(
-                interval_sec=interval_sec,
-                interval_label=format_interval_label(interval_sec),
-                save_only_overhead_fraction=overhead_fraction,
-                failed_shorter_interval_label=last_fail_label,
-            )
-        last_fail_label = format_interval_label(interval_sec)
-    minimum_interval_sec = checkpoint_cost_sec / policy.save_only_overhead_cap_fraction
-    return CheckpointIntervalRecommendation(
-        interval_sec=minimum_interval_sec,
-        interval_label=f">= {minimum_interval_sec / 60.0:.2f} min",
-        save_only_overhead_fraction=policy.save_only_overhead_cap_fraction,
-        failed_shorter_interval_label=last_fail_label,
+    return select_shared_checkpoint_calibration(
+        num_params_m,
+        checkpoint_mode,
+        calibrations=calibrations,
     )
 
 
@@ -177,13 +84,12 @@ def choose_auto_checkpoint_decision(
     policy: HumanIntervalPolicy = DEFAULT_HUMAN_INTERVAL_POLICY,
     calibrations: tuple[CheckpointCalibration, ...] = DEFAULT_CHECKPOINT_CALIBRATIONS,
 ) -> AutoCheckpointDecision:
-    calibration = select_checkpoint_calibration(
+    return choose_shared_auto_checkpoint_decision(
         num_params_m,
         checkpoint_mode,
-        calibrations,
+        policy=policy,
+        calibrations=calibrations,
     )
-    recommendation = recommend_interval_for_cost(calibration.checkpoint_cost_sec, policy)
-    return AutoCheckpointDecision(calibration=calibration, recommendation=recommendation)
 
 
 def default_auto_checkpoint_path(
