@@ -237,26 +237,22 @@ Important parts:
 - bind-mount `~/.cache/autoresearch` into `/root/.cache/autoresearch`
 - reserve at least `100g` of SHM for this GB10 / FA4 path
 
-The latest full FA4-backed fast calibration on GB10 currently emits:
-
-- preset: `m5-balanced`
-- `seq_len=1024`
-- `window_pattern=SSSSL`
-- `device_batch_size=8`
-- `total_batch_size=49152`
-- `grad_accum_steps=6`
-
-That is the operating point the current calibration flow is trying to hand to the research loop.
-
-Do not compare the short local-search probe throughput from that stage against the table below. The local-search pass is only a brief shape-selection check. The grounded throughput, token-count, and memory numbers below come from full `300s` truth runs and are the right reference for practical comparisons.
-
-Separately, the grounded `300s` truth-curve reference presets on GB10 are:
+The grounded throughput, token-count, and memory numbers below come from full `300` second runs and are the right reference for practical comparisons.
 
 | Preset          | Best first use on GB10                 |  Seq len | Depth / d_model / heads |    Params | Batch (device / total tokens) | Window    | Approx. tok/s | 300s steps | 300s tokens | Approx. peak memory | `300s val_bpb` |
 | --------------- | -------------------------------------- | -------: | ----------------------- | --------: | ----------------------------- | --------- | ------------: | ---------: | ----------: | ------------------: | ---------------: |
 | `m5-small`    | fastest throughput, capacity limited   |  `512` | `4 / 256 / 2`         | `11.5M` | `32 / 32768`                | `L`     |   `~523.9k` |   `4528` |  `148.4M` |        `~1.16 GB` |     `1.257603` |
 | `m5-balanced` | current strict `300s` quality winner | `1024` | `6 / 384 / 3`         | `26.3M` | `32 / 32768`                | `SSSSL` |   `~267.2k` |   `2286` |   `74.9M` |        `~3.59 GB` |     `1.162382` |
 | `m5-xlarge`   | near-frontier scaling candidate        | `2048` | `8 / 512 / 4`         | `50.3M` | `16 / 32768`                | `L`     |   `~146.1k` |   `1241` |   `40.7M` |        `~6.00 GB` |     `1.169337` |
+
+For the optional deeper horizon beyond the default `300s` objective, the grounded `900s` GB10 head-to-head so far is:
+
+| Preset          | Role at `900s`               |  Seq len | Batch (device / total tokens) | Window    | Approx. tok/s | 900s steps | 900s tokens | Approx. peak memory | `900s val_bpb` |
+| --------------- | ------------------------------ | -------: | ----------------------------- | --------- | ------------: | ---------: | ----------: | ------------------: | ---------------: |
+| `m5-balanced` | stronger default-side long run | `1024` | `32 / 32768`                | `SSSSL` |   `~265.9k` |   `7140` |  `234.0M` |        `~3.59 GB` |     `1.137573` |
+| `m5-xlarge`   | longer-horizon leader          | `2048` | `32 / 65536`                | `L`     |   `~155.8k` |   `2084` |  `136.6M` |       `~11.55 GB` |     `1.094196` |
+
+That `900s` comparison is a deeper reference, not the default bring-up target. The standard calibration path is still centered on the practical `300s` objective unless you explicitly opt into longer-horizon confirmation work.
 
 So the practical read is:
 

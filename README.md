@@ -4,7 +4,7 @@
 
 ## About AUTORESEARCH-EVERYWHERE
 
-AUTORESEARCH-EVERYWHERE is the glue, generalization, and experiment-logging regime half of the autoresearch core from [karpathy/autoresearch](https://github.com/karpathy/autoresearch). The main idea is simple: clone the repo on a machine, let it figure out a good starting configuration for that hardware, and then run the usual autonomous agent research loop from there. MLX is the best-supported path today, and CUDA is already beyond feature parity with upstream here: it runs behind the same generic entrypoints, engine boundary, and architecture-aware runtime layer rather than living as a separate legacy path. The long-term goal is to let more backends plug into the same workflow instead of growing separate forks.
+AUTORESEARCH-EVERYWHERE is the glue, generalization, and experiment-logging regime half of the autoresearch core from [karpathy/autoresearch](https://github.com/karpathy/autoresearch). The main idea is simple: clone the repo on a machine, let it figure out a good starting configuration for that hardware, and then run the usual autonomous agent research loop from there. Two validated fast-track lanes exist today: Apple M4/M5 on MLX and DGX Spark / GB10 on CUDA with FA4. Beyond those reference paths, the repo still uses the same generic entrypoints, engine boundary, and architecture-aware runtime layer rather than growing separate hardware forks. The long-term goal is to let more backends plug into one workflow instead of splitting into per-platform branches.
 
 [![Autonomy Golf Badge](docs/autonomy-golf-badge.svg)](#autonomy-golf)
 
@@ -15,11 +15,16 @@ By policy, this branch is reserved for AI-shaped or AI-authored code changes; fu
 
 ## Start Here
 
-Because this project targets broad platform support, the first step is to find the fastest path to being productive on the machine you actually have. The best setup for a recent ML-focused professional laptop is not the best setup for a recent $40K datacenter GPU, so the repo is designed to calibrate model shape, batch shape, and evaluation cost to your hardware before it starts the usual autonomous agent research loop.
+Because this project targets broad platform support, the first step is to find the fastest path to being productive on the machine you actually have. The best setup for a recent ML-focused professional laptop is not the best setup for a recent Blackwell workstation, so the repo is designed to calibrate model shape, batch shape, and evaluation cost to your hardware before it starts the usual autonomous agent research loop.
 
-Initial development was validated against an M5 MacBook Pro, so there are ready-to-use M5 presets you can jump into immediately. More presets should follow with broader adoption and further testing. If this is a new machine, do bring-up first. If this is a base M4 or M5 machine, you can usually skip straight to training.
+Two validated fast-track paths exist today:
 
-**Default path requirements:** Apple Silicon, macOS, Python 3.10+, and [uv](https://docs.astral.sh/uv/). That is the deepest bring-up path today. NVIDIA CUDA is also a first-class path behind the same top-level commands, with a different hardware/runtime envelope.
+- Apple M4 / M5 on MLX
+- DGX Spark / GB10 on CUDA with the FlashAttention 4 runtime from [docs/dgx-spark-setup.md](docs/dgx-spark-setup.md)
+
+If you are on one of those reference machines, skip to the matching fast-track section below. If this is a different machine, use the generic bring-up flow first.
+
+**Validated fast-track requirements:** either Apple Silicon, macOS, Python 3.10+, and [uv](https://docs.astral.sh/uv/), or a DGX Spark / GB10 host with the FA4-capable runtime image described in [docs/dgx-spark-setup.md](docs/dgx-spark-setup.md). Other NVIDIA hardware still uses the same top-level commands, but Spark / GB10 is the currently validated CUDA shortcut path.
 
 ## Running an Agent
 
@@ -31,9 +36,37 @@ Example prompt:
 Read program.md, verify the setup, and start a new experiment loop. NEVER STOP EXPERIMENTING.
 ```
 
-### New Hardware Bring-Up
+## M4 / M5 Fast Track
 
-If you are on unfamiliar hardware, start here:
+If you have a base M4 or M5 Mac, the shipped presets are a good starting point and you can usually skip straight to training. If you are on an M4 Pro, M4 Max, M5 Pro, or M5 Max system, `calibrate.py` should still give you a better starting point than the base-machine presets:
+
+```bash
+uv sync
+uv run prepare.py
+uv run train.py --smoke
+uv run train.py
+```
+
+The current MLX port and shipped defaults were developed on and tested against an Apple M5 MacBook Pro with 32 GB unified memory and a 10-core GPU. They are a calibrated starting point for that workstation class, not a promise of universal optimality across the whole M5 family.
+
+## DGX Spark / GB10 Fast Track
+
+If you are on a DGX Spark / GB10 box then follow (or have your agent follow) [docs/dgx-spark-setup.md](docs/dgx-spark-setup.md) to get your runtime setup with FlashAttention 4. The normal loop is smoke, fast calibration, then the research run using the calibrated CUDA default.
+
+Inside the `vllm-node-tf5-fa4:sm120` runtime image, the shortcut is:
+
+```bash
+python prepare.py --engine cuda
+python train.py --engine cuda --smoke
+python -u calibrate.py --engine cuda --mode fast --output-dir /output
+python train.py --engine cuda
+```
+
+That path is already validated on real GB10 hardware and you can expect `val_bpb` to start in the 1.16 range *before* the autoresearch loop.
+
+## Other Hardware Bring-Up
+
+If you are not on one of the validated fast-track paths above, start here:
 
 ```bash
 uv sync
@@ -61,28 +94,15 @@ The report includes:
 It also writes the candidate default into the local platform-default cache for that engine and hardware key. After that, real kernel-lab integration tests can use the calibrated point for the current device automatically instead of requiring a manual preset every time.
 
 By default, the bring-up sweep only considers the practical MLX preset families (`m5-tiny`, `m5-small`, `m5-balanced`, `m5-large`, and `m5-xlarge`). Add `--presets ...,upstream` only when you explicitly want the slower upstream-style reference included in the same run.
-On Apple Silicon, `prepare.py`, `train.py`, and `calibrate.py` default to the MLX engine automatically. On NVIDIA, use the same commands with `--engine cuda`. MLX currently has the deepest local eval-calibration and default-promotion flow. CUDA already runs as a first-class engine with the same front-door commands, architecture-aware runtime behavior, and the stronger automated trace-review path in kernel-lab.
+On Apple Silicon, `prepare.py`, `train.py`, and `calibrate.py` default to the MLX engine automatically. On NVIDIA, use the same commands with `--engine cuda`. MLX currently has the deepest local eval-calibration and default-promotion flow. CUDA already runs as a first-class engine with the same front-door commands, architecture-aware runtime behavior, and the stronger automated trace-review path in kernel-lab; DGX Spark / GB10 is the currently validated fast-track reference for that CUDA path.
 
 For the actual implementation details, see [docs/platform-calibration.md](docs/platform-calibration.md).
 
 The same tool is also the intended re-check path after meaningful model or runtime changes. If you land something that could change the best settings across machines or preset sizes, rerun platform calibration.
 
-### M4 / M5 Shortcut
+### Other NVIDIA Hardware
 
-If you have a base M4 or M5 Mac, the shipped presets are a good starting point and you can usually skip bring-up to start directly with training. If you are on an M4 Pro, M4 Max, M5 Pro, or M5 Max system, `calibrate.py` should give you a better starting point than the base-machine presets:
-
-```bash
-uv sync
-uv run prepare.py
-uv run train.py --smoke
-uv run train.py
-```
-
-The current MLX port and shipped defaults were developed on and tested against an Apple M5 MacBook Pro with 32 GB unified memory and a 10-core GPU. They are a calibrated starting point for that workstation class, not a promise of universal optimality across the whole M5 family.
-
-### CUDA / NVIDIA Shortcut
-
-If you are on a single NVIDIA GPU, use the same front-door commands, just select the CUDA engine:
+CUDA is still a first-class engine on A100-class Ampere, Ada, Hopper, B200, and other NVIDIA systems. The same front-door commands apply there too:
 
 ```bash
 uv sync
@@ -91,24 +111,13 @@ uv run train.py --engine cuda --smoke
 uv run calibrate.py --engine cuda --mode fast
 ```
 
-That gives you:
+What changes by hardware is the runtime envelope and what is already validated:
 
-- the same top-level `prepare.py`, `train.py`, `calibrate.py`, and `kernel-lab.py` entrypoints as MLX
-- a CUDA runtime layer that distinguishes major families such as A100-class Ampere, Ada, Hopper, and Blackwell variants including GB10
-- exact sync checkpoints, resume, and checkpoint-backed eval calibration in the core CUDA trainer loop
-- a first-class kernel-lab tracing workflow with Nsight Systems and Nsight Compute
-- a deeper parity and rollout assessment in [docs/cuda-core-loop-parity.md](docs/cuda-core-loop-parity.md)
+- DGX Spark / GB10 is the current validated CUDA fast track
+- other NVIDIA hardware should still run `calibrate.py` first and treat the report as the source of truth
+- CUDA keeps the same top-level entrypoints as MLX, plus architecture-aware runtime behavior, exact checkpoints, and the stronger automated kernel-lab trace-review path
 
-MLX currently goes further on automatic eval calibration and default promotion. CUDA currently goes further on automated backend trace review.
-
-The first full FA4-backed fast bring-up on a real GB10 system selected `m5-balanced` as the recommended CUDA starting point, with:
-
-- `seq_len=512`
-- `window_pattern=L`
-- `device_batch_size=32`
-- `total_batch_size=32768`
-
-For the concrete DGX Spark / GB10 host, container, FA4, and profiling setup path, see [docs/dgx-spark-setup.md](docs/dgx-spark-setup.md).
+For the concrete GB10 host, container, FA4, and profiling setup path, see [docs/dgx-spark-setup.md](docs/dgx-spark-setup.md). For the broader parity and rollout assessment, see [docs/cuda-core-loop-parity.md](docs/cuda-core-loop-parity.md).
 
 ## How It Is Organized
 
@@ -287,10 +296,10 @@ Current project snapshot from [CHANGELOG.md](CHANGELOG.md):
 
 | Metric | Value |
 | --- | --- |
-| Mean autonomy score | `3.13 / 6` |
-| Mean complexity | `6.62 / commit` |
+| Mean autonomy score | `3.12 / 6` |
+| Mean complexity | `6.69 / commit` |
 | Mean score per top-level bullet | `3.19 / 6` |
-| History covered | `85` commits across `14` subsystems |
+| History covered | `86` commits across `14` subsystems |
 <!-- autonomy-golf-snapshot:end -->
 
 Refresh with:
@@ -323,29 +332,28 @@ Artifacts are written under `results/overnight/<run-tag>/`, and the summary ledg
 
 ## Project Structure
 
-```text
-prepare.py            — generic data prep entrypoint with engine dispatch
-train.py              — generic training entrypoint with engine dispatch
-calibrate.py          — one-button platform bring-up calibration
-kernel-lab.py         — top-level backend-specific kernel lab entrypoint
-program.md            — generic agent instructions
-autoresearch_mlx/prepare.py        — direct MLX data prep implementation
-autoresearch_mlx/train.py          — direct MLX training implementation
-autoresearch_mlx/     — MLX data/model/optimizer implementation
-autoresearch_mlx/lab.py            — MLX kernel lab CLI implementation
-autoresearch_mlx/lab_profile.py    — MLX profile/extract/orchestrate heuristics
-autoresearch_mlx/lab_trace.py      — MLX capture-mode and trace artifact support
-autoresearch_mlx/lab_workspace.py  — MLX mutable workspace + fixed bench harness
-autoresearch_lab/     — shared kernel-lab boundary
-docs/program-mlx.md        — MLX agent instructions
-docs/kernel-lab.md         — kernel-lab design and workflow note
-docs/assets/         — generated docs assets such as the progress figure
-notebooks/           — exploratory notebooks and analysis
-results/results.tsv  — experiment result ledger
-autoresearch_cuda/    — CUDA implementation and runtime policy
-tools/               — manual sweep and calibration tooling
-pyproject.toml        — dependencies
-```
+Top-level entrypoints:
+
+- `prepare.py` — generic data preparation entrypoint with engine dispatch
+- `train.py` — generic training entrypoint with engine dispatch
+- `calibrate.py` — platform bring-up and default-selection entrypoint
+- `kernel-lab.py` — backend-specific kernel-lab entrypoint
+- `program.md` — generic agent instructions
+
+Core packages:
+
+- `autoresearch_mlx/` — MLX trainer, data, model, optimizer, and MLX-specific kernel-lab helpers
+- `autoresearch_cuda/` — CUDA trainer, runtime policy, checkpoints, and attention/runtime integration
+- `autoresearch_platform/` — shared engine boundary, calibration logic, and cross-backend projection/reporting code
+- `autoresearch_lab/` — shared kernel-lab orchestration and promotion boundary
+
+Supporting directories:
+
+- `docs/` — setup guides, architecture notes, workflow docs, and generated assets
+- `tools/` — reporting, calibration helpers, and manual longer-sweep tooling
+- `results/` — run artifacts and summary ledgers
+- `notebooks/` — exploratory analysis
+- `pyproject.toml` — project metadata and dependencies
 
 ## Other Upstream Forks
 

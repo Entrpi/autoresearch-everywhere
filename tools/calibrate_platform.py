@@ -30,6 +30,9 @@ from autoresearch_platform.curve_projection import (  # noqa: E402
     build_projection_calibration,
     compare_projected_curves,
     compare_multi_horizon_curves,
+    estimate_projected_curve,
+    final_training_seconds,
+    final_val_bpb,
     load_curve_artifact,
     load_curve_artifacts_from_dir,
     project_curve,
@@ -1134,11 +1137,12 @@ def run_batch_profile_audit(
 ) -> dict:
     preset_config = engine.preset_catalog()[preset]
     seen: set[tuple[int, int]] = set()
-    curve_eval_seconds = (
-        (max(3.0, min(5.0, time_budget / 2.0)), time_budget)
-        if time_budget > 5.0
-        else (time_budget,)
-    )
+    if time_budget > 5.0:
+        early = max(3.0, min(5.0, time_budget / 3.0))
+        mid = max(early + 1.0, min(time_budget - 1.0, time_budget * 0.67))
+        curve_eval_seconds = tuple(sorted({early, mid, time_budget}))
+    else:
+        curve_eval_seconds = (time_budget,)
 
     def run_candidates(candidates: list[tuple[int, int]]) -> list[ProbeResult]:
         rows: list[ProbeResult] = []
@@ -1198,22 +1202,94 @@ def summarize_batch_audit_rows(
     rows: list[ProbeResult],
     *,
     target_seconds: float,
+    calibration=None,
+    truth_curves=None,
+    artifact_dir: Path | None = None,
 ) -> list[dict]:
     summarized: list[dict] = []
     for row in rows:
         projection = None
+        estimate = None
+        exact_truth_finals = []
+        if truth_curves:
+            for truth_curve in truth_curves:
+                if truth_curve.preset != row.preset:
+                    continue
+                if truth_curve.device_batch_size != row.device_batch_size:
+                    continue
+                if truth_curve.total_batch_size != row.total_batch_size:
+                    continue
+                truth_horizon = final_training_seconds(truth_curve)
+                truth_final = final_val_bpb(truth_curve)
+                if truth_horizon is None or truth_horizon < target_seconds or truth_final is None:
+                    continue
+                exact_truth_finals.append(float(truth_final))
         if row.curve_output_path:
             curve_path = Path(row.curve_output_path)
+            if not curve_path.exists() and artifact_dir is not None:
+                resolved = artifact_dir / curve_path.name
+                if resolved.exists():
+                    curve_path = resolved
             if curve_path.exists():
                 try:
-                    projection = project_curve(load_curve_artifact(curve_path), target_seconds=target_seconds)
+                    curve = load_curve_artifact(curve_path)
+                    distinct_steps = {point.step for point in curve.curve_points}
+                    distinct_tokens = {point.total_tokens for point in curve.curve_points}
+                    distinct_times = {round(point.actual_training_seconds, 6) for point in curve.curve_points}
+                    meaningful_curve = len(distinct_steps) >= 2 and len(distinct_tokens) >= 2 and len(distinct_times) >= 2
+                    if meaningful_curve:
+                        projection = project_curve(curve, target_seconds=target_seconds)
+                        estimate = estimate_projected_curve(
+                            curve,
+                            target_seconds=target_seconds,
+                            calibration=calibration,
+                            truth_curves=truth_curves,
+                        )
                 except Exception:
                     projection = None
+                    estimate = None
+        exact_truth_mean = statistics.fmean(exact_truth_finals) if exact_truth_finals else None
+        exact_truth_std = (
+            max(0.01, statistics.stdev(exact_truth_finals))
+            if len(exact_truth_finals) > 1
+            else 0.01
+            if exact_truth_finals
+            else None
+        )
         projected_tokens = (
-            projection.projected_tokens
+            estimate.summary.projected_tokens
+            if estimate is not None
+            else projection.projected_tokens
             if projection is not None
             else (row.steady_state_tok_per_sec * target_seconds if row.steady_state_tok_per_sec is not None else None)
         )
+        projected_val_bpb = (
+            exact_truth_mean
+            if exact_truth_mean is not None
+            else estimate.corrected_val_bpb
+            if estimate is not None
+            else projection.projected_val_bpb
+            if projection is not None
+            else row.val_bpb
+        )
+        projection_source = (
+            "truth-match-exact-batch"
+            if exact_truth_mean is not None
+            else estimate.projection_source if estimate is not None else None
+        )
+        projection_std = (
+            exact_truth_std
+            if exact_truth_std is not None
+            else estimate.projection_std if estimate is not None else None
+        )
+        matched_truth_count = (
+            len(exact_truth_finals)
+            if exact_truth_finals
+            else estimate.matched_truth_count if estimate is not None else 0
+        )
+        selection_val_bpb = projected_val_bpb
+        if projection_source in {None, "generic-projection", "calibrated-extrapolation"} and row.val_bpb is not None:
+            selection_val_bpb = row.val_bpb
         projected_optimizer_steps = (
             projected_tokens / row.total_batch_size
             if projected_tokens is not None and row.total_batch_size > 0
@@ -1235,7 +1311,8 @@ def summarize_batch_audit_rows(
                 "grad_accum_steps": row.grad_accum_steps,
                 "status": row.status,
                 "observed_val_bpb": row.val_bpb,
-                "projected_val_bpb": projection.projected_val_bpb if projection is not None else row.val_bpb,
+                "projected_val_bpb": projected_val_bpb,
+                "selection_val_bpb": selection_val_bpb,
                 "projected_tokens": projected_tokens,
                 "projected_optimizer_steps": projected_optimizer_steps,
                 "projected_microsteps": projected_microsteps,
@@ -1245,9 +1322,24 @@ def summarize_batch_audit_rows(
                 "control_overhead_percent": row.control_overhead_percent,
                 "peak_vram_mb": row.peak_vram_mb,
                 "curve_points": row.curve_eval_points,
-                "projection_method": None if projection is None else projection.method,
-                "fit_r2": None if projection is None else projection.fit_r2,
-                "fit_sigma": None if projection is None else projection.fit_sigma,
+                "projection_method": (
+                    estimate.summary.projection_method
+                    if estimate is not None
+                    else None if projection is None else projection.method
+                ),
+                "projection_source": projection_source,
+                "projection_std": projection_std,
+                "matched_truth_count": matched_truth_count,
+                "fit_r2": (
+                    estimate.fit_r2
+                    if estimate is not None
+                    else None if projection is None else projection.fit_r2
+                ),
+                "fit_sigma": (
+                    estimate.fit_sigma
+                    if estimate is not None
+                    else None if projection is None else projection.fit_sigma
+                ),
                 "stdout_path": row.stdout_path,
                 "stderr_path": row.stderr_path,
             }
@@ -1259,8 +1351,17 @@ def select_best_batch_audit_row(
     rows: list[ProbeResult],
     *,
     target_seconds: float,
+    calibration=None,
+    truth_curves=None,
+    artifact_dir: Path | None = None,
 ) -> tuple[ProbeResult, list[dict], dict]:
-    audit_rows = summarize_batch_audit_rows(rows, target_seconds=target_seconds)
+    audit_rows = summarize_batch_audit_rows(
+        rows,
+        target_seconds=target_seconds,
+        calibration=calibration,
+        truth_curves=truth_curves,
+        artifact_dir=artifact_dir,
+    )
     keyed = {
         (row.device_batch_size, row.total_batch_size): row
         for row in rows
@@ -1272,7 +1373,7 @@ def select_best_batch_audit_row(
     if projected_rows:
         projected_rows.sort(
             key=lambda row: (
-                row["projected_val_bpb"],
+                row["selection_val_bpb"],
                 row["observed_val_bpb"] if row["observed_val_bpb"] is not None else float("inf"),
                 -(row["projected_optimizer_steps"] or 0.0),
                 row["grad_accum_steps"] if row["grad_accum_steps"] is not None else float("inf"),
@@ -1331,6 +1432,9 @@ def run_local_search(
     batch_profile: ProbeResult,
     seq_lens: list[int] | None,
     window_patterns: list[str] | None,
+    eval_seq_len: int | None,
+    eval_tokens: int | None,
+    eval_batch_size: int | None,
 ) -> list[ProbeResult]:
     preset_config = engine.preset_catalog()[preset]
     seq_candidates = seq_lens or [preset_config.seq_len]
@@ -1346,11 +1450,14 @@ def run_local_search(
                     time_budget=time_budget,
                     logs_dir=logs_dir,
                     stage="local-search",
-                    benchmark_skip_eval=True,
+                    benchmark_skip_eval=False,
                     seq_len=seq_len,
                     window_pattern=window_pattern,
                     device_batch_size=device_batch,
                     total_batch_size=total_batch,
+                    eval_seq_len=eval_seq_len,
+                    eval_tokens=eval_tokens,
+                    eval_batch_size=eval_batch_size,
                     no_checkpoint=True,
                 )
             )
@@ -3578,9 +3685,27 @@ def run_platform_calibration(args) -> dict:
             winner_probability_threshold=args.winner_probability_threshold,
             projected_margin_threshold=args.projected_margin_threshold,
         )
+        merged_longer_horizon_rows = (
+            rows_for_horizon(deepest_horizon_rows, PROJECTION_TARGET_SECONDS)
+            + rows_for_horizon(scaling_confirmation_horizon_rows, SCALING_TARGET_SECONDS)
+        )
+        merged_longer_horizon_decisions = [
+            item
+            for item in (
+                resolve_horizon_control_decision(
+                    deepest_horizon_decisions,
+                    target_seconds=PROJECTION_TARGET_SECONDS,
+                ),
+                resolve_horizon_control_decision(
+                    scaling_confirmation_horizon_decisions,
+                    target_seconds=SCALING_TARGET_SECONDS,
+                ),
+            )
+            if item is not None
+        ]
         longer_horizon_projection = summarize_longer_horizon_projection(
-            scaling_confirmation_horizon_rows,
-            scaling_confirmation_horizon_decisions,
+            merged_longer_horizon_rows,
+            merged_longer_horizon_decisions,
             target_seconds=PROJECTION_TARGET_SECONDS,
             scaling_target_seconds=SCALING_TARGET_SECONDS,
         )
@@ -3633,6 +3758,9 @@ def run_platform_calibration(args) -> dict:
             winner_batch_profile, audit_rows, winner_row = select_best_batch_audit_row(
                 batch_audit_payload["rows"],
                 target_seconds=PROJECTION_TARGET_SECONDS,
+                calibration=projection_calibration,
+                truth_curves=truth_curves,
+                artifact_dir=logs_dir,
             )
             winner_batch_audit_phase = save_phase(
                 output_dir,
@@ -3702,6 +3830,9 @@ def run_platform_calibration(args) -> dict:
                 batch_profile=winner_batch_profile,
                 seq_lens=local_seq_lens,
                 window_patterns=local_window_patterns,
+                eval_seq_len=None if truth_eval_contract is None else truth_eval_contract["eval_seq_len"],
+                eval_tokens=None if truth_eval_contract is None else truth_eval_contract["eval_tokens"],
+                eval_batch_size=None if truth_eval_contract is None else truth_eval_contract["eval_batch_size"],
             )
             best_local = select_best_local_row(local_rows)
             local_phase = save_phase(

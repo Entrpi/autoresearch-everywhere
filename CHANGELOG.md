@@ -29,7 +29,38 @@ On this hardware, the default canonical matched benchmark window for optimizatio
 
 ## Latest
 
-### New commit — calibration: turn truth-backed projection into a usable GB10 bring-up loop — score `3` — complexity `19`
+### New commit — calibration: validate the refined GB10 default loop end to end — score `3` — complexity `12`
+
+**AI-identified within brief, human-shaped (3)**
+
+- Validate the tightened calibration loop on the real FA4-backed GB10 path and close the remaining gap between the emitted operating point and the actual `300s` winner.
+  - Meaning: the next slice is no longer about designing the projection and batch-audit machinery. It is about proving that the synced default path on GB10 now emits the right default, the right batch shape, and the right operator-facing UX.
+  - Motivation: the just-landed control-loop changes are meaningful only if the next end-to-end GB10 run shows that winner-batch audit, friendly narration, and default no-`900s` behavior all work together on the real Spark path.
+  - Purpose: turn the new calibration policy from a locally grounded design into a fully validated default workflow for the next cloned GB10 bring-up.
+  - Replayed the finished FA4-backed `v18` GB10 bundle against the patched local code and fixed the two remaining calibration-control bugs: winner batch audit now prefers exact same-batch truth when available and ignores degenerate one-step audit curves, and the longer-horizon summary now keeps the standalone `300s` confirmation winner instead of recomputing the target winner from the `900s` run.
+  - Promoted observed-at-target rows to first-class projection results in the shared curve layer so actual `300s` and `900s` confirmations are not damped back toward older truth anchors.
+  - Made local search quality-aware by running its short probes with eval enabled, so the emitted default can no longer drift on pure throughput after winner-batch audit has settled the batch shape.
+  - The replayed GB10 result now recovers the known good operating point for `m5-balanced`: winner batch audit selects `db=32`, `tb=32768`, while the merged longer-horizon summary says `m5-balanced` wins at `300s` and `m5-xlarge` wins at `900s`.
+- Refactor the README front door so DGX Spark / GB10 is treated as a validated fast-track path alongside M4 / M5 instead of reading like a secondary CUDA appendix.
+  - Meaning: the top-level repo story now explicitly has two validated fast tracks, then a generic bring-up path for everything else.
+  - Motivation: the GB10 / Spark path is already real enough that burying it behind “generic CUDA” undersells the actual validated state of the project.
+  - Purpose: make the README tell the same story the code and docs now support: MLX on M4/M5 and CUDA on DGX Spark / GB10 are both first-class on-ramps, while other hardware still goes through the more general calibration-first path.
+  - Clean up the README `Project Structure` section into a grouped directory map so it reinforces the same top-level story instead of dumping a redundant flat file inventory.
+  - Extend the DGX Spark setup guide with the grounded `900s` GB10 head-to-head reference so the doc now shows both the strict `300s` winner and the deeper longer-horizon crossover where `m5-xlarge` overtakes `m5-balanced`.
+
+**Grounding**
+
+- Validation:
+  - `python3 -m py_compile autoresearch_platform/curve_projection.py tools/calibrate_platform.py`
+  - `python3 tools/changelog_scores.py --group-by entry --format csv --include-latest --verify`
+  - replayed `/home/ent/cuda_fast_projection_fa4_v18` on the GB10 host with the patched code synced to `/home/ent/autoresearch-everywhere-sync`
+- Measurements:
+  - winner batch audit replay now picks `m5-balanced db=32 tb=32768` with exact-batch truth backing (`300s val_bpb=1.162382`)
+  - merged longer-horizon replay now says `m5-balanced` at `300s` (`1.161863`) and `m5-xlarge` at `900s` (`1.094201`)
+
+## Committed History
+
+### March 14, 2026 — `9a0d5e6` — calibration: turn truth-backed projection into a usable GB10 bring-up loop — score `3` — complexity `19`
 
 **AI-identified within brief, human-shaped (3)**
 
@@ -92,8 +123,6 @@ On this hardware, the default canonical matched benchmark window for optimizatio
     - `m5-balanced db=32 tb=32768` -> `val_bpb=1.162382`, `total_tokens=74.9M`
     - `m5-balanced db=8 tb=49152` -> `val_bpb=1.204865`, `total_tokens=74.0M`
   - the synthetic selector checks now choose `32 / 32768` over `8 / 49152` both for the anchor throughput plateau and for the new winner batch-audit path.
-
-## Committed History
 
 ### March 14, 2026 — `c09e78c` — calibration: add token-accounted multi-horizon projection reporting — score `3` — complexity `11`
 

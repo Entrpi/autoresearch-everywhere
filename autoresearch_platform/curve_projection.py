@@ -958,6 +958,33 @@ def estimate_projected_curve(
             calibration_sample_count=0,
             correction_mean=0.0,
         )
+    observed_target = (
+        summary.observed_seconds is not None
+        and summary.observed_seconds + 1e-9 >= target_seconds
+    )
+    if observed_target:
+        truth_estimate = estimate_from_matching_truth(
+            curve,
+            truth_curves=truth_curves or [],
+            target_seconds=target_seconds,
+        )
+        matched_truth_count = truth_estimate[2] if truth_estimate is not None else 0
+        return ProjectedCurveEstimate(
+            summary=summary,
+            corrected_val_bpb=summary.projected_val_bpb,
+            projection_std=max(
+                PROJECTION_STD_FLOOR,
+                summary.projection_fit_sigma or PROJECTION_STD_FLOOR,
+            ),
+            fit_r2=summary.projection_fit_r2,
+            fit_sigma=summary.projection_fit_sigma,
+            calibration_horizon_seconds=target_seconds,
+            calibration_horizon_tokens=summary.projected_tokens,
+            calibration_sample_count=matched_truth_count,
+            correction_mean=0.0,
+            projection_source="observed-target",
+            matched_truth_count=matched_truth_count,
+        )
     truth_estimate = estimate_from_matching_truth(
         curve,
         truth_curves=truth_curves or [],
@@ -1132,7 +1159,7 @@ def compare_projected_curves(
         )
         top_margin_snr = top_margin / pooled_std
     fit_quality_ok = (
-        top.projection_source == "truth-match"
+        top.projection_source in {"truth-match", "observed-target"}
         or top.fit_r2 is None
         or top.fit_r2 >= MIN_PROJECTION_R2
     )
@@ -1142,6 +1169,8 @@ def compare_projected_curves(
     )
     if top.projection_source == "truth-match":
         confidence_reason = "truth-backed" if top.matched_truth_count >= 2 else "single-truth-match"
+    elif top.projection_source == "observed-target":
+        confidence_reason = "observed-target"
     elif top.projection_source == "calibrated-extrapolation":
         confidence_reason = "extrapolative"
     elif not fit_quality_ok:
@@ -1196,6 +1225,8 @@ def compare_projected_curves(
 
 
 def projection_confidence_label(estimate: ProjectedCurveEstimate) -> str:
+    if estimate.projection_source == "observed-target":
+        return "high"
     if estimate.confidence_reason == "extrapolative":
         return "low"
     if estimate.confidence_reason == "low_r2":
