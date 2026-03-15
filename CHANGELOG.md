@@ -29,7 +29,58 @@ On this hardware, the default canonical matched benchmark window for optimizatio
 
 ## Latest
 
-### New commit — platform/checkpoints: add token-budget checkpoint parity to the MLX trainer — score `3` — complexity `7`
+### New commit — platform/checkpoints: unify exact checkpoint policy and telemetry across MLX and CUDA — score `3` — complexity `12`
+
+**AI-identified within brief, human-shaped (3)**
+
+- Turn exact checkpointing into a shared cross-backend surface: async exact writes, one auto-cadence planner, GB10-grounded CUDA save-cost calibrations, token-aware checkpoint policy, and a common phase-timing summary contract.
+  - Meaning: MLX and CUDA now speak one checkpoint-policy language. Both backends support exact resumability with shared interval parsing and auto-planning, CUDA now has a real async exact path instead of a dead-end approximate branch, and both trainers can emit a common timing summary that downstream tools can consume without backend-specific scraping.
+  - Motivation: the checkpoint stack had split into too many partially overlapping concepts: MLX-only async plumbing, CUDA-only exact semantics, fixed CUDA auto intervals, token-budget special cases, and summary telemetry that diverged enough to make cross-backend reasoning brittle. The right fix was not one more backend-specific patch, but a unified checkpoint and telemetry surface grounded in real hardware measurements.
+  - Purpose: make resumability and checkpoint overhead policy trustworthy across the two active engines, keep the default 300-second path overhead-free, and give calibration/profiling/reporting code one stable interface for checkpoint behavior and step timing.
+  - Add `autoresearch_platform/async_checkpoint.py` as the shared home for background checkpoint write orchestration, then refactor MLX to use that shared writer while keeping MLX-specific snapshot capture and host-array serialization in place.
+  - Extend `autoresearch_cuda.checkpoints` with exact CPU snapshot capture, async snapshot writing, `sync|async` save-mode metadata, and a reusable CUDA async-writer factory.
+  - Wire `autoresearch_cuda.train` through a real `--checkpoint-save-mode {sync,async}` surface, preserve the chosen save mode across resume, include it in auto-checkpoint path naming, and make the trainer queue or flush checkpoints correctly depending on save mode.
+  - Make the shared checkpoint interval chooser a single auto-checkpoint plan surface in `autoresearch_platform.checkpoint_policy`, so both backends now ask one shared helper for time-budget and token-budget auto cadence while deferring the first automatic checkpoint until elapsed training time is strictly `>300s` and keeping the token-budget default at the earlier of `300s` or `50Mtok` after that point.
+  - Seed MLX with calibrated `exact/sync` and `exact/async` rows from the historical ABAB benchmarks, then replace CUDA's fallback-only path with real GB10 `exact/sync` and `exact/async` calibration rows for both the balanced and xlarge parameter bands.
+  - Extend the shared chooser so token-budget auto-checkpointing now uses the same measured save-cost recommendation as time-budget mode, expressed as an earlier-of hybrid interval such as `10m or 50M tok`, instead of bypassing the calibration table and hard-coding `300s,50Mtok`.
+  - Add CUDA-side checkpoint timing telemetry to the trainer summary (`checkpoint_percent`, `checkpoint_write_percent`, checkpoint counts, cumulative checkpoint seconds) plus a new `tools/profile_cuda_checkpoint_overhead.py` harness, then use that harness on GB10 to ground the CUDA calibration rows in repeated-save measurements rather than synthetic estimates.
+  - Refactor per-step timing onto a shared platform telemetry surface so MLX and CUDA can now emit a common timing summary (`train_tflops`, `compute_share_percent`, `phase_*_percent`, `other_step_percent`, shared steady/all-step window labels) plus a shared `input_pipeline_percent` observation for host-side batch staging, while still preserving backend-specific extras such as CUDA peak-FLOPS utilization and avoiding the mistake of treating overlapped CUDA input work as an additive wall-time phase.
+  - Add `docs/telemetry-architecture.md` as the current primer/reference for the telemetry stack, covering the architecture map, additive-vs-overlapping timing semantics, artifact flow, the MLX/CUDA gaps matrix, and a glossary of the active terms that calibration and profiling code now depend on.
+
+**Grounding**
+
+- Files:
+  - `CHANGELOG.md`
+  - `autoresearch_platform/async_checkpoint.py`
+  - `autoresearch_platform/checkpoint_policy.py`
+  - `docs/telemetry-architecture.md`
+  - `autoresearch_mlx/checkpoint_policy.py`
+  - `autoresearch_mlx/checkpoints.py`
+  - `autoresearch_mlx/train.py`
+  - `autoresearch_cuda/checkpoint_policy.py`
+  - `autoresearch_cuda/checkpoints.py`
+  - `autoresearch_cuda/train.py`
+- Validation:
+  - `python3 -m py_compile autoresearch_platform/checkpoint_policy.py autoresearch_platform/async_checkpoint.py autoresearch_mlx/checkpoint_policy.py autoresearch_mlx/checkpoints.py autoresearch_mlx/train.py autoresearch_cuda/checkpoint_policy.py autoresearch_cuda/checkpoints.py autoresearch_cuda/train.py`
+  - `python3 -m py_compile autoresearch_platform/summary.py tools/profile_cuda_resume_convergence.py tools/profile_cuda_checkpoint_overhead.py`
+  - `uv run --with torch python - <<'PY' ...` CPU smoke covering sync and async CUDA checkpoint writes, metadata/save-mode round-tripping, and exact loadback of async-written model weights
+  - `uv run --with torch python -m autoresearch_cuda.train --help | rg -n "checkpoint-save-mode|checkpoint-interval|no-checkpoint"`
+  - `python3 - <<'PY' ...` shared due-at-threshold smoke confirming automatic intervals do not fire at exactly `300.0s`, do fire once elapsed training time is `>300s`, and still let explicit intervals fire earlier when requested
+  - `uv run python - <<'PY' ...` MLX chooser smoke confirming the shared auto-checkpoint plan now respects the strict `>300s` first-checkpoint gate in both time-budget and token-budget mode (`exact/sync -> 5m`, `exact/async -> 5m`, token mode -> `5m or 50M tok`)
+  - `uv run --with torch python - <<'PY' ...` CUDA chooser smoke confirming the GB10-grounded rows produce calibrated plans instead of fallback defaults: balanced-band `exact/sync -> 10m`, balanced-band `exact/async -> 5m`, xlarge-band `exact/sync -> 10m`, xlarge-band `exact/async -> 15m`, with token-budget mode reusing those measured intervals as earlier-of hybrids with `50M tok`
+  - `uv run python -m autoresearch_mlx.train --smoke --time-budget 1 --benchmark-skip-eval --no-checkpoint`
+  - `uv run --with torch python tools/profile_cuda_checkpoint_overhead.py --help`
+  - `uv run --with torch python tools/profile_cuda_resume_convergence.py --help`
+- Measurements:
+  - local CPU smoke wrote a valid async CUDA checkpoint bundle with `capture_seconds=0.000360`, `async_write_seconds=0.001458`, and `completed_count=1`, then loaded the async-written model weights back exactly.
+  - the shared chooser now keeps both MLX save modes above the new time-budget floor while still reflecting their distinct calibrated blocking costs: for the `m5-large` parameter band, both `exact/sync` and `exact/async` land on the shared `5m` floor, with measured save-only overhead fractions of `0.0233%` and `0.0100%` respectively.
+  - GB10 repeated-save overhead profiling now grounds CUDA's balanced band (`m5-balanced`, `seq=1024`, `db=32`, `tb=32768`) at `0.5216s/save` for `exact/sync` and `0.2970s/save` for `exact/async`, which yields calibrated auto plans of `10m` and `5m` respectively under the shared `0.1%` save-only overhead cap.
+  - The same GB10 harness grounds CUDA's xlarge band (`m5-xlarge`, `seq=2048`, `db=16`, `tb=32768`) at `0.3804s/save` for `exact/sync` and `0.6936s/save` for `exact/async`, which yields calibrated auto plans of `10m` and `15m`; on this heavier band the async path is more blocking than sync because snapshot capture dominates.
+  - A local MLX smoke on the new shared telemetry path still completed cleanly and emitted both the legacy aliases and the new shared fields in the final summary, including `compute_share_percent=99.80`, `input_pipeline_percent=0.15`, `phase_loader_percent=0.15`, `phase_grad_percent=66.95`, `phase_accumulate_percent=7.55`, and `phase_optimizer_percent=25.30`.
+
+## Committed History
+
+### March 14, 2026 — `3e64c13` — platform/checkpoints: add token-budget checkpoint parity to the MLX trainer — score `3` — complexity `7`
 
 **AI-identified within brief, human-shaped (3)**
 
@@ -56,8 +107,6 @@ On this hardware, the default canonical matched benchmark window for optimizatio
   - `uv run python -m autoresearch_mlx.train --resume-from /tmp/autoresearch-mlx-token-smoke-XXXXXX/checkpoint --token-budget 8192`
 - Measurements:
   - local MLX smoke run saved exact checkpoints repeatedly on the requested `1024tok` cadence and resumed cleanly from `step=8` to `step=16` under the widened `8192` token budget.
-
-## Committed History
 
 ### March 14, 2026 — `066d4e6` — calibration: validate GB10 defaults and add token-budget projections — score `3` — complexity `18`
 

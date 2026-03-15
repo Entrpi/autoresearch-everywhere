@@ -1,5 +1,4 @@
 import json
-import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -7,6 +6,13 @@ from pathlib import Path
 import mlx.core as mx
 import numpy as np
 from mlx.utils import tree_flatten, tree_unflatten
+
+from autoresearch_platform.async_checkpoint import AsyncCheckpointWriter
+from autoresearch_platform.checkpoint_policy import (
+    CHECKPOINT_SAVE_MODE_ASYNC,
+    CHECKPOINT_SAVE_MODE_SYNC,
+    CHECKPOINT_SAVE_MODES,
+)
 
 from .data import restore_loader_state, serialize_loader_state
 
@@ -22,9 +28,6 @@ LOADER_STATE = "loader_state.npz"
 CHECKPOINT_MODE_EXACT = "exact"
 CHECKPOINT_MODE_WEIGHTS_ONLY = "weights_only"
 CHECKPOINT_MODES = (CHECKPOINT_MODE_EXACT, CHECKPOINT_MODE_WEIGHTS_ONLY)
-CHECKPOINT_SAVE_MODE_SYNC = "sync"
-CHECKPOINT_SAVE_MODE_ASYNC = "async"
-CHECKPOINT_SAVE_MODES = (CHECKPOINT_SAVE_MODE_SYNC, CHECKPOINT_SAVE_MODE_ASYNC)
 TENSOR_STORAGE_SAFETENSORS = "safetensors"
 TENSOR_STORAGE_HOST_NPZ = "host_npz"
 
@@ -144,69 +147,6 @@ class CheckpointSnapshot:
     tensor_manifest: dict[str, dict[str, dict[str, str]]]
 
 
-class AsyncCheckpointWriter:
-    def __init__(self) -> None:
-        self._thread: threading.Thread | None = None
-        self._error: RuntimeError | None = None
-        self._lock = threading.Lock()
-        self.completed_write_seconds = 0.0
-        self.completed_count = 0
-        self.replaced_pending_count = 0
-
-    def _raise_if_error(self) -> None:
-        if self._error is not None:
-            raise self._error
-
-    def _write_snapshot(self, snapshot: CheckpointSnapshot) -> None:
-        try:
-            elapsed = _write_host_checkpoint_snapshot(snapshot)
-            with self._lock:
-                self.completed_write_seconds += elapsed
-                self.completed_count += 1
-        except BaseException as exc:  # pragma: no cover - surfaced on join/poll
-            with self._lock:
-                self._error = RuntimeError(f"Asynchronous checkpoint writer failed: {exc!r}")
-
-    def _collect_if_ready(self, *, block: bool) -> None:
-        thread = self._thread
-        if thread is None:
-            self._raise_if_error()
-            return
-        if block:
-            thread.join()
-        elif thread.is_alive():
-            return
-        else:
-            thread.join()
-        self._thread = None
-        self._raise_if_error()
-
-    def submit(self, snapshot: CheckpointSnapshot) -> None:
-        self._raise_if_error()
-        self._collect_if_ready(block=False)
-        if self._thread is not None:
-            raise RuntimeError("Asynchronous checkpoint writer is still writing the previous snapshot.")
-        thread = threading.Thread(
-            target=self._write_snapshot,
-            args=(snapshot,),
-            daemon=True,
-        )
-        thread.start()
-        self._thread = thread
-
-    def wait_until_idle(self) -> None:
-        self._collect_if_ready(block=True)
-        self._raise_if_error()
-
-    def close(self) -> None:
-        self.wait_until_idle()
-        self._raise_if_error()
-
-    def check_health(self) -> None:
-        self._collect_if_ready(block=False)
-        self._raise_if_error()
-
-
 def _load_trainable_weights(model, arrays: dict[str, mx.array]) -> None:
     current = tree_flatten(model.trainable_parameters(), destination={})
     if set(arrays) != set(current):
@@ -253,6 +193,10 @@ def _write_host_checkpoint_snapshot(snapshot: CheckpointSnapshot) -> float:
         },
     )
     return time.perf_counter() - t_start
+
+
+def make_async_checkpoint_writer() -> AsyncCheckpointWriter[CheckpointSnapshot]:
+    return AsyncCheckpointWriter(write_snapshot=_write_host_checkpoint_snapshot)
 
 
 def capture_async_checkpoint_snapshot(

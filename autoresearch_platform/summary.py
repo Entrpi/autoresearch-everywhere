@@ -20,3 +20,13 @@ def parse_summary(stdout: str) -> dict[str, str | float | int]:
             parsed = value
         result[key] = parsed
     return result
+
+
+def parse_final_summary(stdout: str) -> dict[str, str | float | int]:
+    normalized = stdout.replace("\r", "\n")
+    marker = "\n---\n"
+    marker_index = normalized.rfind(marker)
+    if marker_index < 0:
+        raise ValueError("Could not find final summary marker '---' in training output.")
+    summary_block = normalized[marker_index + len(marker) :]
+    return parse_summary(summary_block)

@@ -11,8 +11,11 @@ import sys
 import tempfile
 from pathlib import Path
 
-
 REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+from autoresearch_platform.summary import parse_final_summary
 
 
 def parse_args() -> argparse.Namespace:
@@ -93,34 +96,6 @@ def build_train_command(
     return command
 
 
-def coerce_summary_value(raw: str) -> object:
-    text = raw.strip()
-    if text.lower() in {"true", "false"}:
-        return text.lower() == "true"
-    try:
-        if any(char in text for char in (".", "e", "E")):
-            return float(text)
-        return int(text)
-    except ValueError:
-        return text
-
-
-def parse_train_summary(stdout_text: str) -> dict[str, object]:
-    normalized = stdout_text.replace("\r", "\n")
-    marker = "\n---\n"
-    marker_index = normalized.rfind(marker)
-    if marker_index < 0:
-        raise ValueError("Could not find final summary marker '---' in training output.")
-    summary_block = normalized[marker_index + len(marker) :]
-    parsed: dict[str, object] = {}
-    for line in summary_block.splitlines():
-        if ":" not in line:
-            continue
-        key, value = line.split(":", 1)
-        parsed[key.strip()] = coerce_summary_value(value)
-    return parsed
-
-
 def run_arm(name: str, command: list[str], *, output_dir: Path) -> dict[str, object]:
     stdout_path = output_dir / f"{name}.stdout.log"
     stderr_path = output_dir / f"{name}.stderr.log"
@@ -139,7 +114,7 @@ def run_arm(name: str, command: list[str], *, output_dir: Path) -> dict[str, obj
         raise RuntimeError(
             f"{name} failed with exit code {completed.returncode}. See {stdout_path} and {stderr_path}."
         )
-    summary = parse_train_summary(completed.stdout)
+    summary = dict(parse_final_summary(completed.stdout))
     summary["command"] = command
     summary["stdout_log"] = str(stdout_path)
     summary["stderr_log"] = str(stderr_path)

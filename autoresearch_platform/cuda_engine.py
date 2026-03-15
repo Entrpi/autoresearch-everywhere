@@ -234,6 +234,9 @@ class CUDAEngine:
             total_tokens_m = self._get_float(summary, "total_tokens_M")
             if training_seconds and total_tokens_m is not None and training_seconds > 0:
                 steady_state_tok_per_sec = (total_tokens_m * 1_000_000.0) / training_seconds
+        peak_flop_utilization_percent = self._get_float(summary, "peak_flop_utilization_percent")
+        if peak_flop_utilization_percent is None:
+            peak_flop_utilization_percent = self._get_float(summary, "mfu_percent")
 
         return ProbeResult(
             preset=preset,
@@ -256,6 +259,16 @@ class CUDAEngine:
             peak_vram_mb=self._get_float(summary, "peak_vram_mb"),
             training_seconds=self._get_float(summary, "training_seconds"),
             total_seconds=self._get_float(summary, "total_seconds"),
+            eval_percent=self._get_float(summary, "eval_percent"),
+            input_pipeline_percent=self._get_float(summary, "input_pipeline_percent"),
+            optimizer_percent=self._get_float(summary, "optimizer_percent"),
+            forward_backward_percent=self._get_float(summary, "forward_backward_percent"),
+            other_step_percent=self._get_float(summary, "other_step_percent"),
+            compute_share_percent=self._get_float(summary, "compute_share_percent"),
+            train_tflops=self._get_float(summary, "train_tflops"),
+            peak_flop_utilization_percent=peak_flop_utilization_percent,
+            util_window_steps=self._get_int(summary, "util_window_steps"),
+            util_window=self._get_str(summary, "util_window"),
             canonical_rung=self._get_str(summary, "canonical_rung"),
             canonical_seq_len=self._get_int(summary, "canonical_eval_seq_len") or self._get_int(summary, "eval_seq_len"),
             canonical_tokens=self._get_int(summary, "canonical_eval_tokens") or self._get_int(summary, "eval_tokens"),

@@ -56,6 +56,11 @@ def build_parser():
         help="Disable checkpoint writing, including the automatic defaults for longer and token-budgeted runs.",
     )
     parser.add_argument(
+        "--checkpoint-save-mode",
+        choices=("sync", "async"),
+        help="Checkpoint write path. 'sync' writes on the training thread; 'async' captures an exact CPU snapshot and writes it in the background.",
+    )
+    parser.add_argument(
         "--eval-only",
         action="store_true",
         help="Skip training and evaluate a resumed checkpoint with the configured eval settings.",
@@ -139,19 +144,32 @@ from autoresearch_cuda.eval_policy import (
 from autoresearch_cuda.checkpoint_policy import (
     AUTO_CHECKPOINT_MIN_TIME_BUDGET_SEC,
     AUTO_CHECKPOINT_MIN_TOKEN_BUDGET,
-    checkpoint_interval_due,
+    auto_checkpoint_due,
+    choose_auto_checkpoint_plan,
     default_auto_checkpoint_path,
-    default_time_budget_checkpoint_interval,
-    default_token_budget_checkpoint_interval,
     format_interval_label,
     format_interval_spec,
     parse_checkpoint_interval_spec,
 )
 from autoresearch_cuda.checkpoints import (
+    CHECKPOINT_SAVE_MODE_ASYNC,
+    CHECKPOINT_SAVE_MODE_SYNC,
+    CHECKPOINT_SAVE_MODES,
+    capture_async_checkpoint_snapshot,
     load_checkpoint_metadata,
     load_training_checkpoint,
+    make_async_checkpoint_writer,
     save_training_checkpoint,
     validate_checkpoint_payload,
+)
+from autoresearch_platform.step_telemetry import (
+    OBS_INPUT_PIPELINE,
+    PHASE_FORWARD_BACKWARD,
+    PHASE_LOADER,
+    PHASE_OPTIMIZER,
+    StepTelemetry,
+    StepTiming,
+    summarize_step_telemetry,
 )
 
 
@@ -172,6 +190,8 @@ def _resolved_run_config_from_checkpoint(checkpoint_dir: str):
 def _resolve_checkpoint_settings(
     args,
     *,
+    num_params_m: float,
+    checkpoint_mode: str,
     preset: str,
     time_budget: float | None,
     token_budget: int | None,
@@ -181,14 +201,24 @@ def _resolve_checkpoint_settings(
     window_pattern: str,
     resume_run_config: dict | None = None,
 ):
+    checkpoint_save_mode = (
+        args.checkpoint_save_mode
+        or (resume_run_config or {}).get("checkpoint_save_mode")
+        or CHECKPOINT_SAVE_MODE_SYNC
+    )
+    if checkpoint_save_mode not in CHECKPOINT_SAVE_MODES:
+        raise ValueError(
+            f"Unsupported checkpoint_save_mode {checkpoint_save_mode!r}. Expected one of {CHECKPOINT_SAVE_MODES}."
+        )
     if args.no_checkpoint:
-        return None, None, "disabled via --no-checkpoint"
+        return None, None, checkpoint_save_mode, "disabled via --no-checkpoint", False
     auto_path = default_auto_checkpoint_path(
         preset,
         seq_len=seq_len,
         depth=depth,
         total_batch_size=total_batch_size,
         window_pattern=window_pattern,
+        checkpoint_save_mode=checkpoint_save_mode,
     )
     if args.checkpoint_interval is not None:
         interval = parse_checkpoint_interval_spec(args.checkpoint_interval)
@@ -202,38 +232,76 @@ def _resolve_checkpoint_settings(
         )
         reason = (
             f"using explicit checkpoint interval {format_interval_label(interval)} "
-            f"with {path_source}"
+            f"with {path_source}; checkpoint_save_mode={checkpoint_save_mode}"
         )
-        return checkpoint_path, interval, reason
+        return checkpoint_path, interval, checkpoint_save_mode, reason, False
     if args.resume_from:
         checkpoint_path = args.checkpoint_path or (resume_run_config or {}).get("checkpoint_path") or args.resume_from
         checkpoint_interval = parse_checkpoint_interval_spec((resume_run_config or {}).get("checkpoint_interval"))
+        checkpoint_interval_is_auto = bool((resume_run_config or {}).get("checkpoint_interval_is_auto", False))
         if checkpoint_interval is not None:
             reason = (
                 f"reusing resume checkpoint path and interval "
-                f"({format_interval_label(checkpoint_interval)})"
+                f"({format_interval_label(checkpoint_interval)}); checkpoint_save_mode={checkpoint_save_mode}"
             )
-            return checkpoint_path, checkpoint_interval, reason
-        return checkpoint_path, None, "reusing resume checkpoint path"
-    if time_budget is not None and time_budget > AUTO_CHECKPOINT_MIN_TIME_BUDGET_SEC:
+            return checkpoint_path, checkpoint_interval, checkpoint_save_mode, reason, checkpoint_interval_is_auto
+        return checkpoint_path, None, checkpoint_save_mode, (
+            f"reusing resume checkpoint path; checkpoint_save_mode={checkpoint_save_mode}"
+        ), False
+    auto_plan = choose_auto_checkpoint_plan(
+        num_params_m=num_params_m,
+        checkpoint_mode=checkpoint_mode,
+        checkpoint_save_mode=checkpoint_save_mode,
+        time_budget=time_budget,
+        token_budget=token_budget,
+    )
+    if auto_plan is not None:
         checkpoint_path = args.checkpoint_path or str(auto_path)
-        checkpoint_interval = default_time_budget_checkpoint_interval()
-        reason = (
-            f"auto-enabled for time_budget>{AUTO_CHECKPOINT_MIN_TIME_BUDGET_SEC:.0f}s "
-            f"with {format_interval_label(checkpoint_interval)} interval"
-        )
-        return checkpoint_path, checkpoint_interval, reason
-    if token_budget is not None and token_budget >= AUTO_CHECKPOINT_MIN_TOKEN_BUDGET:
-        checkpoint_path = args.checkpoint_path or str(auto_path)
-        checkpoint_interval = default_token_budget_checkpoint_interval()
-        reason = (
-            f"auto-enabled for token_budget>={AUTO_CHECKPOINT_MIN_TOKEN_BUDGET:,} "
-            f"with earlier-of {format_interval_label(checkpoint_interval)} interval"
-        )
-        return checkpoint_path, checkpoint_interval, reason
+        checkpoint_interval = auto_plan.interval
+        if auto_plan.trigger_mode == "time":
+            if auto_plan.calibration is not None and auto_plan.recommendation is not None:
+                resume_suffix = (
+                    f"; measured resume-ready penalty {auto_plan.calibration.resume_ready_penalty_sec:.3f}s"
+                    if auto_plan.calibration.resume_ready_source
+                    else ""
+                )
+                reason = (
+                    f"auto-enabled for time_budget>{AUTO_CHECKPOINT_MIN_TIME_BUDGET_SEC:.0f}s using "
+                    f"{auto_plan.calibration.label}; selected {auto_plan.recommendation.interval_label} "
+                    f"at {auto_plan.recommendation.save_only_overhead_fraction * 100.0:.4f}% save-only overhead; "
+                    f"checkpoint_save_mode={checkpoint_save_mode}{resume_suffix}"
+                )
+            else:
+                reason = (
+                    f"auto-enabled for time_budget>{AUTO_CHECKPOINT_MIN_TIME_BUDGET_SEC:.0f}s "
+                    f"with fallback {auto_plan.interval_label} interval; "
+                    f"checkpoint_save_mode={checkpoint_save_mode}"
+                )
+        else:
+            if auto_plan.calibration is not None and auto_plan.recommendation is not None:
+                resume_suffix = (
+                    f"; measured resume-ready penalty {auto_plan.calibration.resume_ready_penalty_sec:.3f}s"
+                    if auto_plan.calibration.resume_ready_source
+                    else ""
+                )
+                reason = (
+                    f"auto-enabled for token_budget>={AUTO_CHECKPOINT_MIN_TOKEN_BUDGET:,} using "
+                    f"{auto_plan.calibration.label}; selected earlier-of {auto_plan.interval_label} "
+                    f"at {auto_plan.recommendation.save_only_overhead_fraction * 100.0:.4f}% save-only overhead; "
+                    f"checkpoint_save_mode={checkpoint_save_mode}{resume_suffix}"
+                )
+            else:
+                reason = (
+                    f"auto-enabled for token_budget>={AUTO_CHECKPOINT_MIN_TOKEN_BUDGET:,} "
+                    f"with earlier-of {auto_plan.interval_label} interval; "
+                    f"checkpoint_save_mode={checkpoint_save_mode}"
+                )
+        return checkpoint_path, checkpoint_interval, checkpoint_save_mode, reason, True
     if args.checkpoint_path is not None:
-        return args.checkpoint_path, None, "using explicit checkpoint path without periodic autosaves"
-    return None, None, None
+        return args.checkpoint_path, None, checkpoint_save_mode, (
+            f"using explicit checkpoint path without periodic autosaves; checkpoint_save_mode={checkpoint_save_mode}"
+        ), False
+    return None, None, checkpoint_save_mode, None, False
 
 
 def _resolve_run_preset_with_resume(args):
@@ -972,19 +1040,10 @@ FINAL_LR_FRAC = RUN_PRESET.final_lr_frac
 # Model size
 DEPTH = RUN_PRESET.depth
 DEVICE_BATCH_SIZE = RUN_PRESET.device_batch_size
-CHECKPOINT_PATH, CHECKPOINT_INTERVAL, CHECKPOINT_DECISION_REASON = _resolve_checkpoint_settings(
-    ARGS,
-    preset=ARGS.preset,
-    time_budget=TIME_BUDGET,
-    token_budget=TOKEN_BUDGET,
-    seq_len=MAX_SEQ_LEN,
-    depth=DEPTH,
-    total_batch_size=TOTAL_BATCH_SIZE,
-    window_pattern=WINDOW_PATTERN,
-    resume_run_config=RESUME_BUNDLE.get("run_config") if RESUME_BUNDLE is not None else None,
-)
-ARGS.checkpoint_path = CHECKPOINT_PATH
-ARGS.checkpoint_interval = format_interval_spec(CHECKPOINT_INTERVAL)
+CHECKPOINT_PATH = None
+CHECKPOINT_INTERVAL = None
+CHECKPOINT_SAVE_MODE = None
+CHECKPOINT_DECISION_REASON = None
 
 
 def active_budget_mode() -> str:
@@ -1077,6 +1136,29 @@ for key, value in param_counts.items():
 num_params = param_counts['total']
 num_flops_per_token = model.estimate_flops()
 print(f"Estimated FLOPs per token: {num_flops_per_token:e}")
+(
+    CHECKPOINT_PATH,
+    CHECKPOINT_INTERVAL,
+    CHECKPOINT_SAVE_MODE,
+    CHECKPOINT_DECISION_REASON,
+    CHECKPOINT_INTERVAL_IS_AUTO,
+) = _resolve_checkpoint_settings(
+    ARGS,
+    num_params_m=num_params / 1e6,
+    checkpoint_mode="exact",
+    preset=ARGS.preset,
+    time_budget=TIME_BUDGET,
+    token_budget=TOKEN_BUDGET,
+    seq_len=MAX_SEQ_LEN,
+    depth=DEPTH,
+    total_batch_size=TOTAL_BATCH_SIZE,
+    window_pattern=WINDOW_PATTERN,
+    resume_run_config=RESUME_BUNDLE.get("run_config") if RESUME_BUNDLE is not None else None,
+)
+ARGS.checkpoint_path = CHECKPOINT_PATH
+ARGS.checkpoint_interval = format_interval_spec(CHECKPOINT_INTERVAL)
+ARGS.checkpoint_save_mode = CHECKPOINT_SAVE_MODE
+ARGS.checkpoint_interval_is_auto = CHECKPOINT_INTERVAL_IS_AUTO
 
 tokens_per_fwdbwd = DEVICE_BATCH_SIZE * MAX_SEQ_LEN
 assert TOTAL_BATCH_SIZE % tokens_per_fwdbwd == 0
@@ -1103,6 +1185,29 @@ smooth_train_loss = (
     if RESUME_TRAINING_STATE is not None
     else 0.0
 )
+resumed_checkpoint_seconds = (
+    float(RESUME_TRAINING_STATE.get("total_checkpoint_time", 0.0))
+    if RESUME_TRAINING_STATE is not None
+    else 0.0
+)
+resumed_checkpoint_write_seconds = (
+    float(RESUME_TRAINING_STATE.get("total_checkpoint_write_time", resumed_checkpoint_seconds))
+    if RESUME_TRAINING_STATE is not None
+    else 0.0
+)
+resumed_checkpoint_count = (
+    int(RESUME_TRAINING_STATE.get("checkpoint_count", 0))
+    if RESUME_TRAINING_STATE is not None
+    else 0
+)
+step_telemetry = StepTelemetry.from_dict(
+    RESUME_TRAINING_STATE.get("step_telemetry")
+    if RESUME_TRAINING_STATE is not None
+    else None
+)
+checkpoint_seconds = 0.0
+checkpoint_write_seconds = 0.0
+checkpoint_count = 0
 steady_state_step_count = (
     int(RESUME_TRAINING_STATE.get("steady_state_step_count", 0))
     if RESUME_TRAINING_STATE is not None
@@ -1118,19 +1223,25 @@ while curve_eval_index < len(CURVE_EVAL_SECONDS) and CURVE_EVAL_SECONDS[curve_ev
     curve_eval_index += 1
 last_checkpoint_training_time = total_training_time
 last_checkpoint_tokens = total_tokens
+async_checkpoint_writer = None
 
 
 def maybe_save_checkpoint(*, force: bool = False):
-    global checkpoint_saved_to, last_checkpoint_training_time, last_checkpoint_tokens
+    global checkpoint_saved_to, last_checkpoint_training_time, last_checkpoint_tokens, checkpoint_seconds, checkpoint_write_seconds, checkpoint_count
     if CHECKPOINT_PATH is None or ARGS.no_checkpoint or optimizer is None:
         return
+    if async_checkpoint_writer is not None:
+        async_checkpoint_writer.check_health()
     if not force:
         if CHECKPOINT_INTERVAL is None:
             return
-        if not checkpoint_interval_due(
+        if not auto_checkpoint_due(
             CHECKPOINT_INTERVAL,
+            total_elapsed_seconds=total_training_time,
             elapsed_seconds=total_training_time - last_checkpoint_training_time,
             elapsed_tokens=total_tokens - last_checkpoint_tokens,
+            checkpoints_completed=resumed_checkpoint_count + checkpoint_count,
+            interval_is_auto=CHECKPOINT_INTERVAL_IS_AUTO,
         ):
             return
     elif (
@@ -1140,37 +1251,72 @@ def maybe_save_checkpoint(*, force: bool = False):
     ):
         return
 
-    checkpoint_saved_to = save_training_checkpoint(
-        CHECKPOINT_PATH,
-        run_config={
-            "preset": ARGS.preset,
-            "time_budget": RUN_PRESET.time_budget,
-            "token_budget": TOKEN_BUDGET,
-            "seq_len": MAX_SEQ_LEN,
-            "depth": DEPTH,
-            "window_pattern": WINDOW_PATTERN,
-            "device_batch_size": DEVICE_BATCH_SIZE,
-            "total_batch_size": TOTAL_BATCH_SIZE,
-            "grad_accum_steps": grad_accum_steps,
-            "checkpoint_path": CHECKPOINT_PATH,
-            "checkpoint_interval": format_interval_spec(CHECKPOINT_INTERVAL),
-        },
-        training_state={
-            "step": step,
-            "total_training_time": total_training_time,
-            "steady_state_training_time": steady_state_training_time,
-            "steady_state_step_count": steady_state_step_count,
-            "total_tokens": total_tokens,
-            "smooth_train_loss": smooth_train_loss,
-            "epoch": epoch,
-            "hardware_key": hardware_key,
-            "accelerator_architecture": cuda_runtime.reference_family.family_key,
-            "accelerator_compute_capability": f"{cap[0]}.{cap[1]}",
-            "resolved_attention_backend": RESOLVED_ATTENTION_BACKEND,
-        },
-        model=model,
-        optimizer=optimizer,
-    )
+    run_config = {
+        "preset": ARGS.preset,
+        "time_budget": RUN_PRESET.time_budget,
+        "token_budget": TOKEN_BUDGET,
+        "seq_len": MAX_SEQ_LEN,
+        "depth": DEPTH,
+        "window_pattern": WINDOW_PATTERN,
+        "device_batch_size": DEVICE_BATCH_SIZE,
+        "total_batch_size": TOTAL_BATCH_SIZE,
+        "grad_accum_steps": grad_accum_steps,
+        "checkpoint_path": CHECKPOINT_PATH,
+        "checkpoint_interval": format_interval_spec(CHECKPOINT_INTERVAL),
+        "checkpoint_interval_is_auto": CHECKPOINT_INTERVAL_IS_AUTO,
+        "checkpoint_save_mode": CHECKPOINT_SAVE_MODE,
+    }
+    training_state_base = {
+        "step": step,
+        "total_training_time": total_training_time,
+        "steady_state_training_time": steady_state_training_time,
+        "steady_state_step_count": steady_state_step_count,
+        "total_tokens": total_tokens,
+        "smooth_train_loss": smooth_train_loss,
+        "step_telemetry": step_telemetry.to_dict(),
+        "epoch": epoch,
+        "hardware_key": hardware_key,
+        "accelerator_architecture": cuda_runtime.reference_family.family_key,
+        "accelerator_compute_capability": f"{cap[0]}.{cap[1]}",
+        "resolved_attention_backend": RESOLVED_ATTENTION_BACKEND,
+    }
+    if async_checkpoint_writer is None:
+        training_state = {
+            **training_state_base,
+            "total_checkpoint_time": resumed_checkpoint_seconds + checkpoint_seconds,
+            "total_checkpoint_write_time": resumed_checkpoint_write_seconds + checkpoint_write_seconds,
+            "checkpoint_count": resumed_checkpoint_count + checkpoint_count + 1,
+        }
+        checkpoint_saved_to, elapsed = save_training_checkpoint(
+            CHECKPOINT_PATH,
+            run_config=run_config,
+            training_state=training_state,
+            model=model,
+            optimizer=optimizer,
+            checkpoint_save_mode=CHECKPOINT_SAVE_MODE,
+        )
+        checkpoint_seconds += elapsed
+        checkpoint_write_seconds += elapsed
+        checkpoint_count += 1
+    else:
+        training_state = {
+            **training_state_base,
+            "total_checkpoint_time": resumed_checkpoint_seconds + checkpoint_seconds,
+            "total_checkpoint_write_time": resumed_checkpoint_write_seconds + checkpoint_write_seconds,
+            "checkpoint_count": resumed_checkpoint_count + checkpoint_count + 1,
+        }
+        snapshot, capture_seconds = capture_async_checkpoint_snapshot(
+            CHECKPOINT_PATH,
+            run_config=run_config,
+            training_state=training_state,
+            model=model,
+            optimizer=optimizer,
+        )
+        checkpoint_seconds += capture_seconds
+        async_checkpoint_writer.submit(snapshot)
+        checkpoint_write_seconds = async_checkpoint_writer.completed_write_seconds
+        checkpoint_count = async_checkpoint_writer.completed_count
+        checkpoint_saved_to = Path(CHECKPOINT_PATH)
     interval_label = (
         f" ({format_interval_label(CHECKPOINT_INTERVAL)} interval)"
         if CHECKPOINT_INTERVAL is not None
@@ -1178,7 +1324,10 @@ def maybe_save_checkpoint(*, force: bool = False):
     )
     last_checkpoint_training_time = total_training_time
     last_checkpoint_tokens = total_tokens
-    print(f"\nCheckpoint saved to {CHECKPOINT_PATH} at step {step}{interval_label}.")
+    if async_checkpoint_writer is None:
+        print(f"\nCheckpoint saved to {CHECKPOINT_PATH} at step {step}{interval_label}.")
+    else:
+        print(f"\nCheckpoint queued to {CHECKPOINT_PATH} at step {step}{interval_label}.")
     return checkpoint_saved_to
 
 resumed_from = None
@@ -1200,6 +1349,7 @@ if ARGS.eval_only:
         print(f"Checkpoint path: {CHECKPOINT_PATH}")
     if CHECKPOINT_INTERVAL is not None:
         print(f"Checkpoint interval: {format_interval_label(CHECKPOINT_INTERVAL)}")
+    print(f"Checkpoint save mode: {CHECKPOINT_SAVE_MODE}")
     if CHECKPOINT_DECISION_REASON is not None:
         print(f"Checkpoint policy: {CHECKPOINT_DECISION_REASON}")
     print(f"Gradient accumulation steps: {grad_accum_steps}")
@@ -1214,7 +1364,8 @@ if ARGS.eval_only:
         print(
             "Resume checkpoint: "
             f"{resumed_from} (step={RESUME_TRAINING_STATE['step']}, "
-            f"training_seconds={RESUME_TRAINING_STATE['total_training_time']:.1f})"
+            f"training_seconds={RESUME_TRAINING_STATE['total_training_time']:.1f}, "
+            f"checkpoint_save_mode={RESUME_BUNDLE.get('checkpoint_save_mode', CHECKPOINT_SAVE_MODE_SYNC)})"
         )
 else:
     optimizer = model.setup_optimizer(
@@ -1252,17 +1403,24 @@ else:
         print(f"Checkpoint path: {CHECKPOINT_PATH}")
     if CHECKPOINT_INTERVAL is not None:
         print(f"Checkpoint interval: {format_interval_label(CHECKPOINT_INTERVAL)}")
+    print(f"Checkpoint save mode: {CHECKPOINT_SAVE_MODE}")
     if CHECKPOINT_DECISION_REASON is not None:
         print(f"Checkpoint policy: {CHECKPOINT_DECISION_REASON}")
     print(f"Gradient accumulation steps: {grad_accum_steps}")
     print(f"Compile enabled: {str(not ARGS.no_compile).lower()}")
+    async_checkpoint_writer = (
+        make_async_checkpoint_writer()
+        if CHECKPOINT_PATH is not None and CHECKPOINT_SAVE_MODE == CHECKPOINT_SAVE_MODE_ASYNC
+        else None
+    )
     if resumed_from is not None:
         print(
             "Resume checkpoint: "
             f"{resumed_from} (step={RESUME_TRAINING_STATE['step']}, "
             f"training_seconds={RESUME_TRAINING_STATE['total_training_time']:.1f}, "
             f"total_tokens={RESUME_TRAINING_STATE['total_tokens']}, "
-            f"loader_batches={loader_advance_steps})"
+            f"loader_batches={loader_advance_steps}, "
+            f"checkpoint_save_mode={RESUME_BUNDLE.get('checkpoint_save_mode', CHECKPOINT_SAVE_MODE_SYNC)})"
         )
 
 # Schedules follow the active stop budget: time when using --time-budget,
@@ -1404,14 +1562,24 @@ if not ARGS.eval_only:
 
     while not budget_satisfied(total_training_time=total_training_time, total_tokens=total_tokens):
         torch.cuda.synchronize()
-        t0 = time.time()
+        t0 = time.perf_counter()
+        step_timing = StepTiming()
+        input_pipeline_cpu_seconds = 0.0
+        forward_backward_events: list[tuple[torch.cuda.Event, torch.cuda.Event]] = []
         for _micro_step in range(grad_accum_steps):
+            forward_backward_start = torch.cuda.Event(enable_timing=True)
+            forward_backward_end = torch.cuda.Event(enable_timing=True)
+            forward_backward_start.record()
             with autocast_ctx:
                 loss = model(x, y)
             train_loss = loss.detach()
             loss = loss / grad_accum_steps
             loss.backward()
+            forward_backward_end.record()
+            forward_backward_events.append((forward_backward_start, forward_backward_end))
+            t_loader_start = time.perf_counter()
             x, y, epoch = next(train_loader)
+            input_pipeline_cpu_seconds += time.perf_counter() - t_loader_start
 
         progress = budget_progress(total_training_time=total_training_time, total_tokens=total_tokens)
         lrm = get_lr_multiplier(progress)
@@ -1422,8 +1590,12 @@ if not ARGS.eval_only:
             if group['kind'] == 'muon':
                 group["momentum"] = muon_momentum
                 group["weight_decay"] = muon_weight_decay
+        optimizer_start = torch.cuda.Event(enable_timing=True)
+        optimizer_end = torch.cuda.Event(enable_timing=True)
+        optimizer_start.record()
         optimizer.step()
         model.zero_grad(set_to_none=True)
+        optimizer_end.record()
 
         train_loss_f = train_loss.item()
         if train_loss_f > 100:
@@ -1431,13 +1603,25 @@ if not ARGS.eval_only:
             exit(1)
 
         torch.cuda.synchronize()
-        t1 = time.time()
-        dt = t1 - t0
+        t1 = time.perf_counter()
+        step_timing.add_phase_seconds(
+            PHASE_FORWARD_BACKWARD,
+            sum(start.elapsed_time(end) for start, end in forward_backward_events) / 1000.0,
+        )
+        step_timing.add_phase_seconds(
+            PHASE_OPTIMIZER,
+            optimizer_start.elapsed_time(optimizer_end) / 1000.0,
+        )
+        step_timing.add_observed_seconds(OBS_INPUT_PIPELINE, input_pipeline_cpu_seconds)
+        step_timing.total_seconds = t1 - t0
+        dt = step_timing.total_seconds
 
         total_training_time += dt
-        if step > timing_count_starts_after_step:
+        include_in_steady = step > timing_count_starts_after_step
+        if include_in_steady:
             steady_state_training_time += dt
             steady_state_step_count += 1
+        step_telemetry.record_step(step_timing, include_in_steady=include_in_steady)
 
         ema_beta = 0.9
         smooth_train_loss = ema_beta * smooth_train_loss + (1 - ema_beta) * train_loss_f
@@ -1447,9 +1631,10 @@ if not ARGS.eval_only:
         pct_done = 100 * progress
         tok_per_sec = int(TOTAL_BATCH_SIZE / dt)
         mfu = 100 * num_flops_per_token * TOTAL_BATCH_SIZE / dt / H100_BF16_PEAK_FLOPS
+        compute_share = 100.0 * step_timing.sum_phase_seconds((PHASE_FORWARD_BACKWARD, PHASE_OPTIMIZER)) / dt if dt > 0 else 0.0
         remaining = budget_remaining(total_training_time=total_training_time, total_tokens=total_tokens)
 
-        print(f"\rstep {step:05d} ({pct_done:.1f}%) | loss: {debiased_smooth_loss:.6f} | lrm: {lrm:.2f} | dt: {dt*1000:.0f}ms | tok/sec: {tok_per_sec:,} | mfu: {mfu:.1f}% | epoch: {epoch} | remaining: {remaining}    ", end="", flush=True)
+        print(f"\rstep {step:05d} ({pct_done:.1f}%) | loss: {debiased_smooth_loss:.6f} | lrm: {lrm:.2f} | dt: {dt*1000:.0f}ms | tok/sec: {tok_per_sec:,} | util: {compute_share:.1f}% | mfu: {mfu:.1f}% | epoch: {epoch} | remaining: {remaining}    ", end="", flush=True)
 
         if step == 0:
             gc.collect()
@@ -1474,6 +1659,11 @@ if not ARGS.eval_only:
 
     print()  # newline after \r training log
     maybe_save_checkpoint(force=True)
+    if async_checkpoint_writer is not None:
+        async_checkpoint_writer.wait_until_idle()
+        checkpoint_write_seconds = async_checkpoint_writer.completed_write_seconds
+        checkpoint_count = async_checkpoint_writer.completed_count
+        async_checkpoint_writer.close()
 
 # Final eval
 val_bpb = None
@@ -1536,6 +1726,17 @@ if CURVE_EVAL_SECONDS:
 t_end = time.time()
 effective_steady_time = steady_state_training_time if steady_state_training_time > 0 else total_training_time
 effective_steady_steps = steady_state_step_count if steady_state_step_count > 0 else step
+session_total_seconds = t_end - t_start
+session_checkpoint_count = checkpoint_count
+cumulative_checkpoint_seconds = resumed_checkpoint_seconds + checkpoint_seconds
+cumulative_checkpoint_write_seconds = resumed_checkpoint_write_seconds + checkpoint_write_seconds
+cumulative_checkpoint_count = resumed_checkpoint_count + checkpoint_count
+session_eval_seconds = curve_eval_total_seconds + (eval_seconds or 0.0)
+checkpoint_percent = 100.0 * checkpoint_seconds / session_total_seconds if session_total_seconds > 0 else 0.0
+checkpoint_write_percent = (
+    100.0 * checkpoint_write_seconds / session_total_seconds if session_total_seconds > 0 else 0.0
+)
+eval_percent = 100.0 * session_eval_seconds / session_total_seconds if session_total_seconds > 0 else 0.0
 steady_state_mfu = (
     100
     * num_flops_per_token
@@ -1551,6 +1752,13 @@ steady_state_tok_per_sec = (
     TOTAL_BATCH_SIZE * effective_steady_steps / effective_steady_time
     if effective_steady_time > 0
     else 0.0
+)
+telemetry_summary = summarize_step_telemetry(
+    step_telemetry,
+    num_flops_per_token=num_flops_per_token,
+    total_batch_size=TOTAL_BATCH_SIZE,
+    compute_phases=(PHASE_FORWARD_BACKWARD, PHASE_OPTIMIZER),
+    peak_flop_utilization_percent=steady_state_mfu,
 )
 
 print("---")
@@ -1584,10 +1792,28 @@ if last_smoothed_train_loss is not None:
 if TOKEN_BUDGET is not None:
     print(f"token_budget:     {TOKEN_BUDGET}")
 print(f"training_seconds: {total_training_time:.1f}")
-print(f"total_seconds:    {t_end - t_start:.1f}")
+print(f"total_seconds:    {session_total_seconds:.1f}")
 print(f"peak_vram_mb:     {peak_vram_mb:.1f}")
 print(f"mfu_percent:      {steady_state_mfu:.2f}")
+print(f"peak_flop_utilization_percent: {steady_state_mfu:.2f}")
+print(f"compute_share_percent: {telemetry_summary.compute_share_percent:.2f}")
+print(f"input_pipeline_percent: {telemetry_summary.observed_percent(OBS_INPUT_PIPELINE):.2f}")
+print(f"train_tflops:     {telemetry_summary.train_tflops:.3f}")
+print(f"optimizer_percent: {telemetry_summary.phase_percent(PHASE_OPTIMIZER):.2f}")
+print(f"phase_optimizer_percent: {telemetry_summary.phase_percent(PHASE_OPTIMIZER):.2f}")
+print(f"forward_backward_percent: {telemetry_summary.phase_percent(PHASE_FORWARD_BACKWARD):.2f}")
+print(f"phase_forward_backward_percent: {telemetry_summary.phase_percent(PHASE_FORWARD_BACKWARD):.2f}")
+print(f"other_step_percent: {telemetry_summary.other_step_percent:.2f}")
+print(f"checkpoint_percent: {checkpoint_percent:.2f}")
+print(f"checkpoint_write_percent: {checkpoint_write_percent:.2f}")
+print(f"eval_percent:     {eval_percent:.2f}")
+print(f"checkpoint_count: {session_checkpoint_count}")
+print(f"util_window_steps: {telemetry_summary.window_steps}")
+print(f"util_window:      cumulative {telemetry_summary.window_label}")
 print(f"steady_state_tok_per_sec: {steady_state_tok_per_sec:.1f}")
+print(f"cumulative_checkpoint_seconds: {cumulative_checkpoint_seconds:.3f}")
+print(f"cumulative_checkpoint_write_seconds: {cumulative_checkpoint_write_seconds:.3f}")
+print(f"cumulative_checkpoint_count: {cumulative_checkpoint_count}")
 print(f"total_tokens_M:   {total_tokens / 1e6:.1f}")
 if CURVE_EVAL_SECONDS:
     print(f"curve_eval_points: {len(curve_points)}")
@@ -1609,5 +1835,6 @@ if checkpoint_saved_to is not None:
     print(f"checkpoint_path:  {checkpoint_saved_to}")
 if CHECKPOINT_INTERVAL is not None:
     print(f"checkpoint_interval: {format_interval_spec(CHECKPOINT_INTERVAL)}")
+print(f"checkpoint_save_mode: {CHECKPOINT_SAVE_MODE}")
 if resumed_from is not None:
     print(f"resumed_from:     {resumed_from}")

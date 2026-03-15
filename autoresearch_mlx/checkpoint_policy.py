@@ -5,14 +5,19 @@ from pathlib import Path
 from autoresearch_platform.checkpoint_policy import (
     AUTO_CHECKPOINT_MIN_TIME_BUDGET_SEC,
     AUTO_CHECKPOINT_MIN_TOKEN_BUDGET,
+    CHECKPOINT_SAVE_MODE_ASYNC,
+    CHECKPOINT_SAVE_MODE_SYNC,
     DEFAULT_HUMAN_INTERVAL_POLICY,
     AutoCheckpointDecision,
+    AutoCheckpointPlan,
     CheckpointCalibration,
     CheckpointInterval,
     CheckpointIntervalRecommendation,
     HumanIntervalPolicy,
+    auto_checkpoint_due,
     checkpoint_interval_due,
     choose_auto_checkpoint_decision as choose_shared_auto_checkpoint_decision,
+    choose_auto_checkpoint_plan as choose_shared_auto_checkpoint_plan,
     default_token_budget_checkpoint_interval,
     format_interval_label,
     format_interval_spec,
@@ -34,8 +39,21 @@ DEFAULT_CHECKPOINT_CALIBRATIONS = (
         checkpoint_cost_sec=0.07,
         resume_ready_penalty_sec=0.641,
         source="Measured from 20s matched m5-large runs: +0.7s across 10 saves.",
+        checkpoint_save_mode=CHECKPOINT_SAVE_MODE_SYNC,
         resume_ready_source="Measured from repeated resume-ready trials: median 0.641s to first completed resumed optimizer step.",
         notes="Conservative calibration used for presets up to roughly the 26.3M-parameter m5-large shape.",
+    ),
+    CheckpointCalibration(
+        key="exact_async_m5_large",
+        label="Exact async resume (m5-large calibrated)",
+        checkpoint_mode=CHECKPOINT_MODE_EXACT,
+        max_params_m=30.0,
+        checkpoint_cost_sec=0.03,
+        resume_ready_penalty_sec=0.641,
+        source="Measured from matched async ABAB m5-large runs: about 1.07% blocking overhead across 10 saves.",
+        checkpoint_save_mode=CHECKPOINT_SAVE_MODE_ASYNC,
+        resume_ready_source="Async exact writes preserve the same exact resume bundle; resume-ready latency matches exact sync restore.",
+        notes="Uses blocking snapshot capture cost for interval choice and leaves the larger asynchronous write share out of the save-only overhead cap.",
     ),
     CheckpointCalibration(
         key="weights_only_m5_large",
@@ -45,6 +63,7 @@ DEFAULT_CHECKPOINT_CALIBRATIONS = (
         checkpoint_cost_sec=0.02,
         resume_ready_penalty_sec=1.176,
         source="Measured from matched 20s m5-large runs: about +0.2s across 10 weights-only saves.",
+        checkpoint_save_mode=CHECKPOINT_SAVE_MODE_SYNC,
         resume_ready_source="Measured from repeated weights-only resume-ready trials: median 1.176s to first completed resumed optimizer step.",
         notes="Approximate resume restores model weights only and restarts from a fresh optimizer and train-loader state.",
     ),
@@ -56,8 +75,21 @@ DEFAULT_CHECKPOINT_CALIBRATIONS = (
         checkpoint_cost_sec=0.11,
         resume_ready_penalty_sec=0.683,
         source="Measured from 60s matched m5-xlarge runs: +3.3s across 29 saves.",
+        checkpoint_save_mode=CHECKPOINT_SAVE_MODE_SYNC,
         resume_ready_source="Measured from repeated resume-ready trials: median 0.683s to first completed resumed optimizer step.",
         notes="Conservative calibration used for the 50.3M-parameter xlarge/upstream model shape.",
+    ),
+    CheckpointCalibration(
+        key="exact_async_m5_xlarge",
+        label="Exact async resume (m5-xlarge calibrated)",
+        checkpoint_mode=CHECKPOINT_MODE_EXACT,
+        max_params_m=float("inf"),
+        checkpoint_cost_sec=0.04,
+        resume_ready_penalty_sec=0.683,
+        source="Measured from matched async ABAB m5-xlarge runs: about 1.33% blocking overhead across 24.5 saves.",
+        checkpoint_save_mode=CHECKPOINT_SAVE_MODE_ASYNC,
+        resume_ready_source="Async exact writes preserve the same exact resume bundle; resume-ready latency matches exact sync restore.",
+        notes="Uses blocking snapshot capture cost for interval choice and leaves the larger asynchronous write share out of the save-only overhead cap.",
     ),
     CheckpointCalibration(
         key="weights_only_m5_xlarge",
@@ -67,6 +99,7 @@ DEFAULT_CHECKPOINT_CALIBRATIONS = (
         checkpoint_cost_sec=0.03,
         resume_ready_penalty_sec=1.236,
         source="Measured from matched 60s m5-xlarge runs: about +0.8s across 28 weights-only saves.",
+        checkpoint_save_mode=CHECKPOINT_SAVE_MODE_SYNC,
         resume_ready_source="Measured from repeated weights-only resume-ready trials: median 1.236s to first completed resumed optimizer step.",
         notes="Approximate resume restores model weights only and restarts from a fresh optimizer and train-loader state.",
     ),
@@ -76,11 +109,13 @@ DEFAULT_CHECKPOINT_CALIBRATIONS = (
 def select_checkpoint_calibration(
     num_params_m: float,
     checkpoint_mode: str,
+    checkpoint_save_mode: str = CHECKPOINT_SAVE_MODE_SYNC,
     calibrations: tuple[CheckpointCalibration, ...] = DEFAULT_CHECKPOINT_CALIBRATIONS,
 ) -> CheckpointCalibration:
     return select_shared_checkpoint_calibration(
         num_params_m,
         checkpoint_mode,
+        checkpoint_save_mode,
         calibrations=calibrations,
     )
 
@@ -88,12 +123,35 @@ def select_checkpoint_calibration(
 def choose_auto_checkpoint_decision(
     num_params_m: float,
     checkpoint_mode: str,
+    checkpoint_save_mode: str = CHECKPOINT_SAVE_MODE_SYNC,
     policy: HumanIntervalPolicy = DEFAULT_HUMAN_INTERVAL_POLICY,
     calibrations: tuple[CheckpointCalibration, ...] = DEFAULT_CHECKPOINT_CALIBRATIONS,
 ) -> AutoCheckpointDecision:
     return choose_shared_auto_checkpoint_decision(
         num_params_m,
         checkpoint_mode,
+        checkpoint_save_mode,
+        policy=policy,
+        calibrations=calibrations,
+    )
+
+
+def choose_auto_checkpoint_plan(
+    *,
+    num_params_m: float,
+    checkpoint_mode: str,
+    checkpoint_save_mode: str = CHECKPOINT_SAVE_MODE_SYNC,
+    time_budget: float | None,
+    token_budget: int | None,
+    policy: HumanIntervalPolicy = DEFAULT_HUMAN_INTERVAL_POLICY,
+    calibrations: tuple[CheckpointCalibration, ...] = DEFAULT_CHECKPOINT_CALIBRATIONS,
+) -> AutoCheckpointPlan | None:
+    return choose_shared_auto_checkpoint_plan(
+        num_params_m=num_params_m,
+        checkpoint_mode=checkpoint_mode,
+        checkpoint_save_mode=checkpoint_save_mode,
+        time_budget=time_budget,
+        token_budget=token_budget,
         policy=policy,
         calibrations=calibrations,
     )

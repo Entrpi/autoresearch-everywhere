@@ -211,6 +211,9 @@ class MLXEngine:
         error_tail = None
         if completed.returncode != 0:
             error_tail = "\n".join(completed.stderr.splitlines()[-12:])
+        compute_share_percent = self._get_float(summary, "compute_share_percent")
+        if compute_share_percent is None:
+            compute_share_percent = self._get_float(summary, "mfu_percent")
 
         return ProbeResult(
             preset=preset,
@@ -233,8 +236,17 @@ class MLXEngine:
             training_seconds=self._get_float(summary, "training_seconds"),
             total_seconds=self._get_float(summary, "total_seconds"),
             eval_percent=self._get_float(summary, "eval_percent"),
+            loader_percent=self._get_float(summary, "loader_percent"),
+            input_pipeline_percent=self._get_float(summary, "input_pipeline_percent"),
+            grad_percent=self._get_float(summary, "grad_percent"),
             optimizer_percent=self._get_float(summary, "optimizer_percent"),
             accum_percent=self._get_float(summary, "accum_percent"),
+            other_step_percent=self._get_float(summary, "other_step_percent"),
+            compute_share_percent=compute_share_percent,
+            train_tflops=self._get_float(summary, "train_tflops"),
+            peak_flop_utilization_percent=self._get_float(summary, "peak_flop_utilization_percent"),
+            util_window_steps=self._get_int(summary, "util_window_steps"),
+            util_window=self._get_str(summary, "util_window"),
             control_overhead_percent=self._control_overhead_percent(summary),
             canonical_rung=self._get_str(summary, "canonical_rung"),
             canonical_seq_len=self._get_int(summary, "canonical_eval_seq_len") or self._get_int(summary, "canonical_seq_len"),

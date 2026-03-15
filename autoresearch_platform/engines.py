@@ -82,6 +82,16 @@ class ProbeResult:
     eval_percent: float | None = None
     optimizer_percent: float | None = None
     accum_percent: float | None = None
+    loader_percent: float | None = None
+    input_pipeline_percent: float | None = None
+    grad_percent: float | None = None
+    forward_backward_percent: float | None = None
+    other_step_percent: float | None = None
+    compute_share_percent: float | None = None
+    train_tflops: float | None = None
+    peak_flop_utilization_percent: float | None = None
+    util_window_steps: int | None = None
+    util_window: str | None = None
     control_overhead_percent: float | None = None
     canonical_rung: str | None = None
     canonical_seq_len: int | None = None

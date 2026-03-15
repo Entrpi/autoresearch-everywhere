@@ -33,10 +33,9 @@ from autoresearch_mlx.constants import (
 from autoresearch_mlx.checkpoint_policy import (
     AUTO_CHECKPOINT_MIN_TIME_BUDGET_SEC,
     AUTO_CHECKPOINT_MIN_TOKEN_BUDGET,
-    checkpoint_interval_due,
-    choose_auto_checkpoint_decision,
+    auto_checkpoint_due,
+    choose_auto_checkpoint_plan,
     default_auto_checkpoint_path,
-    default_token_budget_checkpoint_interval,
     format_interval_label,
     format_interval_spec,
     parse_checkpoint_interval_spec,
@@ -47,9 +46,9 @@ from autoresearch_mlx.checkpoints import (
     CHECKPOINT_SAVE_MODE_ASYNC,
     CHECKPOINT_SAVE_MODE_SYNC,
     CHECKPOINT_SAVE_MODES,
-    AsyncCheckpointWriter,
     capture_async_checkpoint_snapshot,
     load_checkpoint_metadata,
+    make_async_checkpoint_writer,
     restore_checkpoint,
     save_checkpoint,
 )
@@ -67,6 +66,18 @@ from autoresearch_mlx.eval_policy import (
 from autoresearch_mlx.eval_telemetry import EvalTelemetryRecord, append_eval_telemetry, now_iso
 from autoresearch_mlx.model import GPT, GPTConfig
 from autoresearch_mlx.optim import MuonAdamW
+from autoresearch_platform.step_telemetry import (
+    OBS_INPUT_PIPELINE,
+    PHASE_ACCUMULATE,
+    PHASE_GRAD,
+    PHASE_LOADER,
+    PHASE_OPTIMIZER,
+    StepTelemetry,
+    StepTiming,
+    estimate_step_tflops,
+    percent,
+    summarize_step_telemetry,
+)
 
 
 @dataclass(frozen=True)
@@ -133,63 +144,8 @@ class RunConfig:
     checkpoint_save_mode: str
     checkpoint_path: str | None
     checkpoint_interval: str | None
+    checkpoint_interval_is_auto: bool
     resume_from: str | None
-
-
-@dataclass
-class StepTiming:
-    total_seconds: float = 0.0
-    loader_seconds: float = 0.0
-    grad_seconds: float = 0.0
-    accumulate_seconds: float = 0.0
-    optimizer_seconds: float = 0.0
-
-    @property
-    def compute_seconds(self) -> float:
-        return self.grad_seconds + self.accumulate_seconds + self.optimizer_seconds
-
-    @property
-    def other_seconds(self) -> float:
-        accounted = self.loader_seconds + self.compute_seconds
-        return max(0.0, self.total_seconds - accounted)
-
-
-@dataclass
-class StepTelemetry:
-    total_steps: int = 0
-    total_step_seconds: float = 0.0
-    total_loader_seconds: float = 0.0
-    total_grad_seconds: float = 0.0
-    total_accumulate_seconds: float = 0.0
-    total_optimizer_seconds: float = 0.0
-    steady_steps: int = 0
-    steady_step_seconds: float = 0.0
-    steady_loader_seconds: float = 0.0
-    steady_grad_seconds: float = 0.0
-    steady_accumulate_seconds: float = 0.0
-    steady_optimizer_seconds: float = 0.0
-
-    def record_step(self, timing: StepTiming, *, include_in_steady: bool) -> None:
-        self.total_steps += 1
-        self.total_step_seconds += timing.total_seconds
-        self.total_loader_seconds += timing.loader_seconds
-        self.total_grad_seconds += timing.grad_seconds
-        self.total_accumulate_seconds += timing.accumulate_seconds
-        self.total_optimizer_seconds += timing.optimizer_seconds
-        if include_in_steady:
-            self.steady_steps += 1
-            self.steady_step_seconds += timing.total_seconds
-            self.steady_loader_seconds += timing.loader_seconds
-            self.steady_grad_seconds += timing.grad_seconds
-            self.steady_accumulate_seconds += timing.accumulate_seconds
-            self.steady_optimizer_seconds += timing.optimizer_seconds
-
-    @classmethod
-    def from_dict(cls, payload: dict | None) -> "StepTelemetry":
-        if not payload:
-            return cls()
-        valid = {field: payload.get(field, 0) for field in cls.__dataclass_fields__}
-        return cls(**valid)
 
 
 TIME_BUDGET_MODE_TRAIN = "train"
@@ -581,12 +537,6 @@ def make_apply_grads_fn(model, optimizer):
     return apply_grads
 
 
-def percent(part: float, whole: float) -> float:
-    if whole <= 0.0:
-        return 0.0
-    return 100.0 * part / whole
-
-
 def median_abs_deviation(samples: list[float], center: float) -> float:
     if not samples:
         return 0.0
@@ -628,45 +578,6 @@ def detect_benchmark_warmup_steps(step_seconds: list[float]) -> int:
     return 0
 
 
-def estimate_step_tflops(num_flops_per_token: int, total_batch_size: int, step_seconds: float) -> float:
-    if step_seconds <= 0.0:
-        return 0.0
-    return (num_flops_per_token * total_batch_size) / step_seconds / 1e12
-
-
-def summarize_step_telemetry(step_telemetry: StepTelemetry, *, num_flops_per_token: int, total_batch_size: int) -> dict[str, float | int]:
-    if step_telemetry.steady_steps > 0:
-        label = "steady-state"
-        steps = step_telemetry.steady_steps
-        step_seconds = step_telemetry.steady_step_seconds
-        loader_seconds = step_telemetry.steady_loader_seconds
-        grad_seconds = step_telemetry.steady_grad_seconds
-        accumulate_seconds = step_telemetry.steady_accumulate_seconds
-        optimizer_seconds = step_telemetry.steady_optimizer_seconds
-    else:
-        label = "all-steps"
-        steps = step_telemetry.total_steps
-        step_seconds = step_telemetry.total_step_seconds
-        loader_seconds = step_telemetry.total_loader_seconds
-        grad_seconds = step_telemetry.total_grad_seconds
-        accumulate_seconds = step_telemetry.total_accumulate_seconds
-        optimizer_seconds = step_telemetry.total_optimizer_seconds
-
-    other_seconds = max(0.0, step_seconds - loader_seconds - grad_seconds - accumulate_seconds - optimizer_seconds)
-    compute_seconds = grad_seconds + accumulate_seconds + optimizer_seconds
-    return {
-        "window_label": label,
-        "window_steps": steps,
-        "train_tflops": estimate_step_tflops(num_flops_per_token, total_batch_size, step_seconds / max(steps, 1)),
-        "mfu_percent": percent(compute_seconds, step_seconds),
-        "loader_percent": percent(loader_seconds, step_seconds),
-        "grad_percent": percent(grad_seconds, step_seconds),
-        "accumulate_percent": percent(accumulate_seconds, step_seconds),
-        "optimizer_percent": percent(optimizer_seconds, step_seconds),
-        "other_step_percent": percent(other_seconds, step_seconds),
-    }
-
-
 def run_train_step(loader, grad_step, apply_grads, grad_accum_steps: int, model, optimizer):
     total_loss = None
     total_grads = None
@@ -677,12 +588,14 @@ def run_train_step(loader, grad_step, apply_grads, grad_accum_steps: int, model,
     for _ in range(grad_accum_steps):
         t_loader_start = time.perf_counter()
         batch_inputs, batch_targets, epoch = next(loader)
-        step_timing.loader_seconds += time.perf_counter() - t_loader_start
+        loader_seconds = time.perf_counter() - t_loader_start
+        step_timing.add_phase_seconds(PHASE_LOADER, loader_seconds)
+        step_timing.add_observed_seconds(OBS_INPUT_PIPELINE, loader_seconds)
 
         t_grad_start = time.perf_counter()
         loss, grads = grad_step(batch_inputs, batch_targets)
         mx.eval(loss, grads)
-        step_timing.grad_seconds += time.perf_counter() - t_grad_start
+        step_timing.add_phase_seconds(PHASE_GRAD, time.perf_counter() - t_grad_start)
 
         t_accumulate_start = time.perf_counter()
         scaled_loss = loss / grad_accum_steps
@@ -694,12 +607,12 @@ def run_train_step(loader, grad_step, apply_grads, grad_accum_steps: int, model,
             total_loss = total_loss + scaled_loss
             total_grads = tree_map(lambda left, right: left + right, total_grads, scaled_grads)
         mx.eval(total_loss, total_grads)
-        step_timing.accumulate_seconds += time.perf_counter() - t_accumulate_start
+        step_timing.add_phase_seconds(PHASE_ACCUMULATE, time.perf_counter() - t_accumulate_start)
 
     t_optimizer_start = time.perf_counter()
     optimizer_step = apply_grads(total_grads)
     mx.eval(optimizer_step, model.state, optimizer.state)
-    step_timing.optimizer_seconds += time.perf_counter() - t_optimizer_start
+    step_timing.add_phase_seconds(PHASE_OPTIMIZER, time.perf_counter() - t_optimizer_start)
     step_timing.total_seconds = time.perf_counter() - t_step_start
     return total_loss, epoch, step_timing
 
@@ -865,6 +778,7 @@ def resolve_run_config(args: argparse.Namespace) -> RunConfig:
             if args.checkpoint_interval is not None
             else None
         ),
+        checkpoint_interval_is_auto=False,
         resume_from=args.resume_from,
     )
 
@@ -992,6 +906,7 @@ def resolve_resume_config(args: argparse.Namespace) -> RunConfig:
     run_config.setdefault("checkpoint_save_mode", CHECKPOINT_SAVE_MODE_SYNC)
     run_config.setdefault("checkpoint_path", None)
     run_config.setdefault("checkpoint_interval", None)
+    run_config.setdefault("checkpoint_interval_is_auto", False)
     run_config["time_budget"] = args.time_budget if args.time_budget is not None else run_config["time_budget"]
     run_config["token_budget"] = args.token_budget if args.token_budget is not None else run_config["token_budget"]
     if args.token_budget is not None and args.time_budget is None:
@@ -1015,19 +930,22 @@ def resolve_resume_config(args: argparse.Namespace) -> RunConfig:
     if args.no_checkpoint:
         run_config["checkpoint_path"] = None
         run_config["checkpoint_interval"] = None
+        run_config["checkpoint_interval_is_auto"] = False
     else:
         run_config["checkpoint_path"] = (
             args.checkpoint_path
             if args.checkpoint_path is not None
             else run_config["checkpoint_path"] or args.resume_from
         )
-        run_config["checkpoint_interval"] = format_interval_spec(
-            parse_checkpoint_interval_spec(
-                args.checkpoint_interval
-                if args.checkpoint_interval is not None
-                else run_config["checkpoint_interval"]
+        if args.checkpoint_interval is not None:
+            run_config["checkpoint_interval"] = format_interval_spec(
+                parse_checkpoint_interval_spec(args.checkpoint_interval)
             )
-        )
+            run_config["checkpoint_interval_is_auto"] = False
+        else:
+            run_config["checkpoint_interval"] = format_interval_spec(
+                parse_checkpoint_interval_spec(run_config["checkpoint_interval"])
+            )
     run_config["resume_from"] = args.resume_from
     return RunConfig(**run_config)
 
@@ -1140,7 +1058,10 @@ def parse_args() -> RunConfig:
 
 def resolve_checkpoint_settings(args: RunConfig, num_params: int) -> tuple[RunConfig, str | None]:
     if args.no_checkpoint:
-        return replace(args, checkpoint_path=None, checkpoint_interval=None), "disabled via --no-checkpoint"
+        return (
+            replace(args, checkpoint_path=None, checkpoint_interval=None, checkpoint_interval_is_auto=False),
+            "disabled via --no-checkpoint",
+        )
 
     auto_path = default_auto_checkpoint_path(
         args.preset,
@@ -1159,6 +1080,7 @@ def resolve_checkpoint_settings(args: RunConfig, num_params: int) -> tuple[RunCo
             args,
             checkpoint_path=args.checkpoint_path or str(auto_path),
             checkpoint_interval=format_interval_spec(interval),
+            checkpoint_interval_is_auto=False,
         )
         if args.checkpoint_path is None:
             return resolved, (
@@ -1167,42 +1089,54 @@ def resolve_checkpoint_settings(args: RunConfig, num_params: int) -> tuple[RunCo
             )
         return resolved, None
 
-    if args.time_budget is not None and args.time_budget > AUTO_CHECKPOINT_MIN_TIME_BUDGET_SEC:
-        decision = choose_auto_checkpoint_decision(
-            num_params / 1e6,
-            checkpoint_mode=args.checkpoint_mode,
-        )
+    auto_plan = choose_auto_checkpoint_plan(
+        num_params_m=num_params / 1e6,
+        checkpoint_mode=args.checkpoint_mode,
+        checkpoint_save_mode=args.checkpoint_save_mode,
+        time_budget=args.time_budget,
+        token_budget=args.token_budget,
+    )
+    if auto_plan is not None:
         checkpoint_path = args.checkpoint_path or str(auto_path)
         resolved = replace(
             args,
             checkpoint_path=checkpoint_path,
-            checkpoint_interval=format_interval_spec(decision.recommendation.interval),
+            checkpoint_interval=format_interval_spec(auto_plan.interval),
+            checkpoint_interval_is_auto=True,
         )
         path_source = "existing path" if args.checkpoint_path is not None else "auto path"
-        reason = (
-            f"auto-enabled for time_budget>{AUTO_CHECKPOINT_MIN_TIME_BUDGET_SEC:.0f}s using "
-            f"{decision.calibration.label}; selected {decision.recommendation.interval_label} "
-            f"at {decision.recommendation.save_only_overhead_fraction * 100.0:.4f}% save-only overhead "
-            f"with {path_source}; time_budget_mode={args.time_budget_mode}; checkpoint_mode={args.checkpoint_mode}; "
-            f"checkpoint_save_mode={args.checkpoint_save_mode}; measured resume-ready penalty "
-            f"{decision.calibration.resume_ready_penalty_sec:.3f}s"
-        )
-        return resolved, reason
-
-    if args.token_budget is not None and args.token_budget >= AUTO_CHECKPOINT_MIN_TOKEN_BUDGET:
-        checkpoint_path = args.checkpoint_path or str(auto_path)
-        checkpoint_interval = default_token_budget_checkpoint_interval()
-        resolved = replace(
-            args,
-            checkpoint_path=checkpoint_path,
-            checkpoint_interval=format_interval_spec(checkpoint_interval),
-        )
-        path_source = "existing path" if args.checkpoint_path is not None else "auto path"
-        reason = (
-            f"auto-enabled for token_budget>={AUTO_CHECKPOINT_MIN_TOKEN_BUDGET:,} "
-            f"with earlier-of {format_interval_label(checkpoint_interval)} interval "
-            f"and {path_source}; checkpoint_mode={args.checkpoint_mode}; checkpoint_save_mode={args.checkpoint_save_mode}"
-        )
+        if auto_plan.trigger_mode == "time" and auto_plan.calibration is not None and auto_plan.recommendation is not None:
+            resume_suffix = (
+                f"; measured resume-ready penalty {auto_plan.calibration.resume_ready_penalty_sec:.3f}s"
+                if auto_plan.calibration.resume_ready_source
+                else ""
+            )
+            reason = (
+                f"auto-enabled for time_budget>{AUTO_CHECKPOINT_MIN_TIME_BUDGET_SEC:.0f}s using "
+                f"{auto_plan.calibration.label}; selected {auto_plan.recommendation.interval_label} "
+                f"at {auto_plan.recommendation.save_only_overhead_fraction * 100.0:.4f}% save-only overhead "
+                f"with {path_source}; time_budget_mode={args.time_budget_mode}; checkpoint_mode={args.checkpoint_mode}; "
+                f"checkpoint_save_mode={args.checkpoint_save_mode}{resume_suffix}"
+            )
+        elif auto_plan.trigger_mode == "tokens" and auto_plan.calibration is not None and auto_plan.recommendation is not None:
+            resume_suffix = (
+                f"; measured resume-ready penalty {auto_plan.calibration.resume_ready_penalty_sec:.3f}s"
+                if auto_plan.calibration.resume_ready_source
+                else ""
+            )
+            reason = (
+                f"auto-enabled for token_budget>={AUTO_CHECKPOINT_MIN_TOKEN_BUDGET:,} using "
+                f"{auto_plan.calibration.label}; selected earlier-of {auto_plan.interval_label} "
+                f"at {auto_plan.recommendation.save_only_overhead_fraction * 100.0:.4f}% save-only overhead "
+                f"with {path_source}; checkpoint_mode={args.checkpoint_mode}; checkpoint_save_mode={args.checkpoint_save_mode}"
+                f"{resume_suffix}"
+            )
+        else:
+            reason = (
+                f"auto-enabled for token_budget>={AUTO_CHECKPOINT_MIN_TOKEN_BUDGET:,} "
+                f"with earlier-of {auto_plan.interval_label} interval "
+                f"and {path_source}; checkpoint_mode={args.checkpoint_mode}; checkpoint_save_mode={args.checkpoint_save_mode}"
+            )
         return resolved, reason
 
     return args, None
@@ -1419,7 +1353,7 @@ def main() -> None:
     session_post_step_wall_seconds: list[float] = []
     t_budget_start = time.perf_counter()
     async_checkpoint_writer = (
-        AsyncCheckpointWriter()
+        make_async_checkpoint_writer()
         if args.checkpoint_path is not None and args.checkpoint_save_mode == CHECKPOINT_SAVE_MODE_ASYNC
         else None
     )
@@ -1459,10 +1393,13 @@ def main() -> None:
         if not force:
             if args.checkpoint_interval is None:
                 return
-            if not checkpoint_interval_due(
+            if not auto_checkpoint_due(
                 args.checkpoint_interval,
+                total_elapsed_seconds=total_training_time,
                 elapsed_seconds=total_training_time - last_checkpoint_time,
                 elapsed_tokens=total_tokens - last_checkpoint_tokens,
+                checkpoints_completed=resumed_checkpoint_count + checkpoint_count,
+                interval_is_auto=args.checkpoint_interval_is_auto,
             ):
                 return
         if async_checkpoint_writer is None:
@@ -1478,7 +1415,7 @@ def main() -> None:
                 step=step,
                 total_training_time=total_training_time,
                 smooth_train_loss=smooth_train_loss,
-                step_telemetry=asdict(step_telemetry),
+                step_telemetry=step_telemetry.to_dict(),
                 total_checkpoint_time=resumed_checkpoint_seconds + checkpoint_seconds,
                 total_checkpoint_write_time=resumed_checkpoint_write_seconds + checkpoint_write_seconds,
                 checkpoint_count=resumed_checkpoint_count + checkpoint_count,
@@ -1499,7 +1436,7 @@ def main() -> None:
                 step=step,
                 total_training_time=total_training_time,
                 smooth_train_loss=smooth_train_loss,
-                step_telemetry=asdict(step_telemetry),
+                step_telemetry=step_telemetry.to_dict(),
                 total_checkpoint_time=resumed_checkpoint_seconds + checkpoint_seconds,
                 total_checkpoint_write_time=resumed_checkpoint_write_seconds + checkpoint_write_seconds,
                 checkpoint_count=resumed_checkpoint_count + checkpoint_count,
@@ -1552,7 +1489,10 @@ def main() -> None:
         tok_per_sec = int(args.total_batch_size / dt)
         step_tflops = estimate_step_tflops(num_flops_per_token, args.total_batch_size, dt)
         remaining = budget_remaining_label()
-        step_util = percent(step_timing.compute_seconds, dt)
+        step_util = percent(
+            step_timing.sum_phase_seconds((PHASE_GRAD, PHASE_ACCUMULATE, PHASE_OPTIMIZER)),
+            dt,
+        )
         print(
             f"\rstep {step:05d} ({pct_done:.1f}%) | loss: {debiased_smooth_loss:.6f} | "
             f"lrm: {lrm:.2f} | dt: {dt * 1000:.0f}ms | tok/sec: {tok_per_sec:,} | "
@@ -1635,6 +1575,7 @@ def main() -> None:
         step_telemetry,
         num_flops_per_token=num_flops_per_token,
         total_batch_size=args.total_batch_size,
+        compute_phases=(PHASE_GRAD, PHASE_ACCUMULATE, PHASE_OPTIMIZER),
     )
     session_training_seconds = total_training_time - resumed_training_time
     cumulative_training_seconds = total_training_time
@@ -1723,18 +1664,24 @@ def main() -> None:
     print(f"eval_calibration_limited_by: {args.eval_calibration_limited_by}")
     print(f"eval_policy_version: {args.eval_policy_version}")
     print(f"peak_vram_mb:     {peak_vram_mb:.1f}")
-    print(f"mfu_percent:      {telemetry_summary['mfu_percent']:.2f}")
-    print(f"train_tflops:     {telemetry_summary['train_tflops']:.3f}")
-    print(f"loader_percent:   {telemetry_summary['loader_percent']:.2f}")
-    print(f"grad_percent:     {telemetry_summary['grad_percent']:.2f}")
-    print(f"accum_percent:    {telemetry_summary['accumulate_percent']:.2f}")
-    print(f"optimizer_percent: {telemetry_summary['optimizer_percent']:.2f}")
-    print(f"other_step_percent: {telemetry_summary['other_step_percent']:.2f}")
+    print(f"mfu_percent:      {telemetry_summary.compute_share_percent:.2f}")
+    print(f"compute_share_percent: {telemetry_summary.compute_share_percent:.2f}")
+    print(f"train_tflops:     {telemetry_summary.train_tflops:.3f}")
+    print(f"loader_percent:   {telemetry_summary.phase_percent(PHASE_LOADER):.2f}")
+    print(f"phase_loader_percent: {telemetry_summary.phase_percent(PHASE_LOADER):.2f}")
+    print(f"input_pipeline_percent: {telemetry_summary.observed_percent(OBS_INPUT_PIPELINE):.2f}")
+    print(f"grad_percent:     {telemetry_summary.phase_percent(PHASE_GRAD):.2f}")
+    print(f"phase_grad_percent: {telemetry_summary.phase_percent(PHASE_GRAD):.2f}")
+    print(f"accum_percent:    {telemetry_summary.phase_percent(PHASE_ACCUMULATE):.2f}")
+    print(f"phase_accumulate_percent: {telemetry_summary.phase_percent(PHASE_ACCUMULATE):.2f}")
+    print(f"optimizer_percent: {telemetry_summary.phase_percent(PHASE_OPTIMIZER):.2f}")
+    print(f"phase_optimizer_percent: {telemetry_summary.phase_percent(PHASE_OPTIMIZER):.2f}")
+    print(f"other_step_percent: {telemetry_summary.other_step_percent:.2f}")
     print(f"checkpoint_percent: {checkpoint_percent:.2f}")
     print(f"checkpoint_write_percent: {checkpoint_write_percent:.2f}")
     print(f"eval_percent:     {eval_percent:.2f}")
-    print(f"util_window_steps: {telemetry_summary['window_steps']}")
-    print(f"util_window:      cumulative {telemetry_summary['window_label']}")
+    print(f"util_window_steps: {telemetry_summary.window_steps}")
+    print(f"util_window:      cumulative {telemetry_summary.window_label}")
     print(f"checkpoint_count: {session_checkpoint_count}")
     print(f"session_tokens_M: {session_tokens / 1e6:.3f}")
     print(f"session_steps:    {session_steps}")

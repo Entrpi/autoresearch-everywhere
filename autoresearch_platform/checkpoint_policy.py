@@ -8,6 +8,9 @@ AUTO_CHECKPOINT_MIN_TIME_BUDGET_SEC = 300.0
 AUTO_CHECKPOINT_MIN_TOKEN_BUDGET = 50_000_000
 AUTO_CHECKPOINT_INTERVAL_SEC = 300.0
 AUTO_CHECKPOINT_INTERVAL_TOKENS = 50_000_000
+CHECKPOINT_SAVE_MODE_SYNC = "sync"
+CHECKPOINT_SAVE_MODE_ASYNC = "async"
+CHECKPOINT_SAVE_MODES = (CHECKPOINT_SAVE_MODE_SYNC, CHECKPOINT_SAVE_MODE_ASYNC)
 
 _TIME_COMPONENT_RE = re.compile(
     r"^(?P<value>\d+(?:\.\d+)?)(?P<unit>s|sec|secs|second|seconds|m|min|mins|minute|minutes|h|hr|hrs|hour|hours)?$",
@@ -66,6 +69,7 @@ class CheckpointCalibration:
     checkpoint_cost_sec: float
     resume_ready_penalty_sec: float
     source: str
+    checkpoint_save_mode: str = CHECKPOINT_SAVE_MODE_SYNC
     resume_ready_source: str = ""
     notes: str = ""
 
@@ -74,6 +78,7 @@ class CheckpointCalibration:
 class HumanIntervalPolicy:
     label: str
     anchor_interval_sec: float
+    minimum_interval_sec: float
     save_only_overhead_cap_fraction: float
     friendly_intervals_sec: tuple[float, ...]
 
@@ -96,9 +101,28 @@ class AutoCheckpointDecision:
     recommendation: CheckpointIntervalRecommendation
 
 
+@dataclass(frozen=True)
+class AutoCheckpointPlan:
+    trigger_mode: str
+    interval: CheckpointInterval
+    calibration: CheckpointCalibration | None = None
+    recommendation: CheckpointIntervalRecommendation | None = None
+
+    @property
+    def interval_label(self) -> str:
+        return format_interval_label(self.interval)
+
+    @property
+    def save_only_overhead_fraction(self) -> float | None:
+        if self.recommendation is None:
+            return None
+        return self.recommendation.save_only_overhead_fraction
+
+
 DEFAULT_HUMAN_INTERVAL_POLICY = HumanIntervalPolicy(
-    label="Generalized human-friendly interval scan anchored at hourly <= 0.1% save-only overhead",
+    label="Generalized human-friendly interval scan anchored at hourly <= 0.1% save-only overhead, with a 300s minimum interval and first auto save only after >300s",
     anchor_interval_sec=3600.0,
+    minimum_interval_sec=AUTO_CHECKPOINT_INTERVAL_SEC,
     save_only_overhead_cap_fraction=0.001,
     friendly_intervals_sec=(
         60.0,
@@ -247,6 +271,29 @@ def checkpoint_interval_due(
     return time_due or token_due
 
 
+def auto_checkpoint_due(
+    interval: CheckpointInterval | dict | str | int | float | None,
+    *,
+    total_elapsed_seconds: float,
+    elapsed_seconds: float,
+    elapsed_tokens: int,
+    checkpoints_completed: int,
+    interval_is_auto: bool,
+    first_checkpoint_min_seconds: float = AUTO_CHECKPOINT_INTERVAL_SEC,
+) -> bool:
+    if (
+        interval_is_auto
+        and checkpoints_completed <= 0
+        and total_elapsed_seconds <= first_checkpoint_min_seconds
+    ):
+        return False
+    return checkpoint_interval_due(
+        interval,
+        elapsed_seconds=elapsed_seconds,
+        elapsed_tokens=elapsed_tokens,
+    )
+
+
 def save_only_overhead_fraction(*, checkpoint_cost_sec: float, interval_sec: float) -> float:
     return checkpoint_cost_sec / interval_sec
 
@@ -254,15 +301,27 @@ def save_only_overhead_fraction(*, checkpoint_cost_sec: float, interval_sec: flo
 def select_checkpoint_calibration(
     num_params_m: float,
     checkpoint_mode: str,
+    checkpoint_save_mode: str,
     calibrations: tuple[CheckpointCalibration, ...],
 ) -> CheckpointCalibration:
     matching = tuple(
         calibration
         for calibration in calibrations
         if calibration.checkpoint_mode == checkpoint_mode
+        and calibration.checkpoint_save_mode == checkpoint_save_mode
     )
+    if not matching and checkpoint_save_mode != CHECKPOINT_SAVE_MODE_SYNC:
+        matching = tuple(
+            calibration
+            for calibration in calibrations
+            if calibration.checkpoint_mode == checkpoint_mode
+            and calibration.checkpoint_save_mode == CHECKPOINT_SAVE_MODE_SYNC
+        )
     if not matching:
-        raise ValueError(f"No checkpoint calibration registered for checkpoint_mode={checkpoint_mode!r}.")
+        raise ValueError(
+            "No checkpoint calibration registered for "
+            f"checkpoint_mode={checkpoint_mode!r}, checkpoint_save_mode={checkpoint_save_mode!r}."
+        )
     for calibration in matching:
         if num_params_m <= calibration.max_params_m:
             return calibration
@@ -275,6 +334,8 @@ def recommend_interval_for_cost(
 ) -> CheckpointIntervalRecommendation:
     last_fail_label = None
     for interval_sec in policy.friendly_intervals_sec:
+        if interval_sec < policy.minimum_interval_sec:
+            continue
         overhead_fraction = save_only_overhead_fraction(
             checkpoint_cost_sec=checkpoint_cost_sec,
             interval_sec=interval_sec,
@@ -287,7 +348,10 @@ def recommend_interval_for_cost(
                 failed_shorter_interval_label=last_fail_label,
             )
         last_fail_label = format_interval_label(interval_sec)
-    minimum_interval_sec = checkpoint_cost_sec / policy.save_only_overhead_cap_fraction
+    minimum_interval_sec = max(
+        policy.minimum_interval_sec,
+        checkpoint_cost_sec / policy.save_only_overhead_cap_fraction,
+    )
     return CheckpointIntervalRecommendation(
         interval=CheckpointInterval(seconds=minimum_interval_sec),
         interval_label=f">= {minimum_interval_sec / 60.0:.2f} min",
@@ -299,6 +363,7 @@ def recommend_interval_for_cost(
 def choose_auto_checkpoint_decision(
     num_params_m: float,
     checkpoint_mode: str,
+    checkpoint_save_mode: str,
     *,
     policy: HumanIntervalPolicy = DEFAULT_HUMAN_INTERVAL_POLICY,
     calibrations: tuple[CheckpointCalibration, ...],
@@ -306,7 +371,71 @@ def choose_auto_checkpoint_decision(
     calibration = select_checkpoint_calibration(
         num_params_m,
         checkpoint_mode,
+        checkpoint_save_mode,
         calibrations,
     )
     recommendation = recommend_interval_for_cost(calibration.checkpoint_cost_sec, policy)
     return AutoCheckpointDecision(calibration=calibration, recommendation=recommendation)
+
+
+def choose_auto_checkpoint_plan(
+    *,
+    num_params_m: float,
+    checkpoint_mode: str,
+    checkpoint_save_mode: str,
+    time_budget: float | None,
+    token_budget: int | None,
+    policy: HumanIntervalPolicy = DEFAULT_HUMAN_INTERVAL_POLICY,
+    calibrations: tuple[CheckpointCalibration, ...] = (),
+) -> AutoCheckpointPlan | None:
+    if time_budget is not None and time_budget > AUTO_CHECKPOINT_MIN_TIME_BUDGET_SEC:
+        if calibrations:
+            decision = choose_auto_checkpoint_decision(
+                num_params_m,
+                checkpoint_mode,
+                checkpoint_save_mode,
+                policy=policy,
+                calibrations=calibrations,
+            )
+            return AutoCheckpointPlan(
+                trigger_mode="time",
+                interval=decision.recommendation.interval,
+                calibration=decision.calibration,
+                recommendation=decision.recommendation,
+            )
+        return AutoCheckpointPlan(
+            trigger_mode="time",
+            interval=default_time_budget_checkpoint_interval(),
+        )
+
+    if token_budget is not None and token_budget >= AUTO_CHECKPOINT_MIN_TOKEN_BUDGET:
+        if calibrations:
+            decision = choose_auto_checkpoint_decision(
+                num_params_m,
+                checkpoint_mode,
+                checkpoint_save_mode,
+                policy=policy,
+                calibrations=calibrations,
+            )
+            interval = CheckpointInterval(
+                seconds=decision.recommendation.interval.seconds,
+                tokens=AUTO_CHECKPOINT_INTERVAL_TOKENS,
+            )
+            recommendation = CheckpointIntervalRecommendation(
+                interval=interval,
+                interval_label=format_interval_label(interval),
+                save_only_overhead_fraction=decision.recommendation.save_only_overhead_fraction,
+                failed_shorter_interval_label=decision.recommendation.failed_shorter_interval_label,
+            )
+            return AutoCheckpointPlan(
+                trigger_mode="tokens",
+                interval=interval,
+                calibration=decision.calibration,
+                recommendation=recommendation,
+            )
+        return AutoCheckpointPlan(
+            trigger_mode="tokens",
+            interval=default_token_budget_checkpoint_interval(),
+        )
+
+    return None
