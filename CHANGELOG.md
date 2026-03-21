@@ -29,6 +29,40 @@ On this hardware, the default canonical matched benchmark window for optimizatio
 
 ## Latest
 
+### New commit — train/lr: add adaptive multiplier discovery and near-tie reporting — score `4` — complexity `14`
+
+**Human-directed, AI-shaped (4)**
+
+- Add a dedicated adaptive LR-multiplier sweep that runs real short training probes against deterministic streaming validation instead of relying on fixed preset ratios.
+  - Meaning: `discover_lr.py` and `tools/discover_lr.py` now run same-engine MLX or CUDA probes, keep the preset's per-group LR ratios intact, and search only the scalar `lr_multiplier` that scales those ratios together.
+  - Motivation: once the trainers exposed deterministic streaming AUC and cycle-complete honest metrics, LR choice no longer needed to be hard-coded or tuned manually one long run at a time; it could be discovered from a small budget of directly comparable probes.
+  - Purpose: make LR selection a reusable front-door workflow that can pick a strong multiplier before longer training runs without forcing each experiment to build its own probe harness.
+  - Add `autoresearch_platform.lr_discovery` with adaptive anchor/up/down probing, log-space duplicate suppression, directional refinement, and backend-agnostic sweep orchestration around a shared `run_probe()` contract.
+  - Add `tools/discover_lr.py` plus the top-level `discover_lr.py` wrapper so the sweep can launch real trainer probes, persist per-probe histories and logs, and write ranked JSON/Markdown summaries with ready-to-run follow-up train args.
+  - Rank probes by streaming-validation AUC while recording supporting tail metrics (`min_bpb`, `last20_bpb`, `honest_bpb`, completed cycles) so the sweep result preserves both short-run learning speed and end-of-probe quality context.
+- Refine the LR search policy so it stays coarse-first, zooms in only when the winner has enough edge to justify it, and reports close finishes honestly instead of overclaiming one precise multiplier.
+  - Meaning: the sweep now completes the initial `anchor`, `2x`, and `0.5x` bracket before any local zoom, dedupes distinct multipliers when deciding whether to refine, and emits an explicit `near_tie` result when the top probes are effectively flat at the chosen probe budget.
+  - Motivation: real 5090 sweeps exposed two failure modes in the first pass: duplicate coarse multipliers could suppress the true refine trigger, and tiny AUC gaps were being reported as decisive winners even when the real takeaway was "keep this as the default pick, but the top pair are effectively tied."
+  - Purpose: keep the probe budget efficient, avoid spurious reruns, and make the sweep output reflect actual certainty instead of just the current sort order.
+  - Restrict fine refinement to a post-coarse local search around the incumbent, using a tighter duplicate tolerance and shrinking multiplicative steps instead of interleaving local probes into the coarse bracket.
+  - Add near-tie reporting to the shared sweep result plus CLI/Markdown output, including the lower-LR longer-horizon alternative when it is distinct and clearer wording when the winner is already the lower-LR member of the top pair.
+  - Fix duplicate handling in refinement and near-tie decisions so repeated coarse points do not mask the real distinct runner-up or prevent refinement around the actual winner.
+
+**Grounding**
+
+- Files:
+  - `CHANGELOG.md`
+  - `autoresearch_platform/lr_discovery.py`
+  - `tools/discover_lr.py`
+  - `discover_lr.py`
+- Validation:
+  - `python3 -m py_compile autoresearch_platform/lr_discovery.py tools/discover_lr.py discover_lr.py`
+  - `python3 discover_lr.py --help`
+  - `python3 - <<'PY' ...` synthetic sweep smoke covering a clear coarse winner that triggers local refinement, a near-tied top pair that stops without extra zoom, and a duplicate-coarse case where the true distinct runner-up still triggers refinement around the real winner.
+- Measurements:
+  - On the RTX 5090 `m5-tiny` CUDA sweep, the refined policy evaluated `7` probes and moved the short-run pick from the anchor `1.0x` to `0.91700404x`, improving probe AUC from `1.518842` to `1.518370` (about `0.03%`) and improving a follow-up `10`-reference-cycle explicit end-state reference eval from `1.389380` to `1.389000`.
+  - On the RTX 5090 `m5-large` CUDA sweep with FA4 working through the default `uv` front door, the corrected coarse-first policy evaluated `5` probes and returned `0.91700404x` as the short-run pick while keeping `1.0x` and `1.0905077x` inside the reported near-tie band rather than overstating a precise single optimum.
+
 ### New commit — train/eval: add shared streaming honest eval hierarchy — score `4` — complexity `14`
 
 **Human-directed, AI-shaped (4)**
