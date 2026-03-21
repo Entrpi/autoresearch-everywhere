@@ -168,6 +168,8 @@ class MLXEngine:
         streaming_eval_batch_size: int | None = None,
         streaming_eval_history_output: Path | None = None,
         complete_streaming_eval_cycle: bool = False,
+        probe_pathology_max_auc: float | None = None,
+        probe_pathology_max_bpb: float | None = None,
     ) -> ProbeResult:
         del curve_eval_seconds, eval_seq_len, eval_tokens, eval_batch_size
         preset_config = PRESETS[preset]
@@ -235,6 +237,10 @@ class MLXEngine:
             cmd.extend(["--streaming-eval-history-output", str(streaming_eval_history_output)])
         if complete_streaming_eval_cycle:
             cmd.append("--complete-streaming-eval-cycle")
+        if probe_pathology_max_auc is not None:
+            cmd.extend(["--probe-pathology-max-auc", f"{probe_pathology_max_auc:.8g}"])
+        if probe_pathology_max_bpb is not None:
+            cmd.extend(["--probe-pathology-max-bpb", f"{probe_pathology_max_bpb:.8g}"])
 
         label = self._command_label(
             [

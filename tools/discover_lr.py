@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import math
+from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
 
@@ -13,6 +14,8 @@ from autoresearch_platform.lr_discovery import (
     AdaptiveLrSweepConfig,
     LR_DISCOVERY_LEVER_GLOBAL,
     LR_DISCOVERY_LEVERS,
+    LR_DISCOVERY_MODE_STANDARD,
+    LR_DISCOVERY_MODES,
     apply_discovery_lever,
     run_staged_lr_multiplier_sweep,
 )
@@ -43,6 +46,7 @@ LR_MULTIPLIER_SHORT_LABELS = (
     ("matrix_lr_multiplier", "matrix"),
     ("scalar_lr_multiplier", "scalar"),
 )
+PATHOLOGY_BASELINE_MULTIPLIER = 3.0
 
 
 def _default_engine() -> str:
@@ -121,6 +125,16 @@ def _build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--discovery-mode",
+        choices=LR_DISCOVERY_MODES,
+        default=LR_DISCOVERY_MODE_STANDARD,
+        help=(
+            "Discovery stop policy. `standard` keeps the current bounded sweep; "
+            "`find-bowl` keeps extending outward until the best probe has pronounced degradation on both sides "
+            "or the extra-probe cap is reached."
+        ),
+    )
+    parser.add_argument(
         "--jump-threshold",
         type=float,
         default=2.0,
@@ -167,6 +181,21 @@ def _build_parser() -> argparse.ArgumentParser:
             "If the top probes are within this fractional AUC gap, report them as a near-tie "
             "and surface the lower LR as the longer-horizon alternative."
         ),
+    )
+    parser.add_argument(
+        "--bowl-auc-fraction",
+        type=float,
+        default=AdaptiveLrSweepConfig.bowl_auc_fraction,
+        help=(
+            "Required fractional AUC degradation on both sides of the winner before `find-bowl` "
+            "declares that a local bowl has been bracketed."
+        ),
+    )
+    parser.add_argument(
+        "--bowl-max-extra-probes",
+        type=int,
+        default=AdaptiveLrSweepConfig.bowl_max_extra_probes,
+        help="Maximum additional outward extension probes per stage in `find-bowl` mode.",
     )
     parser.add_argument("--seq-len", type=int, help="Optional sequence-length override for all probes.")
     parser.add_argument("--window-pattern", type=str, help="Optional window-pattern override for all probes.")
@@ -233,6 +262,60 @@ def _load_probe_from_history(
         stdout_path=stdout_path,
         stderr_path=stderr_path,
         lr_multipliers=lr_multipliers_to_dict(multipliers),
+        pathology_triggered=bool(payload.get("probe_pathology_triggered", False)),
+        pathology_reason=payload.get("probe_pathology_reason"),
+    )
+
+
+def _pathology_thresholds_from_baseline(
+    baseline: AdaptiveLrProbe | None,
+) -> tuple[float | None, float | None]:
+    if baseline is None:
+        return None, None
+    max_auc = None
+    if math.isfinite(baseline.auc):
+        max_auc = baseline.auc * PATHOLOGY_BASELINE_MULTIPLIER
+    baseline_bpb = next(
+        (
+            value
+            for value in (baseline.honest_bpb, baseline.last20_bpb, baseline.min_bpb)
+            if value is not None and math.isfinite(value)
+        ),
+        None,
+    )
+    max_bpb = (
+        baseline_bpb * PATHOLOGY_BASELINE_MULTIPLIER
+        if baseline_bpb is not None
+        else None
+    )
+    return max_auc, max_bpb
+
+
+def _annotate_probe_pathology(
+    probe: AdaptiveLrProbe,
+    *,
+    baseline: AdaptiveLrProbe | None,
+) -> AdaptiveLrProbe:
+    max_auc, max_bpb = _pathology_thresholds_from_baseline(baseline)
+    reasons: list[str] = []
+    if max_auc is not None and math.isfinite(probe.auc) and probe.auc > max_auc:
+        reasons.append(f"auc>{max_auc:.6f}")
+    representative_bpb = next(
+        (
+            value
+            for value in (probe.honest_bpb, probe.last20_bpb, probe.min_bpb)
+            if value is not None and math.isfinite(value)
+        ),
+        None,
+    )
+    if max_bpb is not None and representative_bpb is not None and representative_bpb > max_bpb:
+        reasons.append(f"bpb>{max_bpb:.6f}")
+    if not reasons:
+        return probe
+    return replace(
+        probe,
+        pathology_triggered=True,
+        pathology_reason=", ".join(reasons),
     )
 
 
@@ -258,6 +341,7 @@ def _summary_payload(args: argparse.Namespace, output_dir: Path, discovery: dict
         "preset": args.preset,
         "time_budget": args.time_budget,
         "anchor_lr_multiplier": args.anchor_lr_multiplier,
+        "discovery_mode": args.discovery_mode,
         "discovery_levers": discovery["discovery_levers"],
         "seq_len": args.seq_len,
         "window_pattern": args.window_pattern,
@@ -353,6 +437,33 @@ def _write_summary_markdown(payload: dict, *, path: Path) -> None:
                 f"`{probe['cycles_completed']}` |"
             )
         lines.append("")
+        discarded_pathological = sweep.get("discarded_pathological_probes")
+        if discarded_pathological:
+            lines.extend(
+                [
+                    "### Pathological Probes",
+                    "",
+                    f"- Discarded pathological probes: `{discarded_pathological}`",
+                    "",
+                ]
+            )
+        bowl = sweep.get("bowl")
+        if bowl is not None:
+            lines.extend(
+                [
+                    "### Bowl Status",
+                    "",
+                    f"- Mode: `{bowl['mode']}`",
+                    f"- Status: `{bowl['status']}`",
+                    f"- Required side degradation: `{bowl['required_gap_fraction']:.6f}`",
+                    f"- Left gap (closest qualifying-or-nearest): `{bowl['left_gap_fraction']}`",
+                    f"- Right gap (closest qualifying-or-nearest): `{bowl['right_gap_fraction']}`",
+                    f"- Nearest-left gap: `{bowl['nearest_left_gap_fraction']}`",
+                    f"- Nearest-right gap: `{bowl['nearest_right_gap_fraction']}`",
+                    f"- Extra probes used: `{bowl['extra_probes_used']}` / `{bowl['max_extra_probes']}`",
+                    "",
+                ]
+            )
         if near_tie is not None:
             shorter = near_tie["recommended_for_shorter_runs"]
             longer = near_tie["recommended_for_longer_runs"]
@@ -411,10 +522,15 @@ def main() -> int:
     logs_dir.mkdir(parents=True, exist_ok=True)
     histories_dir.mkdir(parents=True, exist_ok=True)
 
-    def run_probe(multipliers: LrMultipliers) -> AdaptiveLrProbe:
+    def run_probe(
+        multipliers: LrMultipliers,
+        *,
+        pathology_baseline: AdaptiveLrProbe | None = None,
+    ) -> AdaptiveLrProbe:
         label = _probe_label(multipliers)
         history_path = histories_dir / f"{label}.json"
         stage = f"lr-{label}"
+        pathology_max_auc, pathology_max_bpb = _pathology_thresholds_from_baseline(pathology_baseline)
         result = engine.run_train_probe(
             preset=args.preset,
             time_budget=args.time_budget,
@@ -434,6 +550,8 @@ def main() -> int:
             streaming_eval_batch_size=args.streaming_eval_batch_size,
             streaming_eval_history_output=history_path,
             complete_streaming_eval_cycle=args.complete_streaming_eval_cycle,
+            probe_pathology_max_auc=pathology_max_auc,
+            probe_pathology_max_bpb=pathology_max_bpb,
         )
         if result.returncode != 0:
             tail = result.error_tail or "No stderr tail captured."
@@ -455,12 +573,18 @@ def main() -> int:
             stdout_path=result.stdout_path,
             stderr_path=result.stderr_path,
         )
+        probe = _annotate_probe_pathology(probe, baseline=pathology_baseline)
         print(
             f"probe multipliers={_format_lr_multipliers(probe.lr_multipliers or lr_multipliers_to_dict(multipliers))} "
             f"auc={probe.auc:.6f} "
             f"min_bpb={'nan' if probe.min_bpb is None else f'{probe.min_bpb:.6f}'} "
             f"honest_bpb={'skipped' if probe.honest_bpb is None else f'{probe.honest_bpb:.6f}'} "
             f"cycles={probe.cycles_completed}"
+            + (
+                f" pathology={probe.pathology_reason}"
+                if probe.pathology_triggered
+                else ""
+            )
         )
         return probe
 
@@ -469,6 +593,7 @@ def main() -> int:
         levers=args.discovery_levers,
         config=AdaptiveLrSweepConfig(
             anchor_multiplier=args.anchor_lr_multiplier,
+            discovery_mode=args.discovery_mode,
             jump_threshold=args.jump_threshold,
             duplicate_log_tolerance=args.duplicate_log_tolerance,
             fine_refine_auc_fraction=args.fine_refine_auc_fraction,
@@ -476,6 +601,8 @@ def main() -> int:
             fine_refine_rounds=args.fine_refine_rounds,
             fine_duplicate_log_tolerance=args.fine_duplicate_log_tolerance,
             near_tie_auc_fraction=args.near_tie_auc_fraction,
+            bowl_auc_fraction=args.bowl_auc_fraction,
+            bowl_max_extra_probes=args.bowl_max_extra_probes,
         ),
     )
     payload = _summary_payload(args, output_dir, discovery)
@@ -494,6 +621,26 @@ def main() -> int:
         print(f"  base={_format_lr_multipliers(stage['base_lr_multipliers'])}")
         print(f"  best_value={best['lr_multiplier']:.8g}")
         print(f"  best_auc={best['auc']:.6f}")
+        discarded_pathological = sweep.get("discarded_pathological_probes")
+        if discarded_pathological:
+            print(f"  discarded_pathological_probes={discarded_pathological}")
+        bowl = sweep.get("bowl")
+        if bowl is not None:
+            print("  bowl:")
+            print(
+                f"    status={bowl['status']} "
+                f"required_gap_fraction={bowl['required_gap_fraction']:.6f} "
+                f"left_gap_fraction={bowl['left_gap_fraction']} "
+                f"right_gap_fraction={bowl['right_gap_fraction']}"
+            )
+            print(
+                f"    nearest_left_gap_fraction={bowl['nearest_left_gap_fraction']} "
+                f"nearest_right_gap_fraction={bowl['nearest_right_gap_fraction']}"
+            )
+            print(
+                f"    extra_probes_used={bowl['extra_probes_used']} "
+                f"max_extra_probes={bowl['max_extra_probes']}"
+            )
         near_tie = sweep.get("near_tie")
         if near_tie is not None:
             shorter = near_tie["recommended_for_shorter_runs"]

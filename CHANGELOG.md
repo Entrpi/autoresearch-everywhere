@@ -29,6 +29,42 @@ On this hardware, the default canonical matched benchmark window for optimizatio
 
 ## Latest
 
+### New commit — train/lr: add optional bowl-finding discovery mode — score `4` — complexity `8`
+
+**Human-directed, AI-shaped (4)**
+
+- Add an opt-in `find-bowl` discovery mode that keeps extending the sweep until the current winner is bracketed by meaningfully worse probes on both sides, or the extra-probe budget is exhausted.
+  - Meaning: the shared LR sweep can now distinguish between "best at this budget" and "actually bracketed a local bowl," recording explicit bowl status, side-gap fractions, and budget-exhausted outcomes per stage instead of pretending every sweep ends with the same level of certainty.
+  - Motivation: the staged `global -> matrix` work exposed that near-ties and shallow edges are not the same thing as a real bracketed optimum. For longer or more consequential runs, we want an optional stronger stop condition than the current bounded opportunistic refinement.
+  - Purpose: let discovery stay cheap by default while adding a more trustworthy mode for longer-horizon or grouped-lever searches where proving both-side degradation matters more than minimizing probe count.
+  - Extend `autoresearch_platform.lr_discovery` with `standard` vs `find-bowl` sweep modes, configurable bowl degradation thresholds and extra-probe caps, and stage-level bowl reporting that prefers the closest qualifying degraded probe on each side while still exposing the nearest-side gaps for context.
+  - Add a stage-anchor pathology guard to discovery probes: if a jump or follow-on probe exceeds `3x` the anchor-established online AUC/BPB baseline, the trainer stops that probe early, discovery marks it pathological, excludes it from ranked evidence, and falls back to ordinary doubling in that direction instead of letting absurd jump probes pollute the bowl search.
+  - Extend `tools/discover_lr.py` with `--discovery-mode`, `--bowl-auc-fraction`, and `--bowl-max-extra-probes`, plus CLI/Markdown summary output for bowl status alongside the existing near-tie reporting.
+  - Validate the mode with both synthetic sweeps and real MLX `m5-tiny` probe runs; the updated staged run confirmed that one pathological matrix jump is now discarded, the stage falls back to finite doublings, and the bowl still closes cleanly around `matrix=2`.
+
+**Grounding**
+
+- Files:
+  - `CHANGELOG.md`
+  - `autoresearch_cuda/train.py`
+  - `autoresearch_mlx/train.py`
+  - `autoresearch_platform/cuda_engine.py`
+  - `autoresearch_platform/engines.py`
+  - `autoresearch_platform/lr_discovery.py`
+  - `autoresearch_platform/mlx_engine.py`
+  - `tools/discover_lr.py`
+- Validation:
+  - `python3 -m py_compile autoresearch_platform/lr_discovery.py tools/discover_lr.py discover_lr.py autoresearch_platform/engines.py autoresearch_platform/mlx_engine.py autoresearch_platform/cuda_engine.py autoresearch_mlx/train.py autoresearch_cuda/train.py`
+  - `python3 - <<'PY' ...` synthetic bowl-confirmed smoke with `jump_threshold=999`, showing one outward extension was enough to confirm a bowl
+  - `python3 - <<'PY' ...` synthetic budget-exhausted smoke with `jump_threshold=999`, showing the new mode exits honestly as `budget-exhausted-no-bowl` when both-side degradation never becomes large enough
+  - `python3 - <<'PY' ...` synthetic pathological-jump fallback smoke, showing a pathological extrapolated jump is discarded, the direction falls back to ordinary doubling, and the finite continuation probe still ranks normally
+  - `python3 - <<'PY' ...` history round-trip smoke confirming trainer-emitted `probe_pathology_triggered` / `probe_pathology_reason` propagate back into `AdaptiveLrProbe`
+  - `python3 discover_lr.py --help | rg -n "discovery-mode|bowl-auc-fraction|bowl-max-extra-probes"`
+  - `UV_CACHE_DIR=/tmp/uv-cache uv run python discover_lr.py --engine mlx --preset m5-tiny --time-budget 1.5 --discovery-mode find-bowl --discovery-levers global --streaming-eval-interval-steps 1 --streaming-eval-tokens 16384 --output-dir results/analysis/lr_discovery_mlx_m5tiny_find_bowl_test`
+    - Real MLX result: `global=1.8340081`, `bowl-confirmed`, `left_gap_fraction=0.05799`, `right_gap_fraction=0.08149`, `nearest_right_gap_fraction=0.00291`, `extra_probes_used=0`.
+  - `UV_CACHE_DIR=/tmp/uv-cache uv run python discover_lr.py --engine mlx --preset m5-tiny --time-budget 1.5 --discovery-mode find-bowl --discovery-levers global matrix --streaming-eval-interval-steps 1 --streaming-eval-tokens 16384 --output-dir results/analysis/lr_discovery_mlx_m5tiny_global_matrix_find_bowl_test3`
+    - Real staged MLX result: `global=1.8340081`, `matrix=2`, matrix-stage `discarded_pathological_probes=1`, and the ranked finite matrix probes remained `2, 4, 1, 0.5, 8, 0.25`.
+
 ### New commit — train/lr: add staged matrix multiplier discovery — score `4` — complexity `7`
 
 **Human-directed, AI-shaped (4)**

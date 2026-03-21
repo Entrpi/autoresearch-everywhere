@@ -196,6 +196,8 @@ class RunConfig:
     streaming_eval_batch_size: int | None
     streaming_eval_history_output: str | None
     complete_streaming_eval_cycle: bool
+    probe_pathology_max_auc: float | None
+    probe_pathology_max_bpb: float | None
     resume_from: str | None
 
 
@@ -905,6 +907,8 @@ def resolve_run_config(args: argparse.Namespace) -> RunConfig:
         streaming_eval_batch_size=args.streaming_eval_batch_size,
         streaming_eval_history_output=args.streaming_eval_history_output,
         complete_streaming_eval_cycle=args.complete_streaming_eval_cycle,
+        probe_pathology_max_auc=args.probe_pathology_max_auc,
+        probe_pathology_max_bpb=args.probe_pathology_max_bpb,
         resume_from=args.resume_from,
     )
 
@@ -950,6 +954,8 @@ def resolve_run_config(args: argparse.Namespace) -> RunConfig:
         "streaming_eval_seq_len",
         "streaming_eval_batch_size",
         "streaming_eval_history_output",
+        "probe_pathology_max_auc",
+        "probe_pathology_max_bpb",
     ):
         value = getattr(args, field)
         if value is not None:
@@ -1008,6 +1014,8 @@ def resolve_resume_config(args: argparse.Namespace) -> RunConfig:
         "streaming_eval_seq_len",
         "streaming_eval_batch_size",
         "streaming_eval_history_output",
+        "probe_pathology_max_auc",
+        "probe_pathology_max_bpb",
     ):
         if getattr(args, field) is not None:
             disallowed.append(field)
@@ -1083,6 +1091,8 @@ def resolve_resume_config(args: argparse.Namespace) -> RunConfig:
     run_config.setdefault("streaming_eval_batch_size", None)
     run_config.setdefault("streaming_eval_history_output", None)
     run_config.setdefault("complete_streaming_eval_cycle", False)
+    run_config.setdefault("probe_pathology_max_auc", None)
+    run_config.setdefault("probe_pathology_max_bpb", None)
     run_config["time_budget"] = args.time_budget if args.time_budget is not None else run_config["time_budget"]
     run_config["token_budget"] = args.token_budget if args.token_budget is not None else run_config["token_budget"]
     if args.token_budget is not None and args.time_budget is None:
@@ -1289,6 +1299,8 @@ def parse_args() -> RunConfig:
         action="store_true",
         help="If a run stops mid streaming-eval cycle, continue until the current cycle boundary so the final honest metric is complete.",
     )
+    parser.add_argument("--probe-pathology-max-auc", type=float, help=argparse.SUPPRESS)
+    parser.add_argument("--probe-pathology-max-bpb", type=float, help=argparse.SUPPRESS)
     args = parser.parse_args()
     if args.time_budget is not None and args.token_budget is not None:
         raise ValueError("--time-budget and --token-budget are mutually exclusive.")
@@ -1658,6 +1670,8 @@ def main() -> None:
     subref_streaming_tracker = None
     subref_streaming_cursor = None
     derived_reference_streaming = None
+    probe_pathology_triggered = False
+    probe_pathology_reason = None
     if cheap_stream_enabled:
         streaming_eval_loader = make_dataloader(
             tokenizer,
@@ -1728,6 +1742,18 @@ def main() -> None:
         if args.checkpoint_path is not None and args.checkpoint_save_mode == CHECKPOINT_SAVE_MODE_ASYNC
         else None
     )
+
+    def maybe_mark_probe_pathology(metric_name: str, value: float | None, limit: float | None) -> None:
+        nonlocal probe_pathology_triggered, probe_pathology_reason
+        if probe_pathology_triggered or limit is None or value is None:
+            return
+        if not math.isfinite(value):
+            return
+        if value <= limit:
+            return
+        probe_pathology_triggered = True
+        probe_pathology_reason = f"{metric_name}={value:.6f}>{limit:.6f}"
+        print(f"\nprobe_pathology_stop: {probe_pathology_reason}")
 
     def budget_elapsed_seconds() -> float:
         if args.time_budget_mode == TIME_BUDGET_MODE_TRAIN:
@@ -1800,6 +1826,9 @@ def main() -> None:
                     f"\nstreaming_eval: step={point.step} cycle={point.cycle_index} "
                     f"honest_bpb={honest_label} auc={auc_label}"
                 )
+                maybe_mark_probe_pathology("streaming_honest_bpb", point.honest_bpb, args.probe_pathology_max_bpb)
+                maybe_mark_probe_pathology("streaming_auc", summary.auc, args.probe_pathology_max_auc)
+            maybe_mark_probe_pathology("streaming_batch_bpb", point.batch_bpb, args.probe_pathology_max_bpb)
         if subref_streaming_tracker is not None and subref_streaming_cursor is not None:
             t_subref_eval_start = time.perf_counter()
             x_subref, y_subref = subref_streaming_cursor.next_batch()
@@ -1824,6 +1853,7 @@ def main() -> None:
                     f"\nsubref_one_sixth_eval: step={subref_point.step} cycle={subref_point.cycle_index} "
                     f"honest_bpb={subref_label}"
                 )
+                maybe_mark_probe_pathology("subref_honest_bpb", subref_point.honest_bpb, args.probe_pathology_max_bpb)
                 if (
                     derived_reference_streaming is not None
                     and derived_reference_streaming.record_completed_subcycle(
@@ -1841,6 +1871,12 @@ def main() -> None:
                         f"\nreference_streaming_eval: cycle={derived_reference_streaming.supercycles_completed} "
                         f"honest_bpb={reference_label}"
                     )
+                    maybe_mark_probe_pathology(
+                        "reference_honest_bpb",
+                        derived_reference_streaming.honest_supercycle_bpb,
+                        args.probe_pathology_max_bpb,
+                    )
+            maybe_mark_probe_pathology("subref_batch_bpb", subref_point.batch_bpb, args.probe_pathology_max_bpb)
         model.train()
 
     def maybe_save_checkpoint(*, force: bool = False) -> None:
@@ -1975,6 +2011,8 @@ def main() -> None:
         local_step_index += 1
         maybe_run_streaming_eval()
         maybe_save_checkpoint()
+        if probe_pathology_triggered:
+            break
         session_post_step_wall_seconds.append(time.perf_counter() - t_budget_start)
 
     budget_elapsed_at_cutoff = budget_elapsed_seconds()
@@ -2062,6 +2100,8 @@ def main() -> None:
                 "supercycle_key": REFERENCE_EVAL_RUNG.key,
                 **derived_reference_streaming.to_dict(),
             }
+        history_payload["probe_pathology_triggered"] = probe_pathology_triggered
+        history_payload["probe_pathology_reason"] = probe_pathology_reason
         output_path.write_text(json.dumps(history_payload, indent=2) + "\n")
     telemetry_summary = summarize_step_telemetry(
         step_telemetry,
@@ -2147,6 +2187,8 @@ def main() -> None:
     print(f"resolved_matrix_lr: {resolved_lr_profile.matrix_lr:.6f}")
     print(f"budget_elapsed_seconds: {budget_elapsed_at_cutoff:.1f}")
     print(f"budget_elapsed_tokens_M: {total_tokens / 1e6:.3f}")
+    print(f"probe_pathology_triggered: {probe_pathology_triggered}")
+    print(f"probe_pathology_reason: {probe_pathology_reason or 'none'}")
     if streaming_eval_config is None:
         print("streaming_eval_points: skipped")
         print("streaming_eval_cycles_completed: skipped")

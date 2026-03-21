@@ -173,6 +173,8 @@ class TrainingEngine(Protocol):
         streaming_eval_batch_size: int | None = None,
         streaming_eval_history_output: Path | None = None,
         complete_streaming_eval_cycle: bool = False,
+        probe_pathology_max_auc: float | None = None,
+        probe_pathology_max_bpb: float | None = None,
     ) -> ProbeResult:
         ...
 

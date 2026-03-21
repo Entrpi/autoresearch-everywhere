@@ -186,6 +186,8 @@ def build_parser():
         action="store_true",
         help="If a run stops mid streaming-eval cycle, continue until the current cycle boundary so the final honest metric is complete.",
     )
+    parser.add_argument("--probe-pathology-max-auc", type=float, help=argparse.SUPPRESS)
+    parser.add_argument("--probe-pathology-max-bpb", type=float, help=argparse.SUPPRESS)
     return parser
 
 
@@ -1486,6 +1488,8 @@ streaming_eval_seconds = 0.0
 subref_streaming_eval_seconds = 0.0
 cheap_stream_enabled = STREAMING_EVAL_CONFIG is not None and streaming_mode_uses_cheap(STREAMING_EVAL_CONFIG.mode)
 subref_stream_enabled = STREAMING_EVAL_CONFIG is not None and streaming_mode_uses_subref(STREAMING_EVAL_CONFIG.mode)
+probe_pathology_triggered = False
+probe_pathology_reason = None
 streaming_eval_tracker = (
     StreamingEvalTracker(STREAMING_EVAL_CONFIG)
     if cheap_stream_enabled
@@ -1535,6 +1539,19 @@ derived_reference_streaming = (
     if subref_stream_enabled
     else None
 )
+
+
+def maybe_mark_probe_pathology(metric_name: str, value: float | None, limit: float | None):
+    global probe_pathology_triggered, probe_pathology_reason
+    if probe_pathology_triggered or limit is None or value is None:
+        return
+    if not math.isfinite(value):
+        return
+    if value <= limit:
+        return
+    probe_pathology_triggered = True
+    probe_pathology_reason = f"{metric_name}={value:.6f}>{limit:.6f}"
+    print(f"\nprobe_pathology_stop: {probe_pathology_reason}")
 
 
 def maybe_save_checkpoint(*, force: bool = False):
@@ -1603,6 +1620,8 @@ def maybe_save_checkpoint(*, force: bool = False):
         "complete_streaming_eval_cycle": (
             STREAMING_EVAL_CONFIG.complete_cycle_on_budget if STREAMING_EVAL_CONFIG is not None else False
         ),
+        "probe_pathology_max_auc": ARGS.probe_pathology_max_auc,
+        "probe_pathology_max_bpb": ARGS.probe_pathology_max_bpb,
     }
     training_state_base = {
         "step": step,
@@ -1704,12 +1723,15 @@ def maybe_run_streaming_eval():
                 f"\nstreaming_eval: step={point.step} cycle={point.cycle_index} "
                 f"honest_bpb={honest_label} auc={auc_label}"
             )
+            maybe_mark_probe_pathology("streaming_honest_bpb", point.honest_bpb, ARGS.probe_pathology_max_bpb)
+            maybe_mark_probe_pathology("streaming_auc", summary.auc, ARGS.probe_pathology_max_auc)
             streaming_eval_loader = make_dataloader(
                 tokenizer,
                 STREAMING_EVAL_CONFIG.batch_size,
                 STREAMING_EVAL_CONFIG.seq_len,
                 "val",
             )
+        maybe_mark_probe_pathology("streaming_batch_bpb", point.batch_bpb, ARGS.probe_pathology_max_bpb)
     if subref_streaming_tracker is not None and subref_streaming_loader is not None:
         torch.cuda.synchronize()
         t_subref_eval_start = time.perf_counter()
@@ -1736,6 +1758,7 @@ def maybe_run_streaming_eval():
                 f"\nsubref_one_sixth_eval: step={subref_point.step} cycle={subref_point.cycle_index} "
                 f"honest_bpb={honest_label}"
             )
+            maybe_mark_probe_pathology("subref_honest_bpb", subref_point.honest_bpb, ARGS.probe_pathology_max_bpb)
             if (
                 derived_reference_streaming is not None
                 and derived_reference_streaming.record_completed_subcycle(
@@ -1753,12 +1776,18 @@ def maybe_run_streaming_eval():
                     f"\nreference_streaming_eval: cycle={derived_reference_streaming.supercycles_completed} "
                     f"honest_bpb={reference_label}"
                 )
+                maybe_mark_probe_pathology(
+                    "reference_honest_bpb",
+                    derived_reference_streaming.honest_supercycle_bpb,
+                    ARGS.probe_pathology_max_bpb,
+                )
                 subref_streaming_loader = make_dataloader(
                     tokenizer,
                     CUDA_SUBREF_ONE_SIXTH_RUNG.batch_size,
                     CUDA_SUBREF_ONE_SIXTH_RUNG.seq_len,
                     "val",
                 )
+        maybe_mark_probe_pathology("subref_batch_bpb", subref_point.batch_bpb, ARGS.probe_pathology_max_bpb)
     model.train()
 
 resumed_from = None
@@ -2122,6 +2151,8 @@ if not ARGS.eval_only:
             curve_eval_index=curve_eval_index,
         )
         maybe_save_checkpoint()
+        if probe_pathology_triggered:
+            break
 
     print()  # newline after \r training log
     maybe_save_checkpoint(force=True)
@@ -2221,6 +2252,8 @@ if STREAMING_EVAL_HISTORY_OUTPUT is not None and (
             "supercycle_key": CUDA_REFERENCE_RUNG.key,
             **derived_reference_streaming.to_dict(),
         }
+    history_payload["probe_pathology_triggered"] = probe_pathology_triggered
+    history_payload["probe_pathology_reason"] = probe_pathology_reason
     history_output_path.write_text(json.dumps(history_payload, indent=2) + "\n")
 session_checkpoint_count = checkpoint_count
 cumulative_checkpoint_seconds = resumed_checkpoint_seconds + checkpoint_seconds
@@ -2305,6 +2338,8 @@ print(f"resolved_value_embedding_lr: {RESOLVED_LR_PROFILE.value_embedding_lr:.6f
 print(f"resolved_resid_lr: {RESOLVED_LR_PROFILE.resid_lr:.6f}")
 print(f"resolved_x0_lr: {RESOLVED_LR_PROFILE.x0_lr:.6f}")
 print(f"resolved_matrix_lr: {RESOLVED_LR_PROFILE.matrix_lr:.6f}")
+print(f"probe_pathology_triggered: {str(probe_pathology_triggered).lower()}")
+print(f"probe_pathology_reason: {probe_pathology_reason or 'none'}")
 if STREAMING_EVAL_CONFIG is None:
     print("streaming_eval_points: skipped")
     print("streaming_eval_cycles_completed: skipped")
