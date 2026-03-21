@@ -15,6 +15,17 @@ from dataclasses import dataclass, asdict, replace
 from pathlib import Path
 
 from autoresearch_cuda.config import CUDA_PRESETS, resolve_run_preset
+from autoresearch_platform.lr_profile import (
+    LR_MULTIPLIER_ARG_FIELDS,
+    LrMultipliers,
+    ResolvedLrProfile,
+    apply_lr_multipliers,
+    lr_multipliers_from_mapping,
+    lr_multipliers_to_dict,
+    lr_profile_from_mapping,
+    lr_profile_to_dict,
+    resolve_effective_lr_profile,
+)
 from autoresearch_platform.streaming_eval import (
     DEFAULT_STREAMING_EVAL_INTERVAL_STEPS,
     DEFAULT_STREAMING_EVAL_TOKENS,
@@ -121,6 +132,26 @@ def build_parser():
         help="Multiply all preset LR groups by this scalar while preserving their ratios.",
     )
     parser.add_argument(
+        "--embedding-lr-multiplier",
+        type=float,
+        help="Additional multiplier for embedding-side LR groups after the global LR multiplier.",
+    )
+    parser.add_argument(
+        "--unembedding-lr-multiplier",
+        type=float,
+        help="Additional multiplier for the lm_head / unembedding LR after the global LR multiplier.",
+    )
+    parser.add_argument(
+        "--matrix-lr-multiplier",
+        type=float,
+        help="Additional multiplier for Muon matrix LR groups after the global LR multiplier.",
+    )
+    parser.add_argument(
+        "--scalar-lr-multiplier",
+        type=float,
+        help="Additional multiplier for scalar LR groups after the global LR multiplier.",
+    )
+    parser.add_argument(
         "--streaming-eval-interval-steps",
         type=int,
         help=f"Run one deterministic validation batch every N training steps. Default for discovery flows is {DEFAULT_STREAMING_EVAL_INTERVAL_STEPS}.",
@@ -161,6 +192,20 @@ def build_parser():
 ARGS = build_parser().parse_args()
 if ARGS.time_budget is not None and ARGS.token_budget is not None:
     raise SystemExit("--time-budget and --token-budget are mutually exclusive.")
+
+
+def _lr_multipliers_from_args(args) -> LrMultipliers:
+    return LrMultipliers(
+        lr_multiplier=1.0 if args.lr_multiplier is None else args.lr_multiplier,
+        embedding_lr_multiplier=(
+            1.0 if args.embedding_lr_multiplier is None else args.embedding_lr_multiplier
+        ),
+        unembedding_lr_multiplier=(
+            1.0 if args.unembedding_lr_multiplier is None else args.unembedding_lr_multiplier
+        ),
+        matrix_lr_multiplier=1.0 if args.matrix_lr_multiplier is None else args.matrix_lr_multiplier,
+        scalar_lr_multiplier=1.0 if args.scalar_lr_multiplier is None else args.scalar_lr_multiplier,
+    )
 
 
 def _parse_curve_eval_seconds(value: str | None) -> list[float]:
@@ -487,8 +532,13 @@ def _resolve_run_preset_with_resume(args):
         disallowed_overrides.append("--depth")
     if args.device_batch_size is not None and args.device_batch_size != run_config["device_batch_size"]:
         disallowed_overrides.append("--device-batch-size")
-    if args.lr_multiplier is not None and args.lr_multiplier != run_config.get("lr_multiplier", 1.0):
-        disallowed_overrides.append("--lr-multiplier")
+    saved_lr_multipliers = lr_multipliers_from_mapping(run_config)
+    for field in LR_MULTIPLIER_ARG_FIELDS:
+        arg_value = getattr(args, field)
+        if arg_value is None:
+            continue
+        if arg_value != getattr(saved_lr_multipliers, field):
+            disallowed_overrides.append(f"--{field.replace('_', '-')}")
     if disallowed_overrides:
         raise ValueError(
             "Resume does not allow shape-changing overrides: "
@@ -944,9 +994,7 @@ class GPT(nn.Module):
             'transformer_matrices': transformer_matrices, 'scalars': scalars, 'total': total,
         }
 
-    def setup_optimizer(self, unembedding_lr=0.004, embedding_lr=0.2, matrix_lr=0.02,
-                        weight_decay=0.0, adam_betas=(0.8, 0.95), scalar_lr=0.5):
-        model_dim = self.config.n_embd
+    def setup_optimizer(self, lr_profile: ResolvedLrProfile, *, weight_decay=0.0, adam_betas=(0.8, 0.95)):
         matrix_params = list(self.transformer.h.parameters())
         value_embeds_params = list(self.value_embeds.parameters())
         embedding_params = list(self.transformer.wte.parameters())
@@ -955,20 +1003,17 @@ class GPT(nn.Module):
         x0_params = [self.x0_lambdas]
         assert len(list(self.parameters())) == (len(matrix_params) + len(embedding_params) +
             len(lm_head_params) + len(value_embeds_params) + len(resid_params) + len(x0_params))
-        # Scale LR ∝ 1/√dmodel (tuned at 768 dim)
-        dmodel_lr_scale = (model_dim / 768) ** -0.5
-        print(f"Scaling AdamW LRs by 1/sqrt({model_dim}/768) = {dmodel_lr_scale:.6f}")
         param_groups = [
-            dict(kind='adamw', params=lm_head_params, lr=unembedding_lr * dmodel_lr_scale, betas=adam_betas, eps=1e-10, weight_decay=0.0),
-            dict(kind='adamw', params=embedding_params, lr=embedding_lr * dmodel_lr_scale, betas=adam_betas, eps=1e-10, weight_decay=0.0),
-            dict(kind='adamw', params=value_embeds_params, lr=embedding_lr * dmodel_lr_scale, betas=adam_betas, eps=1e-10, weight_decay=0.0),
-            dict(kind='adamw', params=resid_params, lr=scalar_lr * 0.01, betas=adam_betas, eps=1e-10, weight_decay=0.0),
-            dict(kind='adamw', params=x0_params, lr=scalar_lr, betas=(0.96, 0.95), eps=1e-10, weight_decay=0.0),
+            dict(kind='adamw', params=lm_head_params, lr=lr_profile.lm_head_lr, betas=adam_betas, eps=1e-10, weight_decay=0.0),
+            dict(kind='adamw', params=embedding_params, lr=lr_profile.embedding_lr, betas=adam_betas, eps=1e-10, weight_decay=0.0),
+            dict(kind='adamw', params=value_embeds_params, lr=lr_profile.value_embedding_lr, betas=adam_betas, eps=1e-10, weight_decay=0.0),
+            dict(kind='adamw', params=resid_params, lr=lr_profile.resid_lr, betas=adam_betas, eps=1e-10, weight_decay=0.0),
+            dict(kind='adamw', params=x0_params, lr=lr_profile.x0_lr, betas=(0.96, 0.95), eps=1e-10, weight_decay=0.0),
         ]
         for shape in sorted({p.shape for p in matrix_params}):
             group_params = [p for p in matrix_params if p.shape == shape]
             param_groups.append(dict(
-                kind='muon', params=group_params, lr=matrix_lr,
+                kind='muon', params=group_params, lr=lr_profile.matrix_lr,
                 momentum=0.95, ns_steps=5, beta2=0.95, weight_decay=weight_decay,
             ))
         optimizer = MuonAdamW(param_groups)
@@ -1195,10 +1240,6 @@ WINDOW_PATTERN = RUN_PRESET.window_pattern
 
 # Optimization
 TOTAL_BATCH_SIZE = RUN_PRESET.total_batch_size
-EMBEDDING_LR = RUN_PRESET.embedding_lr
-UNEMBEDDING_LR = RUN_PRESET.unembedding_lr
-MATRIX_LR = RUN_PRESET.matrix_lr
-SCALAR_LR = RUN_PRESET.scalar_lr
 WEIGHT_DECAY = RUN_PRESET.weight_decay
 ADAM_BETAS = RUN_PRESET.adam_betas
 WARMUP_RATIO = RUN_PRESET.warmup_ratio
@@ -1209,11 +1250,16 @@ FINAL_LR_FRAC = RUN_PRESET.final_lr_frac
 DEPTH = RUN_PRESET.depth
 DEVICE_BATCH_SIZE = RUN_PRESET.device_batch_size
 RESUME_RUN_CONFIG = RESUME_BUNDLE.get("run_config") if RESUME_BUNDLE is not None else {}
-LR_MULTIPLIER = (
-    ARGS.lr_multiplier
-    if ARGS.lr_multiplier is not None
-    else float(RESUME_RUN_CONFIG.get("lr_multiplier", 1.0))
+BASE_LR_PROFILE = lr_profile_from_mapping(
+    RESUME_RUN_CONFIG if RESUME_RUN_CONFIG else {"lr_profile": lr_profile_to_dict(RUN_PRESET.lr_profile)},
+    default_profile=RUN_PRESET.lr_profile,
 )
+LR_MULTIPLIERS = (
+    _lr_multipliers_from_args(ARGS)
+    if any(getattr(ARGS, field) is not None for field in LR_MULTIPLIER_ARG_FIELDS)
+    else lr_multipliers_from_mapping(RESUME_RUN_CONFIG)
+)
+TUNED_LR_PROFILE = apply_lr_multipliers(BASE_LR_PROFILE, LR_MULTIPLIERS)
 STREAMING_EVAL_CONFIG = _resolve_streaming_eval_config(
     ARGS,
     seq_len=MAX_SEQ_LEN,
@@ -1317,7 +1363,24 @@ def build_model_config(depth):
     )
 
 config = build_model_config(DEPTH)
+RESOLVED_LR_PROFILE = resolve_effective_lr_profile(
+    TUNED_LR_PROFILE,
+    model_dim=config.n_embd,
+)
 print(f"Model config: {asdict(config)}")
+print(f"LR profile: {lr_profile_to_dict(BASE_LR_PROFILE)}")
+print(f"LR multipliers: {lr_multipliers_to_dict(LR_MULTIPLIERS)}")
+print(f"Tuned LR profile: {lr_profile_to_dict(TUNED_LR_PROFILE)}")
+print(
+    "Resolved LR profile: "
+    f"lm_head={RESOLVED_LR_PROFILE.lm_head_lr:.6f}, "
+    f"embedding={RESOLVED_LR_PROFILE.embedding_lr:.6f}, "
+    f"value_embedding={RESOLVED_LR_PROFILE.value_embedding_lr:.6f}, "
+    f"resid={RESOLVED_LR_PROFILE.resid_lr:.6f}, "
+    f"x0={RESOLVED_LR_PROFILE.x0_lr:.6f}, "
+    f"matrix={RESOLVED_LR_PROFILE.matrix_lr:.6f}, "
+    f"dmodel_scale={RESOLVED_LR_PROFILE.dmodel_lr_scale:.6f}"
+)
 
 with torch.device("meta"):
     model = GPT(config)
@@ -1514,7 +1577,13 @@ def maybe_save_checkpoint(*, force: bool = False):
         "checkpoint_interval": format_interval_spec(CHECKPOINT_INTERVAL),
         "checkpoint_interval_is_auto": CHECKPOINT_INTERVAL_IS_AUTO,
         "checkpoint_save_mode": CHECKPOINT_SAVE_MODE,
-        "lr_multiplier": LR_MULTIPLIER,
+        "lr_multiplier": LR_MULTIPLIERS.lr_multiplier,
+        "embedding_lr_multiplier": LR_MULTIPLIERS.embedding_lr_multiplier,
+        "unembedding_lr_multiplier": LR_MULTIPLIERS.unembedding_lr_multiplier,
+        "matrix_lr_multiplier": LR_MULTIPLIERS.matrix_lr_multiplier,
+        "scalar_lr_multiplier": LR_MULTIPLIERS.scalar_lr_multiplier,
+        "lr_profile": lr_profile_to_dict(BASE_LR_PROFILE),
+        "lr_multipliers": lr_multipliers_to_dict(LR_MULTIPLIERS),
         "streaming_eval_interval_steps": (
             STREAMING_EVAL_CONFIG.interval_steps if STREAMING_EVAL_CONFIG is not None else None
         ),
@@ -1708,7 +1777,11 @@ if ARGS.eval_only:
     else:
         print(f"Time budget: {TIME_BUDGET}s")
     print(f"Smoke mode: {str(ARGS.smoke).lower()}")
-    print(f"LR multiplier: {LR_MULTIPLIER:.6f}")
+    print(f"LR multiplier: {LR_MULTIPLIERS.lr_multiplier:.6f}")
+    print(f"Embedding LR multiplier: {LR_MULTIPLIERS.embedding_lr_multiplier:.6f}")
+    print(f"Unembedding LR multiplier: {LR_MULTIPLIERS.unembedding_lr_multiplier:.6f}")
+    print(f"Matrix LR multiplier: {LR_MULTIPLIERS.matrix_lr_multiplier:.6f}")
+    print(f"Scalar LR multiplier: {LR_MULTIPLIERS.scalar_lr_multiplier:.6f}")
     if CHECKPOINT_PATH is not None:
         print(f"Checkpoint path: {CHECKPOINT_PATH}")
     if CHECKPOINT_INTERVAL is not None:
@@ -1746,11 +1819,8 @@ if ARGS.eval_only:
         )
 else:
     optimizer = model.setup_optimizer(
-        unembedding_lr=UNEMBEDDING_LR,
-        embedding_lr=EMBEDDING_LR,
-        scalar_lr=SCALAR_LR,
+        lr_profile=RESOLVED_LR_PROFILE,
         adam_betas=ADAM_BETAS,
-        matrix_lr=MATRIX_LR,
         weight_decay=WEIGHT_DECAY,
     )
 
@@ -1777,7 +1847,11 @@ else:
     else:
         print(f"Time budget: {TIME_BUDGET}s")
     print(f"Smoke mode: {str(ARGS.smoke).lower()}")
-    print(f"LR multiplier: {LR_MULTIPLIER:.6f}")
+    print(f"LR multiplier: {LR_MULTIPLIERS.lr_multiplier:.6f}")
+    print(f"Embedding LR multiplier: {LR_MULTIPLIERS.embedding_lr_multiplier:.6f}")
+    print(f"Unembedding LR multiplier: {LR_MULTIPLIERS.unembedding_lr_multiplier:.6f}")
+    print(f"Matrix LR multiplier: {LR_MULTIPLIERS.matrix_lr_multiplier:.6f}")
+    print(f"Scalar LR multiplier: {LR_MULTIPLIERS.scalar_lr_multiplier:.6f}")
     if CHECKPOINT_PATH is not None:
         print(f"Checkpoint path: {CHECKPOINT_PATH}")
     if CHECKPOINT_INTERVAL is not None:
@@ -1977,7 +2051,7 @@ if not ARGS.eval_only:
         muon_momentum = get_muon_momentum(step)
         muon_weight_decay = get_weight_decay(progress)
         for group in optimizer.param_groups:
-            group["lr"] = group["initial_lr"] * LR_MULTIPLIER * lrm
+            group["lr"] = group["initial_lr"] * lrm
             if group['kind'] == 'muon':
                 group["momentum"] = muon_momentum
                 group["weight_decay"] = muon_weight_decay
@@ -2216,7 +2290,21 @@ if TOKEN_BUDGET is not None:
     print(f"token_budget:     {TOKEN_BUDGET}")
 print(f"training_seconds: {total_training_time:.1f}")
 print(f"total_seconds:    {session_total_seconds:.1f}")
-print(f"lr_multiplier:   {LR_MULTIPLIER:.6f}")
+print(f"lr_multiplier:   {LR_MULTIPLIERS.lr_multiplier:.6f}")
+print(f"embedding_lr_multiplier: {LR_MULTIPLIERS.embedding_lr_multiplier:.6f}")
+print(f"unembedding_lr_multiplier: {LR_MULTIPLIERS.unembedding_lr_multiplier:.6f}")
+print(f"matrix_lr_multiplier: {LR_MULTIPLIERS.matrix_lr_multiplier:.6f}")
+print(f"scalar_lr_multiplier: {LR_MULTIPLIERS.scalar_lr_multiplier:.6f}")
+print(f"base_embedding_lr: {BASE_LR_PROFILE.embedding_lr:.6f}")
+print(f"base_unembedding_lr: {BASE_LR_PROFILE.unembedding_lr:.6f}")
+print(f"base_matrix_lr: {BASE_LR_PROFILE.matrix_lr:.6f}")
+print(f"base_scalar_lr: {BASE_LR_PROFILE.scalar_lr:.6f}")
+print(f"resolved_lm_head_lr: {RESOLVED_LR_PROFILE.lm_head_lr:.6f}")
+print(f"resolved_embedding_lr: {RESOLVED_LR_PROFILE.embedding_lr:.6f}")
+print(f"resolved_value_embedding_lr: {RESOLVED_LR_PROFILE.value_embedding_lr:.6f}")
+print(f"resolved_resid_lr: {RESOLVED_LR_PROFILE.resid_lr:.6f}")
+print(f"resolved_x0_lr: {RESOLVED_LR_PROFILE.x0_lr:.6f}")
+print(f"resolved_matrix_lr: {RESOLVED_LR_PROFILE.matrix_lr:.6f}")
 if STREAMING_EVAL_CONFIG is None:
     print("streaming_eval_points: skipped")
     print("streaming_eval_cycles_completed: skipped")

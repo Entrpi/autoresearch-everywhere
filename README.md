@@ -296,10 +296,10 @@ Current project snapshot from [CHANGELOG.md](CHANGELOG.md):
 
 | Metric | Value |
 | --- | --- |
-| Mean autonomy score | `3.13 / 6` |
-| Mean complexity | `6.90 / commit` |
-| Mean score per top-level bullet | `3.20 / 6` |
-| History covered | `89` commits across `16` subsystems |
+| Mean autonomy score | `3.15 / 6` |
+| Mean complexity | `7.00 / commit` |
+| Mean score per top-level bullet | `3.22 / 6` |
+| History covered | `91` commits across `17` subsystems |
 <!-- autonomy-golf-snapshot:end -->
 
 Refresh with:

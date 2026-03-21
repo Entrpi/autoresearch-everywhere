@@ -92,6 +92,18 @@ from autoresearch_platform.step_telemetry import (
     percent,
     summarize_step_telemetry,
 )
+from autoresearch_platform.lr_profile import (
+    DEFAULT_LR_PROFILE,
+    LR_MULTIPLIER_ARG_FIELDS,
+    LrMultipliers,
+    LrProfile,
+    apply_lr_multipliers,
+    lr_multipliers_from_mapping,
+    lr_multipliers_to_dict,
+    lr_profile_from_mapping,
+    lr_profile_to_dict,
+    resolve_effective_lr_profile,
+)
 from autoresearch_platform.streaming_eval import (
     DEFAULT_STREAMING_EVAL_INTERVAL_STEPS,
     STREAMING_EVAL_MODES,
@@ -116,6 +128,7 @@ class RunPreset:
     window_pattern: str
     device_batch_size: int
     total_batch_size: int
+    lr_profile: LrProfile = DEFAULT_LR_PROFILE
 
 
 @dataclass(frozen=True)
@@ -170,6 +183,12 @@ class RunConfig:
     checkpoint_interval: str | None
     checkpoint_interval_is_auto: bool
     lr_multiplier: float
+    embedding_lr_multiplier: float
+    unembedding_lr_multiplier: float
+    matrix_lr_multiplier: float
+    scalar_lr_multiplier: float
+    lr_profile: dict[str, float]
+    lr_multipliers: dict[str, float]
     streaming_eval_interval_steps: int | None
     streaming_eval_mode: str | None
     streaming_eval_tokens: int | None
@@ -700,10 +719,6 @@ ASPECT_RATIO = 64
 HEAD_DIM = 128
 
 # Optimization
-EMBEDDING_LR = 0.6
-UNEMBEDDING_LR = 0.004
-MATRIX_LR = 0.04
-SCALAR_LR = 0.5
 WEIGHT_DECAY = 0.2
 ADAM_BETAS = (0.8, 0.95)
 WARMUP_RATIO = 0.02
@@ -796,11 +811,26 @@ PRESET_CHOICES = tuple(PRESETS.keys())
 DEFAULT_PRESET = "m5-small"
 
 
+def _lr_multipliers_from_args(args: argparse.Namespace) -> LrMultipliers:
+    return LrMultipliers(
+        lr_multiplier=1.0 if args.lr_multiplier is None else args.lr_multiplier,
+        embedding_lr_multiplier=(
+            1.0 if args.embedding_lr_multiplier is None else args.embedding_lr_multiplier
+        ),
+        unembedding_lr_multiplier=(
+            1.0 if args.unembedding_lr_multiplier is None else args.unembedding_lr_multiplier
+        ),
+        matrix_lr_multiplier=1.0 if args.matrix_lr_multiplier is None else args.matrix_lr_multiplier,
+        scalar_lr_multiplier=1.0 if args.scalar_lr_multiplier is None else args.scalar_lr_multiplier,
+    )
+
+
 def resolve_run_config(args: argparse.Namespace) -> RunConfig:
     if args.benchmark_warmup_steps is not None and args.benchmark_warmup_steps < 0:
         raise ValueError("--benchmark-warmup-steps must be non-negative.")
     preset_name = args.preset or DEFAULT_PRESET
     preset = PRESETS[preset_name]
+    lr_multipliers = _lr_multipliers_from_args(args)
     config = RunConfig(
         preset=preset_name,
         time_budget=TIME_BUDGET,
@@ -857,7 +887,13 @@ def resolve_run_config(args: argparse.Namespace) -> RunConfig:
             else None
         ),
         checkpoint_interval_is_auto=False,
-        lr_multiplier=1.0 if args.lr_multiplier is None else args.lr_multiplier,
+        lr_multiplier=lr_multipliers.lr_multiplier,
+        embedding_lr_multiplier=lr_multipliers.embedding_lr_multiplier,
+        unembedding_lr_multiplier=lr_multipliers.unembedding_lr_multiplier,
+        matrix_lr_multiplier=lr_multipliers.matrix_lr_multiplier,
+        scalar_lr_multiplier=lr_multipliers.scalar_lr_multiplier,
+        lr_profile=lr_profile_to_dict(preset.lr_profile),
+        lr_multipliers=lr_multipliers_to_dict(lr_multipliers),
         streaming_eval_interval_steps=args.streaming_eval_interval_steps,
         streaming_eval_mode=(
             args.streaming_eval_mode
@@ -905,6 +941,10 @@ def resolve_run_config(args: argparse.Namespace) -> RunConfig:
         "device_batch_size",
         "total_batch_size",
         "lr_multiplier",
+        "embedding_lr_multiplier",
+        "unembedding_lr_multiplier",
+        "matrix_lr_multiplier",
+        "scalar_lr_multiplier",
         "streaming_eval_interval_steps",
         "streaming_eval_tokens",
         "streaming_eval_seq_len",
@@ -918,6 +958,18 @@ def resolve_run_config(args: argparse.Namespace) -> RunConfig:
         overrides["complete_streaming_eval_cycle"] = True
     if overrides:
         config = replace(config, **overrides)
+    config = replace(
+        config,
+        lr_multipliers=lr_multipliers_to_dict(
+            LrMultipliers(
+                lr_multiplier=config.lr_multiplier,
+                embedding_lr_multiplier=config.embedding_lr_multiplier,
+                unembedding_lr_multiplier=config.unembedding_lr_multiplier,
+                matrix_lr_multiplier=config.matrix_lr_multiplier,
+                scalar_lr_multiplier=config.scalar_lr_multiplier,
+            )
+        ),
+    )
     if args.token_budget is not None and args.time_budget is None:
         config = replace(config, time_budget=None)
     explicit_canonical_overrides = any(
@@ -950,7 +1002,6 @@ def resolve_resume_config(args: argparse.Namespace) -> RunConfig:
         "device_batch_size",
         "total_batch_size",
         "seed",
-        "lr_multiplier",
         "streaming_eval_interval_steps",
         "streaming_eval_mode",
         "streaming_eval_tokens",
@@ -958,6 +1009,9 @@ def resolve_resume_config(args: argparse.Namespace) -> RunConfig:
         "streaming_eval_batch_size",
         "streaming_eval_history_output",
     ):
+        if getattr(args, field) is not None:
+            disallowed.append(field)
+    for field in LR_MULTIPLIER_ARG_FIELDS:
         if getattr(args, field) is not None:
             disallowed.append(field)
     if args.smoke:
@@ -1013,6 +1067,15 @@ def resolve_resume_config(args: argparse.Namespace) -> RunConfig:
     run_config.setdefault("checkpoint_interval", None)
     run_config.setdefault("checkpoint_interval_is_auto", False)
     run_config.setdefault("lr_multiplier", 1.0)
+    run_config.setdefault("embedding_lr_multiplier", 1.0)
+    run_config.setdefault("unembedding_lr_multiplier", 1.0)
+    run_config.setdefault("matrix_lr_multiplier", 1.0)
+    run_config.setdefault("scalar_lr_multiplier", 1.0)
+    run_config.setdefault("lr_profile", lr_profile_to_dict(PRESETS[run_config["preset"]].lr_profile))
+    run_config.setdefault(
+        "lr_multipliers",
+        lr_multipliers_to_dict(lr_multipliers_from_mapping(run_config)),
+    )
     run_config.setdefault("streaming_eval_interval_steps", None)
     run_config.setdefault("streaming_eval_mode", STREAMING_EVAL_MODE_SUBREF_ONE_SIXTH)
     run_config.setdefault("streaming_eval_tokens", None)
@@ -1062,6 +1125,7 @@ def resolve_resume_config(args: argparse.Namespace) -> RunConfig:
                 parse_checkpoint_interval_spec(run_config["checkpoint_interval"])
             )
     run_config["resume_from"] = args.resume_from
+    run_config["lr_multipliers"] = lr_multipliers_to_dict(lr_multipliers_from_mapping(run_config))
     return RunConfig(**run_config)
 
 
@@ -1167,6 +1231,26 @@ def parse_args() -> RunConfig:
         "--lr-multiplier",
         type=float,
         help="Multiply all preset LR groups by this scalar while preserving their ratios.",
+    )
+    parser.add_argument(
+        "--embedding-lr-multiplier",
+        type=float,
+        help="Additional multiplier for embedding-side LR groups after the global LR multiplier.",
+    )
+    parser.add_argument(
+        "--unembedding-lr-multiplier",
+        type=float,
+        help="Additional multiplier for the lm_head / unembedding LR after the global LR multiplier.",
+    )
+    parser.add_argument(
+        "--matrix-lr-multiplier",
+        type=float,
+        help="Additional multiplier for Muon matrix LR groups after the global LR multiplier.",
+    )
+    parser.add_argument(
+        "--scalar-lr-multiplier",
+        type=float,
+        help="Additional multiplier for scalar LR groups after the global LR multiplier.",
     )
     parser.add_argument(
         "--streaming-eval-interval-steps",
@@ -1371,6 +1455,13 @@ def main() -> None:
         sequence_len=max(args.seq_len, args.canonical_eval_seq_len),
         window_pattern=args.window_pattern,
     )
+    base_lr_profile = lr_profile_from_mapping(args)
+    lr_multipliers = lr_multipliers_from_mapping(args)
+    tuned_lr_profile = apply_lr_multipliers(base_lr_profile, lr_multipliers)
+    resolved_lr_profile = resolve_effective_lr_profile(
+        tuned_lr_profile,
+        model_dim=config.n_embd,
+    )
 
     model = GPT(config)
     model.init_weights()
@@ -1421,6 +1512,10 @@ def main() -> None:
         f"eval_policy_version={args.eval_policy_version}, "
         f"device_batch_size={args.device_batch_size}, total_batch_size={args.total_batch_size}, "
         f"lr_multiplier={args.lr_multiplier}, "
+        f"embedding_lr_multiplier={args.embedding_lr_multiplier}, "
+        f"unembedding_lr_multiplier={args.unembedding_lr_multiplier}, "
+        f"matrix_lr_multiplier={args.matrix_lr_multiplier}, "
+        f"scalar_lr_multiplier={args.scalar_lr_multiplier}, "
         f"smoke={args.smoke}, benchmark_warmup_steps={args.benchmark_warmup_steps if args.benchmark_warmup_steps is not None else 'auto'}, "
         f"benchmark_skip_eval={args.benchmark_skip_eval}, prefer_prepacked_cache={args.prefer_prepacked_cache}, "
         f"no_checkpoint={args.no_checkpoint}, checkpoint_mode={args.checkpoint_mode}, checkpoint_save_mode={args.checkpoint_save_mode}, checkpoint_path={args.checkpoint_path}, "
@@ -1433,6 +1528,19 @@ def main() -> None:
         f"streaming_eval_history_output={args.streaming_eval_history_output}, "
         f"complete_streaming_eval_cycle={args.complete_streaming_eval_cycle}, "
         f"resume_from={args.resume_from}"
+    )
+    print(f"LR profile: {lr_profile_to_dict(base_lr_profile)}")
+    print(f"LR multipliers: {lr_multipliers_to_dict(lr_multipliers)}")
+    print(f"Tuned LR profile: {lr_profile_to_dict(tuned_lr_profile)}")
+    print(
+        "Resolved LR profile: "
+        f"lm_head={resolved_lr_profile.lm_head_lr:.6f}, "
+        f"embedding={resolved_lr_profile.embedding_lr:.6f}, "
+        f"value_embedding={resolved_lr_profile.value_embedding_lr:.6f}, "
+        f"resid={resolved_lr_profile.resid_lr:.6f}, "
+        f"x0={resolved_lr_profile.x0_lr:.6f}, "
+        f"matrix={resolved_lr_profile.matrix_lr:.6f}, "
+        f"dmodel_scale={resolved_lr_profile.dmodel_lr_scale:.6f}"
     )
     num_flops_per_token = model.estimate_flops()
     print(f"Estimated FLOPs per token: {num_flops_per_token:e}")
@@ -1460,11 +1568,8 @@ def main() -> None:
 
     optimizer = MuonAdamW(
         model,
-        unembedding_lr=UNEMBEDDING_LR,
-        embedding_lr=EMBEDDING_LR,
-        scalar_lr=SCALAR_LR,
+        lr_profile=resolved_lr_profile,
         adam_betas=ADAM_BETAS,
-        matrix_lr=MATRIX_LR,
         weight_decay=WEIGHT_DECAY,
     )
 
@@ -1812,7 +1917,7 @@ def main() -> None:
         muon_momentum = get_muon_momentum(step)
         muon_weight_decay = get_weight_decay(progress)
         optimizer.set_schedule(
-            lr_multiplier=args.lr_multiplier * lrm,
+            schedule_factor=lrm,
             muon_momentum=muon_momentum,
             muon_weight_decay=muon_weight_decay,
         )
@@ -2026,6 +2131,20 @@ def main() -> None:
     print(f"token_budget:     {args.token_budget}")
     print(f"time_budget_mode: {args.time_budget_mode}")
     print(f"lr_multiplier:   {args.lr_multiplier:.6f}")
+    print(f"embedding_lr_multiplier: {args.embedding_lr_multiplier:.6f}")
+    print(f"unembedding_lr_multiplier: {args.unembedding_lr_multiplier:.6f}")
+    print(f"matrix_lr_multiplier: {args.matrix_lr_multiplier:.6f}")
+    print(f"scalar_lr_multiplier: {args.scalar_lr_multiplier:.6f}")
+    print(f"base_embedding_lr: {base_lr_profile.embedding_lr:.6f}")
+    print(f"base_unembedding_lr: {base_lr_profile.unembedding_lr:.6f}")
+    print(f"base_matrix_lr: {base_lr_profile.matrix_lr:.6f}")
+    print(f"base_scalar_lr: {base_lr_profile.scalar_lr:.6f}")
+    print(f"resolved_lm_head_lr: {resolved_lr_profile.lm_head_lr:.6f}")
+    print(f"resolved_embedding_lr: {resolved_lr_profile.embedding_lr:.6f}")
+    print(f"resolved_value_embedding_lr: {resolved_lr_profile.value_embedding_lr:.6f}")
+    print(f"resolved_resid_lr: {resolved_lr_profile.resid_lr:.6f}")
+    print(f"resolved_x0_lr: {resolved_lr_profile.x0_lr:.6f}")
+    print(f"resolved_matrix_lr: {resolved_lr_profile.matrix_lr:.6f}")
     print(f"budget_elapsed_seconds: {budget_elapsed_at_cutoff:.1f}")
     print(f"budget_elapsed_tokens_M: {total_tokens / 1e6:.3f}")
     if streaming_eval_config is None:

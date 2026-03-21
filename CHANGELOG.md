@@ -29,6 +29,38 @@ On this hardware, the default canonical matched benchmark window for optimizatio
 
 ## Latest
 
+### New commit — train/lr: add a shared grouped LR profile surface — score `4` — complexity `9`
+
+**Human-directed, AI-shaped (4)**
+
+- Lift LR handling onto a shared grouped-profile surface so MLX and CUDA consume the same base preset rates, per-group multipliers, and resolved optimizer-group rates instead of each trainer carrying its own partial LR model.
+  - Meaning: the repo now has an explicit shared LR profile layer in `autoresearch_platform.lr_profile` with compact preset-owned rates (`embedding`, `unembedding`, `matrix`, `scalar`), optional grouped multipliers on top of the existing global `lr_multiplier`, and one shared resolver that expands that compact profile into the actual optimizer groups both backends train with (`lm_head`, `embedding`, `value_embedding`, `resid`, `x0`, `matrix`).
+  - Motivation: the discovery work exposed that the current LR surface was inconsistent and incomplete. CUDA presets already owned grouped LR ratios, MLX still hard-coded them in the trainer, and both trainers collapsed the public surface back to a single scalar `lr_multiplier`, which would make any future multi-axis discovery or manual grouped tuning brittle and backend-specific.
+  - Purpose: create one stable LR-management boundary that can support scalar discovery today, richer grouped tuning later, and resume-safe persistence of the actual LR surface instead of relying on whatever the current preset code happens to say at restore time.
+  - Add `autoresearch_platform.lr_profile` as the shared home for base preset LR profiles, grouped multipliers, resolved per-optimizer-group LR expansion, and backward-compatible parsing from old scalar-only checkpoint metadata.
+  - Move both preset surfaces onto that shared profile: MLX presets now carry `lr_profile` instead of relying on trainer globals, and CUDA presets now expose the same grouped LR profile through `CudaRunPreset`.
+  - Extend both trainer CLIs, run-config payloads, summaries, and resume guards to carry `embedding`, `unembedding`, `matrix`, and `scalar` LR multipliers alongside the existing global multiplier, while preserving compatibility with old checkpoints that only stored `lr_multiplier`.
+  - Refactor both optimizer paths to consume the same resolved LR profile up front and then apply only the time-schedule factor during training, instead of mixing preset rates, dmodel scaling, and the global multiplier differently inside each backend.
+  - Expose the shared LR profile on the engine preset catalog and on engine probe launch paths so future grouped discovery work can flow through the platform boundary without another trainer-specific surface rewrite.
+
+**Grounding**
+
+- Files:
+  - `CHANGELOG.md`
+  - `autoresearch_platform/lr_profile.py`
+  - `autoresearch_platform/__init__.py`
+  - `autoresearch_platform/engines.py`
+  - `autoresearch_platform/mlx_engine.py`
+  - `autoresearch_platform/cuda_engine.py`
+  - `autoresearch_mlx/optim.py`
+  - `autoresearch_mlx/train.py`
+  - `autoresearch_cuda/config.py`
+  - `autoresearch_cuda/train.py`
+- Validation:
+  - `python3 -m py_compile autoresearch_platform/lr_profile.py autoresearch_platform/__init__.py autoresearch_platform/engines.py autoresearch_platform/mlx_engine.py autoresearch_platform/cuda_engine.py autoresearch_mlx/optim.py autoresearch_mlx/train.py autoresearch_cuda/config.py autoresearch_cuda/train.py`
+  - `python3 - <<'PY' ...` shared LR-profile smoke covering grouped-multiplier application plus resolved per-group rates at a non-reference model width
+  - `python3 - <<'PY' ...` backward-compatibility smoke confirming old scalar-only run-config payloads still restore as grouped multipliers with `embedding/unembedding/matrix/scalar = 1.0`
+
 ### New commit — train/lr: add adaptive multiplier discovery and near-tie reporting — score `4` — complexity `14`
 
 **Human-directed, AI-shaped (4)**

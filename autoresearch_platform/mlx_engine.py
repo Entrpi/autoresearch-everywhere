@@ -14,6 +14,7 @@ from autoresearch_platform.summary import parse_summary
 from tools.calibrate_eval_policy import default_eval_batch_size, run_eval_rungs
 
 from .engines import EngineCapabilities, EnginePreset, HardwareFingerprint, ProbeResult
+from .lr_profile import LrMultipliers
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -45,6 +46,7 @@ class MLXEngine:
                 window_pattern=value.window_pattern,
                 device_batch_size=value.device_batch_size,
                 total_batch_size=value.total_batch_size,
+                lr_profile=value.lr_profile,
                 canonical_eval_seq_len=value.canonical_eval_seq_len,
                 canonical_eval_tokens=value.canonical_eval_tokens,
                 canonical_eval_batch_size=value.canonical_eval_batch_size,
@@ -158,6 +160,7 @@ class MLXEngine:
         eval_batch_size: int | None = None,
         no_checkpoint: bool = True,
         lr_multiplier: float | None = None,
+        lr_multipliers: LrMultipliers | None = None,
         streaming_eval_interval_steps: int | None = None,
         streaming_eval_mode: str | None = None,
         streaming_eval_tokens: int | None = None,
@@ -203,8 +206,21 @@ class MLXEngine:
             cmd.append("--no-checkpoint")
         if checkpoint_path is not None:
             cmd.extend(["--checkpoint-path", str(checkpoint_path)])
+        if lr_multipliers is not None and lr_multiplier is not None:
+            raise ValueError("Pass either lr_multiplier or lr_multipliers, not both.")
         if lr_multiplier is not None:
             cmd.extend(["--lr-multiplier", f"{lr_multiplier:.8g}"])
+        if lr_multipliers is not None:
+            if lr_multipliers.lr_multiplier != 1.0:
+                cmd.extend(["--lr-multiplier", f"{lr_multipliers.lr_multiplier:.8g}"])
+            if lr_multipliers.embedding_lr_multiplier != 1.0:
+                cmd.extend(["--embedding-lr-multiplier", f"{lr_multipliers.embedding_lr_multiplier:.8g}"])
+            if lr_multipliers.unembedding_lr_multiplier != 1.0:
+                cmd.extend(["--unembedding-lr-multiplier", f"{lr_multipliers.unembedding_lr_multiplier:.8g}"])
+            if lr_multipliers.matrix_lr_multiplier != 1.0:
+                cmd.extend(["--matrix-lr-multiplier", f"{lr_multipliers.matrix_lr_multiplier:.8g}"])
+            if lr_multipliers.scalar_lr_multiplier != 1.0:
+                cmd.extend(["--scalar-lr-multiplier", f"{lr_multipliers.scalar_lr_multiplier:.8g}"])
         if streaming_eval_interval_steps is not None:
             cmd.extend(["--streaming-eval-interval-steps", str(streaming_eval_interval_steps)])
         if streaming_eval_mode is not None:

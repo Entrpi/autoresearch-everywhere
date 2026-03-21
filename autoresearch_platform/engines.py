@@ -4,6 +4,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
 
+from .lr_profile import LrMultipliers, LrProfile
+
 
 DEFAULT_ENGINE_NAME = "mlx"
 
@@ -27,6 +29,7 @@ class EnginePreset:
     window_pattern: str
     device_batch_size: int
     total_batch_size: int
+    lr_profile: LrProfile | None = None
     canonical_eval_seq_len: int | None = None
     canonical_eval_tokens: int | None = None
     canonical_eval_batch_size: int | None = None
@@ -162,6 +165,7 @@ class TrainingEngine(Protocol):
         eval_batch_size: int | None = None,
         no_checkpoint: bool = True,
         lr_multiplier: float | None = None,
+        lr_multipliers: LrMultipliers | None = None,
         streaming_eval_interval_steps: int | None = None,
         streaming_eval_mode: str | None = None,
         streaming_eval_tokens: int | None = None,

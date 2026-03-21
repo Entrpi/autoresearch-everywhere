@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass, replace
 
+from autoresearch_platform.lr_profile import DEFAULT_LR_PROFILE, LrProfile
+
 
 CUDA_DEFAULT_SEQ_LEN = 2048
 CUDA_DEFAULT_TIME_BUDGET = 300.0
@@ -16,10 +18,6 @@ class CudaRunPreset:
     head_dim: int
     window_pattern: str
     total_batch_size: int
-    embedding_lr: float
-    unembedding_lr: float
-    matrix_lr: float
-    scalar_lr: float
     weight_decay: float
     adam_betas: tuple[float, float]
     warmup_ratio: float
@@ -27,6 +25,7 @@ class CudaRunPreset:
     final_lr_frac: float
     depth: int
     device_batch_size: int
+    lr_profile: LrProfile = DEFAULT_LR_PROFILE
 
 
 CUDA_PRESETS: dict[str, CudaRunPreset] = {
@@ -38,10 +37,6 @@ CUDA_PRESETS: dict[str, CudaRunPreset] = {
         head_dim=128,
         window_pattern="L",
         total_batch_size=65_536,
-        embedding_lr=0.6,
-        unembedding_lr=0.004,
-        matrix_lr=0.04,
-        scalar_lr=0.5,
         weight_decay=0.2,
         adam_betas=(0.8, 0.95),
         warmup_ratio=0.0,
@@ -58,10 +53,6 @@ CUDA_PRESETS: dict[str, CudaRunPreset] = {
         head_dim=128,
         window_pattern="L",
         total_batch_size=65_536,
-        embedding_lr=0.6,
-        unembedding_lr=0.004,
-        matrix_lr=0.04,
-        scalar_lr=0.5,
         weight_decay=0.2,
         adam_betas=(0.8, 0.95),
         warmup_ratio=0.0,
@@ -78,10 +69,6 @@ CUDA_PRESETS: dict[str, CudaRunPreset] = {
         head_dim=128,
         window_pattern="SSSSL",
         total_batch_size=65_536,
-        embedding_lr=0.6,
-        unembedding_lr=0.004,
-        matrix_lr=0.04,
-        scalar_lr=0.5,
         weight_decay=0.2,
         adam_betas=(0.8, 0.95),
         warmup_ratio=0.0,
@@ -98,10 +85,6 @@ CUDA_PRESETS: dict[str, CudaRunPreset] = {
         head_dim=128,
         window_pattern="SSSSL",
         total_batch_size=65_536,
-        embedding_lr=0.6,
-        unembedding_lr=0.004,
-        matrix_lr=0.04,
-        scalar_lr=0.5,
         weight_decay=0.2,
         adam_betas=(0.8, 0.95),
         warmup_ratio=0.0,
@@ -118,10 +101,6 @@ CUDA_PRESETS: dict[str, CudaRunPreset] = {
         head_dim=128,
         window_pattern="L",
         total_batch_size=65_536,
-        embedding_lr=0.6,
-        unembedding_lr=0.004,
-        matrix_lr=0.04,
-        scalar_lr=0.5,
         weight_decay=0.2,
         adam_betas=(0.8, 0.95),
         warmup_ratio=0.0,
@@ -138,10 +117,6 @@ CUDA_PRESETS: dict[str, CudaRunPreset] = {
         head_dim=128,
         window_pattern="SSSL",
         total_batch_size=2**19,
-        embedding_lr=0.6,
-        unembedding_lr=0.004,
-        matrix_lr=0.04,
-        scalar_lr=0.5,
         weight_decay=0.2,
         adam_betas=(0.8, 0.95),
         warmup_ratio=0.0,

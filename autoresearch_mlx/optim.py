@@ -3,6 +3,8 @@ from dataclasses import dataclass
 import mlx.core as mx
 from mlx.utils import tree_flatten
 
+from autoresearch_platform.lr_profile import ResolvedLrProfile
+
 
 POLAR_EXPRESS_COEFFS = [
     (8.156554524902461, -22.48329292557795, 15.878769915207462),
@@ -177,24 +179,17 @@ class MuonAdamW:
         self,
         model,
         *,
-        unembedding_lr: float = 0.004,
-        embedding_lr: float = 0.2,
-        matrix_lr: float = 0.02,
+        lr_profile: ResolvedLrProfile,
         weight_decay: float = 0.0,
         adam_betas=(0.8, 0.95),
-        scalar_lr: float = 0.5,
     ):
-        self.model_dim = model.config.n_embd
-        dmodel_lr_scale = (self.model_dim / 768) ** -0.5
-        print(f"Scaling AdamW LRs by 1/sqrt({self.model_dim}/768) = {dmodel_lr_scale:.6f}")
-
         self.initial_lrs = {
-            "lm_head": unembedding_lr * dmodel_lr_scale,
-            "embedding": embedding_lr * dmodel_lr_scale,
-            "value_embedding": embedding_lr * dmodel_lr_scale,
-            "resid": scalar_lr * 0.01,
-            "x0": scalar_lr,
-            "muon": matrix_lr,
+            "lm_head": lr_profile.lm_head_lr,
+            "embedding": lr_profile.embedding_lr,
+            "value_embedding": lr_profile.value_embedding_lr,
+            "resid": lr_profile.resid_lr,
+            "x0": lr_profile.x0_lr,
+            "muon": lr_profile.matrix_lr,
         }
 
         flat_params = dict(tree_flatten(model.trainable_parameters()))
@@ -212,7 +207,7 @@ class MuonAdamW:
             for group in self.muon_groups
         )
         self.state = self._init_state(flat_params)
-        self.set_schedule(lr_multiplier=1.0, muon_momentum=0.95, muon_weight_decay=weight_decay)
+        self.set_schedule(schedule_factor=1.0, muon_momentum=0.95, muon_weight_decay=weight_decay)
 
     def _build_groups(self, flat_params, adam_betas, weight_decay):
         all_paths = set(flat_params.keys())
@@ -293,14 +288,14 @@ class MuonAdamW:
             "muon": muon_state,
         }
 
-    def set_schedule(self, *, lr_multiplier: float, muon_momentum: float, muon_weight_decay: float) -> None:
+    def set_schedule(self, *, schedule_factor: float, muon_momentum: float, muon_weight_decay: float) -> None:
         hyperparams = self.state["hyperparams"]
-        hyperparams["lm_head_lr"] = mx.array(self.initial_lrs["lm_head"] * lr_multiplier, dtype=mx.float32)
-        hyperparams["embedding_lr"] = mx.array(self.initial_lrs["embedding"] * lr_multiplier, dtype=mx.float32)
-        hyperparams["value_embedding_lr"] = mx.array(self.initial_lrs["value_embedding"] * lr_multiplier, dtype=mx.float32)
-        hyperparams["resid_lr"] = mx.array(self.initial_lrs["resid"] * lr_multiplier, dtype=mx.float32)
-        hyperparams["x0_lr"] = mx.array(self.initial_lrs["x0"] * lr_multiplier, dtype=mx.float32)
-        hyperparams["muon_lr"] = mx.array(self.initial_lrs["muon"] * lr_multiplier, dtype=mx.float32)
+        hyperparams["lm_head_lr"] = mx.array(self.initial_lrs["lm_head"] * schedule_factor, dtype=mx.float32)
+        hyperparams["embedding_lr"] = mx.array(self.initial_lrs["embedding"] * schedule_factor, dtype=mx.float32)
+        hyperparams["value_embedding_lr"] = mx.array(self.initial_lrs["value_embedding"] * schedule_factor, dtype=mx.float32)
+        hyperparams["resid_lr"] = mx.array(self.initial_lrs["resid"] * schedule_factor, dtype=mx.float32)
+        hyperparams["x0_lr"] = mx.array(self.initial_lrs["x0"] * schedule_factor, dtype=mx.float32)
+        hyperparams["muon_lr"] = mx.array(self.initial_lrs["muon"] * schedule_factor, dtype=mx.float32)
         hyperparams["muon_momentum"] = mx.array(muon_momentum, dtype=mx.float32)
         hyperparams["muon_weight_decay"] = mx.array(muon_weight_decay, dtype=mx.float32)
 
