@@ -1,8 +1,22 @@
 from __future__ import annotations
 
 import math
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from typing import Callable
+
+from .lr_profile import DEFAULT_LR_MULTIPLIERS, LrMultipliers, lr_multipliers_to_dict
+
+
+LR_DISCOVERY_LEVER_GLOBAL = "global"
+LR_DISCOVERY_LEVER_MATRIX = "matrix"
+LR_DISCOVERY_LEVERS = (
+    LR_DISCOVERY_LEVER_GLOBAL,
+    LR_DISCOVERY_LEVER_MATRIX,
+)
+_LR_DISCOVERY_LEVER_FIELDS = {
+    LR_DISCOVERY_LEVER_GLOBAL: "lr_multiplier",
+    LR_DISCOVERY_LEVER_MATRIX: "matrix_lr_multiplier",
+}
 
 
 @dataclass(frozen=True)
@@ -17,6 +31,9 @@ class AdaptiveLrProbe:
     history_path: str | None = None
     stdout_path: str | None = None
     stderr_path: str | None = None
+    lever_name: str | None = None
+    lever_value: float | None = None
+    lr_multipliers: dict[str, float] | None = None
 
 
 @dataclass(frozen=True)
@@ -29,6 +46,40 @@ class AdaptiveLrSweepConfig:
     fine_refine_rounds: int = 2
     fine_duplicate_log_tolerance: float = 0.03
     near_tie_auc_fraction: float = 0.003
+
+
+def normalize_discovery_levers(levers: tuple[str, ...] | list[str] | None) -> tuple[str, ...]:
+    if not levers:
+        return (LR_DISCOVERY_LEVER_GLOBAL,)
+    normalized: list[str] = []
+    for lever in levers:
+        if lever not in _LR_DISCOVERY_LEVER_FIELDS:
+            raise ValueError(f"Unknown LR discovery lever: {lever}")
+        if lever in normalized:
+            continue
+        normalized.append(lever)
+    if not normalized:
+        return (LR_DISCOVERY_LEVER_GLOBAL,)
+    return tuple(normalized)
+
+
+def discovery_lever_field(lever: str) -> str:
+    try:
+        return _LR_DISCOVERY_LEVER_FIELDS[lever]
+    except KeyError as exc:
+        raise ValueError(f"Unknown LR discovery lever: {lever}") from exc
+
+
+def apply_discovery_lever(
+    base_multipliers: LrMultipliers,
+    *,
+    lever: str,
+    value: float,
+) -> LrMultipliers:
+    return replace(
+        base_multipliers,
+        **{discovery_lever_field(lever): float(value)},
+    )
 
 
 def extrapolate_optimum(
@@ -296,13 +347,80 @@ def run_adaptive_lr_sweep(
             "note": (
                 "The winner and runner-up are effectively tied by AUC at this probe budget. "
                 + (
-                    "The best-AUC probe is already the lower-LR member of the top pair, "
+                    "The best-AUC probe is already the lower-multiplier member of the top pair, "
                     "so keep it as the default pick."
                     if not has_distinct_longer_horizon_alternative
                     else
-                    "Prefer the best-AUC candidate for short runs; consider the lower LR "
+                    "Prefer the best-AUC candidate for short runs; consider the lower multiplier "
                     "of the top pair for longer trainings."
                 )
             ),
         }
+    return result
+
+
+def run_staged_lr_multiplier_sweep(
+    *,
+    run_probe: Callable[[LrMultipliers], AdaptiveLrProbe],
+    levers: tuple[str, ...] | list[str] | None = None,
+    config: AdaptiveLrSweepConfig | None = None,
+    base_multipliers: LrMultipliers = DEFAULT_LR_MULTIPLIERS,
+) -> dict:
+    if config is None:
+        config = AdaptiveLrSweepConfig()
+    ordered_levers = normalize_discovery_levers(levers)
+    current_multipliers = base_multipliers
+    stages: list[dict] = []
+    probe_cache: dict[LrMultipliers, AdaptiveLrProbe] = {}
+
+    for lever in ordered_levers:
+        stage_config = (
+            config
+            if lever == LR_DISCOVERY_LEVER_GLOBAL
+            else replace(config, anchor_multiplier=1.0)
+        )
+        stage_base = current_multipliers
+
+        def run_stage_probe(value: float, *, _lever: str = lever, _base: LrMultipliers = stage_base) -> AdaptiveLrProbe:
+            multipliers = apply_discovery_lever(_base, lever=_lever, value=value)
+            probe = probe_cache.get(multipliers)
+            if probe is None:
+                probe = run_probe(multipliers)
+                probe_cache[multipliers] = probe
+            return replace(
+                probe,
+                lr_multiplier=value,
+                lever_name=_lever,
+                lever_value=value,
+                lr_multipliers=lr_multipliers_to_dict(multipliers),
+            )
+
+        sweep = run_adaptive_lr_sweep(
+            run_probe=run_stage_probe,
+            config=stage_config,
+        )
+        stages.append(
+            {
+                "lever": lever,
+                "lever_field": discovery_lever_field(lever),
+                "base_lr_multipliers": lr_multipliers_to_dict(stage_base),
+                "sweep": sweep,
+            }
+        )
+        current_multipliers = apply_discovery_lever(
+            current_multipliers,
+            lever=lever,
+            value=sweep["best"]["lr_multiplier"],
+        )
+
+    result = {
+        "config": asdict(config),
+        "discovery_levers": list(ordered_levers),
+        "base_lr_multipliers": lr_multipliers_to_dict(base_multipliers),
+        "best_lr_multipliers": lr_multipliers_to_dict(current_multipliers),
+        "stages": stages,
+        "total_runs": sum(stage["sweep"]["total_runs"] for stage in stages),
+    }
+    if len(stages) == 1:
+        result["sweep"] = stages[0]["sweep"]
     return result

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 from datetime import datetime
 from pathlib import Path
 
@@ -10,7 +11,15 @@ from autoresearch_platform.entrypoints import detect_default_engine
 from autoresearch_platform.lr_discovery import (
     AdaptiveLrProbe,
     AdaptiveLrSweepConfig,
-    run_adaptive_lr_sweep,
+    LR_DISCOVERY_LEVER_GLOBAL,
+    LR_DISCOVERY_LEVERS,
+    apply_discovery_lever,
+    run_staged_lr_multiplier_sweep,
+)
+from autoresearch_platform.lr_profile import (
+    LrMultipliers,
+    lr_multipliers_from_mapping,
+    lr_multipliers_to_dict,
 )
 from autoresearch_platform.streaming_eval import (
     DEFAULT_STREAMING_EVAL_INTERVAL_STEPS,
@@ -20,6 +29,20 @@ from autoresearch_platform.streaming_eval import (
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
+LR_MULTIPLIER_FLAG_FIELDS = (
+    ("lr_multiplier", "--lr-multiplier"),
+    ("embedding_lr_multiplier", "--embedding-lr-multiplier"),
+    ("unembedding_lr_multiplier", "--unembedding-lr-multiplier"),
+    ("matrix_lr_multiplier", "--matrix-lr-multiplier"),
+    ("scalar_lr_multiplier", "--scalar-lr-multiplier"),
+)
+LR_MULTIPLIER_SHORT_LABELS = (
+    ("lr_multiplier", "global"),
+    ("embedding_lr_multiplier", "embedding"),
+    ("unembedding_lr_multiplier", "unembedding"),
+    ("matrix_lr_multiplier", "matrix"),
+    ("scalar_lr_multiplier", "scalar"),
+)
 
 
 def _default_engine() -> str:
@@ -38,6 +61,39 @@ def _default_output_dir(engine: str, preset: str) -> Path:
     return REPO_ROOT / "results" / "analysis" / f"lr_discovery_{engine}_{preset}_{stamp}"
 
 
+def _append_lr_multiplier_args(args_list: list[str], multipliers_payload: dict[str, float]) -> None:
+    for field, flag in LR_MULTIPLIER_FLAG_FIELDS:
+        value = float(multipliers_payload.get(field, 1.0))
+        if field == "lr_multiplier" or not math.isclose(value, 1.0, rel_tol=1e-12, abs_tol=1e-12):
+            args_list.extend([flag, f"{value:.8g}"])
+
+
+def _lr_multipliers_args(multipliers_payload: dict[str, float]) -> list[str]:
+    args_list: list[str] = []
+    _append_lr_multiplier_args(args_list, multipliers_payload)
+    return args_list
+
+
+def _format_lr_multipliers(multipliers_payload: dict[str, float]) -> str:
+    parts: list[str] = []
+    for field, label in LR_MULTIPLIER_SHORT_LABELS:
+        value = float(multipliers_payload.get(field, 1.0))
+        if field == "lr_multiplier" or not math.isclose(value, 1.0, rel_tol=1e-12, abs_tol=1e-12):
+            parts.append(f"{label}={value:.8g}")
+    return ", ".join(parts)
+
+
+def _probe_label(multipliers: LrMultipliers) -> str:
+    payload = lr_multipliers_to_dict(multipliers)
+    parts = [f"global-{_multiplier_label(payload['lr_multiplier'])}"]
+    for field, label in LR_MULTIPLIER_SHORT_LABELS[1:]:
+        value = payload[field]
+        if math.isclose(value, 1.0, rel_tol=1e-12, abs_tol=1e-12):
+            continue
+        parts.append(f"{label}-{_multiplier_label(value)}")
+    return "__".join(parts)
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
@@ -53,6 +109,16 @@ def _build_parser() -> argparse.ArgumentParser:
         type=float,
         default=1.0,
         help="Initial multiplier applied to the preset LR ratios.",
+    )
+    parser.add_argument(
+        "--discovery-levers",
+        nargs="+",
+        choices=LR_DISCOVERY_LEVERS,
+        default=[LR_DISCOVERY_LEVER_GLOBAL],
+        help=(
+            "Ordered LR multiplier axes to discover. Defaults to scalar global discovery only; "
+            "add `matrix` to run a second staged sweep on `matrix_lr_multiplier`."
+        ),
     )
     parser.add_argument(
         "--jump-threshold",
@@ -138,7 +204,7 @@ def _build_parser() -> argparse.ArgumentParser:
 
 def _load_probe_from_history(
     *,
-    multiplier: float,
+    multipliers: LrMultipliers,
     history_path: Path,
     stdout_path: str,
     stderr_path: str,
@@ -156,7 +222,7 @@ def _load_probe_from_history(
                 "Increase the probe budget or reduce the eval interval."
             )
     return AdaptiveLrProbe(
-        lr_multiplier=multiplier,
+        lr_multiplier=float(multipliers.lr_multiplier),
         auc=float(auc),
         min_bpb=summary.get("min_batch_bpb"),
         last20_bpb=summary.get("last20_batch_bpb"),
@@ -166,18 +232,19 @@ def _load_probe_from_history(
         history_path=str(history_path),
         stdout_path=stdout_path,
         stderr_path=stderr_path,
+        lr_multipliers=lr_multipliers_to_dict(multipliers),
     )
 
 
-def _summary_payload(args: argparse.Namespace, output_dir: Path, sweep: dict) -> dict:
+def _summary_payload(args: argparse.Namespace, output_dir: Path, discovery: dict) -> dict:
+    best_lr_multipliers = discovery["best_lr_multipliers"]
     recommended_train_args = [
         "--engine",
         args.engine,
         "--preset",
         args.preset,
-        "--lr-multiplier",
-        f"{sweep['best']['lr_multiplier']:.8g}",
     ]
+    _append_lr_multiplier_args(recommended_train_args, best_lr_multipliers)
     if args.seq_len is not None:
         recommended_train_args.extend(["--seq-len", str(args.seq_len)])
     if args.window_pattern is not None:
@@ -191,6 +258,7 @@ def _summary_payload(args: argparse.Namespace, output_dir: Path, sweep: dict) ->
         "preset": args.preset,
         "time_budget": args.time_budget,
         "anchor_lr_multiplier": args.anchor_lr_multiplier,
+        "discovery_levers": discovery["discovery_levers"],
         "seq_len": args.seq_len,
         "window_pattern": args.window_pattern,
         "device_batch_size": args.device_batch_size,
@@ -204,20 +272,29 @@ def _summary_payload(args: argparse.Namespace, output_dir: Path, sweep: dict) ->
             "complete_cycle_on_budget": args.complete_streaming_eval_cycle,
         },
         "output_dir": str(output_dir),
-        "sweep": sweep,
+        "best_lr_multipliers": best_lr_multipliers,
+        "discovery": discovery,
         "recommended_train_args": recommended_train_args,
     }
-    near_tie = sweep.get("near_tie")
+    if len(discovery["stages"]) == 1:
+        payload["sweep"] = discovery["stages"][0]["sweep"]
+    final_stage = discovery["stages"][-1]
+    near_tie = final_stage["sweep"].get("near_tie")
     if near_tie is not None and near_tie.get("recommended_for_longer_runs") is not None:
-        longer = near_tie["recommended_for_longer_runs"]
+        stage_base = lr_multipliers_from_mapping(final_stage["base_lr_multipliers"])
+        longer = apply_discovery_lever(
+            stage_base,
+            lever=final_stage["lever"],
+            value=near_tie["recommended_for_longer_runs"]["lr_multiplier"],
+        )
+        longer_payload = lr_multipliers_to_dict(longer)
         longer_args = [
             "--engine",
             args.engine,
             "--preset",
             args.preset,
-            "--lr-multiplier",
-            f"{longer['lr_multiplier']:.8g}",
         ]
+        _append_lr_multiplier_args(longer_args, longer_payload)
         if args.seq_len is not None:
             longer_args.extend(["--seq-len", str(args.seq_len)])
         if args.window_pattern is not None:
@@ -227,66 +304,78 @@ def _summary_payload(args: argparse.Namespace, output_dir: Path, sweep: dict) ->
         if args.total_batch_size is not None:
             longer_args.extend(["--total-batch-size", str(args.total_batch_size)])
         payload["recommended_longer_horizon_train_args"] = longer_args
+        payload["recommended_longer_horizon_lr_multipliers"] = longer_payload
     return payload
 
 
 def _write_summary_markdown(payload: dict, *, path: Path) -> None:
-    best = payload["sweep"]["best"]
-    near_tie = payload["sweep"].get("near_tie")
+    discovery = payload["discovery"]
     lines = [
         "# Adaptive LR Sweep",
         "",
         f"- Engine: `{payload['engine']}`",
         f"- Preset: `{payload['preset']}`",
         f"- Probe budget: `{payload['time_budget']}` seconds",
-        f"- Best LR multiplier: `{best['lr_multiplier']:.8g}`",
-        f"- Best AUC: `{best['auc']:.6f}`",
-        f"- Honest BPB: `{best['honest_bpb']}`",
+        f"- Discovery levers: `{', '.join(payload['discovery_levers'])}`",
+        f"- Final LR multipliers: `{_format_lr_multipliers(payload['best_lr_multipliers'])}`",
+        f"- Total probe runs: `{discovery['total_runs']}`",
         f"- Probe histories: `{payload['output_dir']}`",
         "",
     ]
-    if near_tie is not None:
-        shorter = near_tie["recommended_for_shorter_runs"]
-        longer = near_tie["recommended_for_longer_runs"]
+    for index, stage in enumerate(discovery["stages"], start=1):
+        sweep = stage["sweep"]
+        best = sweep["best"]
+        near_tie = sweep.get("near_tie")
         lines.extend(
             [
-                "## Near Tie",
+                f"## Stage {index}: {stage['lever']}",
                 "",
-                f"- Threshold: `{near_tie['auc_fraction']:.6f}` fractional AUC gap",
-                f"- Observed top-gap: `{near_tie['best_auc_gap_fraction']:.6f}`",
-                f"- Short-run pick: `{shorter['lr_multiplier']:.8g}`",
-                (
-                    f"- Longer-horizon alternative: `{longer['lr_multiplier']:.8g}`"
-                    if longer is not None
-                    else "- Longer-horizon alternative: none distinct; the default pick is already the lower-LR option"
-                ),
-                f"- Note: {near_tie['note']}",
+                f"- Base LR multipliers: `{_format_lr_multipliers(stage['base_lr_multipliers'])}`",
+                f"- Best {stage['lever']} multiplier: `{best['lr_multiplier']:.8g}`",
+                f"- Best AUC: `{best['auc']:.6f}`",
+                f"- Honest BPB: `{best['honest_bpb']}`",
+                f"- Applied LR multipliers: `{_format_lr_multipliers(best.get('lr_multipliers') or stage['base_lr_multipliers'])}`",
                 "",
+                "| Lever Value | Applied Multipliers | AUC | Min BPB | Last20% | Honest BPB | Points | Cycles |",
+                "| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |",
             ]
         )
-    lines.extend(
-        [
-        "## Ranked Probes",
-        "",
-        "| LR Multiplier | AUC | Min BPB | Last20% | Honest BPB | Points | Cycles |",
-        "| --- | ---: | ---: | ---: | ---: | ---: | ---: |",
-        ]
-    )
-    for probe in payload["sweep"]["probes"]:
-        lines.append(
-            "| "
-            f"`{probe['lr_multiplier']:.8g}` | "
-            f"`{probe['auc']:.6f}` | "
-            f"`{probe['min_bpb']}` | "
-            f"`{probe['last20_bpb']}` | "
-            f"`{probe['honest_bpb']}` | "
-            f"`{probe['points']}` | "
-            f"`{probe['cycles_completed']}` |"
-        )
+        for probe in sweep["probes"]:
+            lines.append(
+                "| "
+                f"`{probe['lr_multiplier']:.8g}` | "
+                f"`{_format_lr_multipliers(probe.get('lr_multipliers') or stage['base_lr_multipliers'])}` | "
+                f"`{probe['auc']:.6f}` | "
+                f"`{probe['min_bpb']}` | "
+                f"`{probe['last20_bpb']}` | "
+                f"`{probe['honest_bpb']}` | "
+                f"`{probe['points']}` | "
+                f"`{probe['cycles_completed']}` |"
+            )
+        lines.append("")
+        if near_tie is not None:
+            shorter = near_tie["recommended_for_shorter_runs"]
+            longer = near_tie["recommended_for_longer_runs"]
+            lines.extend(
+                [
+                    "### Near Tie",
+                    "",
+                    f"- Threshold: `{near_tie['auc_fraction']:.6f}` fractional AUC gap",
+                    f"- Observed top-gap: `{near_tie['best_auc_gap_fraction']:.6f}`",
+                    f"- Short-run pick: `{shorter['lr_multiplier']:.8g}`",
+                    (
+                        f"- Longer-horizon alternative: `{longer['lr_multiplier']:.8g}`"
+                        if longer is not None
+                        else "- Longer-horizon alternative: none distinct; the default pick is already the lower-multiplier option"
+                    ),
+                    f"- Note: {near_tie['note']}",
+                    "",
+                ]
+            )
     lines.extend(
         [
             "",
-            "## Recommended Train Args",
+            "## Final Recommended Train Args",
             "",
             "```bash",
             " ".join(payload["recommended_train_args"]),
@@ -322,8 +411,8 @@ def main() -> int:
     logs_dir.mkdir(parents=True, exist_ok=True)
     histories_dir.mkdir(parents=True, exist_ok=True)
 
-    def run_probe(multiplier: float) -> AdaptiveLrProbe:
-        label = _multiplier_label(multiplier)
+    def run_probe(multipliers: LrMultipliers) -> AdaptiveLrProbe:
+        label = _probe_label(multipliers)
         history_path = histories_dir / f"{label}.json"
         stage = f"lr-{label}"
         result = engine.run_train_probe(
@@ -337,7 +426,7 @@ def main() -> int:
             window_pattern=args.window_pattern,
             device_batch_size=args.device_batch_size,
             total_batch_size=args.total_batch_size,
-            lr_multiplier=multiplier,
+            lr_multipliers=multipliers,
             streaming_eval_interval_steps=args.streaming_eval_interval_steps,
             streaming_eval_mode=args.streaming_eval_mode,
             streaming_eval_tokens=args.streaming_eval_tokens,
@@ -349,23 +438,25 @@ def main() -> int:
         if result.returncode != 0:
             tail = result.error_tail or "No stderr tail captured."
             raise SystemExit(
-                f"LR probe failed for multiplier {multiplier:.8g}.\n"
+                f"LR probe failed for multipliers {_format_lr_multipliers(lr_multipliers_to_dict(multipliers))}.\n"
                 f"stdout: {result.stdout_path}\n"
                 f"stderr: {result.stderr_path}\n"
                 f"{tail}"
             )
         if not history_path.exists():
             raise SystemExit(
-                f"LR probe for multiplier {multiplier:.8g} completed without writing {history_path}."
+                "LR probe for multipliers "
+                f"{_format_lr_multipliers(lr_multipliers_to_dict(multipliers))} "
+                f"completed without writing {history_path}."
             )
         probe = _load_probe_from_history(
-            multiplier=multiplier,
+            multipliers=multipliers,
             history_path=history_path,
             stdout_path=result.stdout_path,
             stderr_path=result.stderr_path,
         )
         print(
-            f"probe lr_multiplier={probe.lr_multiplier:.8g} "
+            f"probe multipliers={_format_lr_multipliers(probe.lr_multipliers or lr_multipliers_to_dict(multipliers))} "
             f"auc={probe.auc:.6f} "
             f"min_bpb={'nan' if probe.min_bpb is None else f'{probe.min_bpb:.6f}'} "
             f"honest_bpb={'skipped' if probe.honest_bpb is None else f'{probe.honest_bpb:.6f}'} "
@@ -373,8 +464,9 @@ def main() -> int:
         )
         return probe
 
-    sweep = run_adaptive_lr_sweep(
+    discovery = run_staged_lr_multiplier_sweep(
         run_probe=run_probe,
+        levers=args.discovery_levers,
         config=AdaptiveLrSweepConfig(
             anchor_multiplier=args.anchor_lr_multiplier,
             jump_threshold=args.jump_threshold,
@@ -386,40 +478,47 @@ def main() -> int:
             near_tie_auc_fraction=args.near_tie_auc_fraction,
         ),
     )
-    payload = _summary_payload(args, output_dir, sweep)
+    payload = _summary_payload(args, output_dir, discovery)
     summary_json = output_dir / "lr_sweep_summary.json"
     summary_md = output_dir / "lr_sweep_summary.md"
     summary_json.write_text(json.dumps(payload, indent=2) + "\n")
     _write_summary_markdown(payload, path=summary_md)
 
-    best = sweep["best"]
     print("---")
-    print(f"best_lr_multiplier: {best['lr_multiplier']:.8g}")
-    print(f"best_auc: {best['auc']:.6f}")
-    near_tie = sweep.get("near_tie")
-    if near_tie is not None:
-        shorter = near_tie["recommended_for_shorter_runs"]
-        longer = near_tie["recommended_for_longer_runs"]
-        print("near_tie:")
-        print(
-            f"  threshold_fraction={near_tie['auc_fraction']:.6f} "
-            f"observed_gap_fraction={near_tie['best_auc_gap_fraction']:.6f}"
-        )
-        print(f"  short_run_pick={shorter['lr_multiplier']:.8g}")
-        if longer is not None:
-            print(f"  longer_horizon_alternative={longer['lr_multiplier']:.8g}")
-        else:
-            print("  longer_horizon_alternative=none-distinct")
-        print(f"  note={near_tie['note']}")
-    print("ranked_probes:")
-    for probe in sweep["probes"]:
-        honest_label = "skipped" if probe["honest_bpb"] is None else f"{probe['honest_bpb']:.6f}"
-        print(
-            f"  lr_multiplier={probe['lr_multiplier']:.8g} "
-            f"auc={probe['auc']:.6f} "
-            f"honest_bpb={honest_label} "
-            f"points={probe['points']}"
-        )
+    print(f"best_lr_multipliers: {_format_lr_multipliers(payload['best_lr_multipliers'])}")
+    print(f"total_runs: {discovery['total_runs']}")
+    for stage in discovery["stages"]:
+        sweep = stage["sweep"]
+        best = sweep["best"]
+        print(f"stage[{stage['lever']}]:")
+        print(f"  base={_format_lr_multipliers(stage['base_lr_multipliers'])}")
+        print(f"  best_value={best['lr_multiplier']:.8g}")
+        print(f"  best_auc={best['auc']:.6f}")
+        near_tie = sweep.get("near_tie")
+        if near_tie is not None:
+            shorter = near_tie["recommended_for_shorter_runs"]
+            longer = near_tie["recommended_for_longer_runs"]
+            print("  near_tie:")
+            print(
+                f"    threshold_fraction={near_tie['auc_fraction']:.6f} "
+                f"observed_gap_fraction={near_tie['best_auc_gap_fraction']:.6f}"
+            )
+            print(f"    short_run_pick={shorter['lr_multiplier']:.8g}")
+            if longer is not None:
+                print(f"    longer_horizon_alternative={longer['lr_multiplier']:.8g}")
+            else:
+                print("    longer_horizon_alternative=none-distinct")
+            print(f"    note={near_tie['note']}")
+        print("  ranked_probes:")
+        for probe in sweep["probes"]:
+            honest_label = "skipped" if probe["honest_bpb"] is None else f"{probe['honest_bpb']:.6f}"
+            print(
+                f"    value={probe['lr_multiplier']:.8g} "
+                f"multipliers={_format_lr_multipliers(probe.get('lr_multipliers') or stage['base_lr_multipliers'])} "
+                f"auc={probe['auc']:.6f} "
+                f"honest_bpb={honest_label} "
+                f"points={probe['points']}"
+            )
     print(f"summary_json: {summary_json}")
     print(f"summary_md: {summary_md}")
     if args.json:

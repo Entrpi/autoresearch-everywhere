@@ -29,6 +29,32 @@ On this hardware, the default canonical matched benchmark window for optimizatio
 
 ## Latest
 
+### New commit — train/lr: add staged matrix multiplier discovery — score `4` — complexity `7`
+
+**Human-directed, AI-shaped (4)**
+
+- Extend LR discovery from a scalar-only probe loop into a staged shared surface that can discover `matrix_lr_multiplier` after the global scalar without re-opening another backend-specific trainer seam.
+  - Meaning: `discover_lr.py` can now run ordered discovery levers, keeping the existing global `lr_multiplier` sweep as stage one and then optionally running the same adaptive sweep over `matrix_lr_multiplier` while holding the discovered global multiplier fixed.
+  - Motivation: the new shared LR-profile surface made grouped tuning possible, but discovery was still trapped on one scalar axis. The first high-value extension is `matrix` vs rest, because it exercises the shared grouped surface without exploding the search into an ungrounded multi-dimensional probe grid.
+  - Purpose: let discovery explore the first non-scalar LR lever through the same platform boundary both backends already use, so future grouped discovery can add more axes without rewriting the tool or trainer interfaces again.
+  - Add staged lever support to `autoresearch_platform.lr_discovery`, including ordered `global -> matrix` sweeps, full-multiplier probe caching across stages, and stage-local probe metadata so matrix-stage ranking is driven by the matrix value being searched rather than by the inherited global scalar.
+  - Extend `tools/discover_lr.py` with `--discovery-levers`, grouped-multiplier probe launching, staged JSON/Markdown summaries, and final recommended train args that include both the discovered global and matrix multipliers when present.
+  - Harden the shared LR-profile parsing helpers so both mappings and argparse/dataclass-style objects can feed the new grouped surface; the first real MLX staged sweep flushed out that gap.
+
+**Grounding**
+
+- Files:
+  - `CHANGELOG.md`
+  - `autoresearch_platform/lr_discovery.py`
+  - `autoresearch_platform/lr_profile.py`
+  - `tools/discover_lr.py`
+- Validation:
+  - `python3 -m py_compile autoresearch_platform/lr_profile.py autoresearch_platform/lr_discovery.py tools/discover_lr.py discover_lr.py autoresearch_mlx/train.py autoresearch_cuda/train.py autoresearch_mlx/optim.py autoresearch_cuda/config.py`
+  - `python3 - <<'PY' ...` synthetic staged-sweep smoke confirming `global -> matrix` discovery and full-multiplier cache reuse across stages
+  - `python3 - <<'PY' ...` namespace-parsing smoke confirming `lr_profile_from_mapping()` and `lr_multipliers_from_mapping()` accept argparse/dataclass-style objects as well as plain mappings
+  - `UV_CACHE_DIR=/tmp/uv-cache uv run python discover_lr.py --engine mlx --preset m5-tiny --time-budget 1.5 --discovery-levers global matrix --streaming-eval-interval-steps 1 --streaming-eval-tokens 16384 --output-dir results/analysis/lr_discovery_mlx_m5tiny_global_matrix_test`
+    - Real staged MLX result: `global=1.8340081`, `matrix=2`, `13` logical probes with one cached cross-stage reuse, and stage-local near-tie reporting for both the global and matrix sweeps.
+
 ### New commit — train/lr: add a shared grouped LR profile surface — score `4` — complexity `9`
 
 **Human-directed, AI-shaped (4)**

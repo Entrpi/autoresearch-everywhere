@@ -74,6 +74,12 @@ def lr_multipliers_to_dict(multipliers: LrMultipliers) -> dict[str, float]:
     }
 
 
+def _payload_get(payload: Mapping[str, Any] | Any, key: str, default: Any) -> Any:
+    if isinstance(payload, Mapping):
+        return payload.get(key, default)
+    return getattr(payload, key, default)
+
+
 def lr_profile_from_mapping(
     payload: Mapping[str, Any] | None,
     *,
@@ -81,32 +87,34 @@ def lr_profile_from_mapping(
 ) -> LrProfile:
     if payload is None:
         return default_profile
-    if "lr_profile" in payload and isinstance(payload["lr_profile"], Mapping):
-        payload = payload["lr_profile"]
+    nested_profile = _payload_get(payload, "lr_profile", None)
+    if isinstance(nested_profile, Mapping):
+        payload = nested_profile
     return LrProfile(
-        embedding_lr=float(payload.get("embedding_lr", default_profile.embedding_lr)),
-        unembedding_lr=float(payload.get("unembedding_lr", default_profile.unembedding_lr)),
-        matrix_lr=float(payload.get("matrix_lr", default_profile.matrix_lr)),
-        scalar_lr=float(payload.get("scalar_lr", default_profile.scalar_lr)),
+        embedding_lr=float(_payload_get(payload, "embedding_lr", default_profile.embedding_lr)),
+        unembedding_lr=float(_payload_get(payload, "unembedding_lr", default_profile.unembedding_lr)),
+        matrix_lr=float(_payload_get(payload, "matrix_lr", default_profile.matrix_lr)),
+        scalar_lr=float(_payload_get(payload, "scalar_lr", default_profile.scalar_lr)),
         value_embedding_lr_scale=float(
-            payload.get("value_embedding_lr_scale", default_profile.value_embedding_lr_scale)
+            _payload_get(payload, "value_embedding_lr_scale", default_profile.value_embedding_lr_scale)
         ),
-        resid_lr_scale=float(payload.get("resid_lr_scale", default_profile.resid_lr_scale)),
-        dmodel_reference=int(payload.get("dmodel_reference", default_profile.dmodel_reference)),
+        resid_lr_scale=float(_payload_get(payload, "resid_lr_scale", default_profile.resid_lr_scale)),
+        dmodel_reference=int(_payload_get(payload, "dmodel_reference", default_profile.dmodel_reference)),
     )
 
 
 def lr_multipliers_from_mapping(payload: Mapping[str, Any] | None) -> LrMultipliers:
     if payload is None:
         return DEFAULT_LR_MULTIPLIERS
-    if "lr_multipliers" in payload and isinstance(payload["lr_multipliers"], Mapping):
-        payload = payload["lr_multipliers"]
+    nested_multipliers = _payload_get(payload, "lr_multipliers", None)
+    if isinstance(nested_multipliers, Mapping):
+        payload = nested_multipliers
     return LrMultipliers(
-        lr_multiplier=float(payload.get("lr_multiplier", 1.0)),
-        embedding_lr_multiplier=float(payload.get("embedding_lr_multiplier", 1.0)),
-        unembedding_lr_multiplier=float(payload.get("unembedding_lr_multiplier", 1.0)),
-        matrix_lr_multiplier=float(payload.get("matrix_lr_multiplier", 1.0)),
-        scalar_lr_multiplier=float(payload.get("scalar_lr_multiplier", 1.0)),
+        lr_multiplier=float(_payload_get(payload, "lr_multiplier", 1.0)),
+        embedding_lr_multiplier=float(_payload_get(payload, "embedding_lr_multiplier", 1.0)),
+        unembedding_lr_multiplier=float(_payload_get(payload, "unembedding_lr_multiplier", 1.0)),
+        matrix_lr_multiplier=float(_payload_get(payload, "matrix_lr_multiplier", 1.0)),
+        scalar_lr_multiplier=float(_payload_get(payload, "scalar_lr_multiplier", 1.0)),
     )
 
 
