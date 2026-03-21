@@ -121,7 +121,7 @@ def _build_parser() -> argparse.ArgumentParser:
         default=[LR_DISCOVERY_LEVER_GLOBAL],
         help=(
             "Ordered LR multiplier axes to discover. Defaults to scalar global discovery only; "
-            "add `matrix` to run a second staged sweep on `matrix_lr_multiplier`."
+            "add `matrix` and `unembedding` to stage extra sweeps on their grouped LR multipliers."
         ),
     )
     parser.add_argument(

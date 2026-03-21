@@ -29,6 +29,31 @@ On this hardware, the default canonical matched benchmark window for optimizatio
 
 ## Latest
 
+### New commit — train/lr: add staged unembedding multiplier discovery — score `4` — complexity `6`
+
+**Human-directed, AI-shaped (4)**
+
+- Expose `unembedding_lr_multiplier` as the next staged LR-discovery lever after `matrix`, so the shared sweep can tune the `lm_head` / unembedding group without another trainer or engine surface change.
+  - Meaning: staged discovery is no longer limited to `global -> matrix`; the same shared sweep can now continue into `global -> matrix -> unembedding`, carrying forward the previously discovered multipliers and ranking the new stage on the unembedding axis itself.
+  - Motivation: the shared LR-profile surface already had a distinct unembedding/head group, and the staged matrix work proved the discovery plumbing was generic enough to support another lever cheaply. The next useful question after matrix is whether the head/unembedding group wants to move off the inherited anchor once global and matrix have already been adjusted.
+  - Purpose: widen grouped LR discovery one step further while keeping the platform boundary stable, so future grouped searches can keep adding levers instead of reopening trainer-specific LR seams.
+  - Extend `autoresearch_platform.lr_discovery` with a first-class `unembedding` lever mapped onto `unembedding_lr_multiplier`, so staged runs can carry the existing probe cache, near-tie reporting, and stage-local summaries straight into a head/unembedding sweep.
+  - Extend `tools/discover_lr.py` help and lever selection to advertise `unembedding` alongside `global` and `matrix`, then validate the new stage with a real MLX `m5-tiny` run and a staged summary plot.
+
+**Grounding**
+
+- Files:
+  - `CHANGELOG.md`
+  - `autoresearch_platform/lr_discovery.py`
+  - `tools/discover_lr.py`
+- Validation:
+  - `python3 -m py_compile autoresearch_platform/lr_discovery.py tools/discover_lr.py discover_lr.py`
+  - `python3 discover_lr.py --help | rg -n "discovery-levers|unembedding|matrix"`
+  - `UV_CACHE_DIR=/tmp/uv-cache uv run python discover_lr.py --engine mlx --preset m5-tiny --time-budget 1.5 --discovery-levers global matrix unembedding --streaming-eval-interval-steps 1 --streaming-eval-tokens 16384 --output-dir results/analysis/lr_discovery_mlx_m5tiny_global_matrix_unembedding_test`
+    - Real staged MLX result: `global=1.8340081`, `matrix=0.54525387`, `unembedding=1.0905077`, with stage-local near-tie reporting still working and the final longer-horizon recommendation falling back to `unembedding=1.0`.
+  - `UV_CACHE_DIR=/tmp/uv-cache uv run --with matplotlib python - <<'PY' ...`
+    - Wrote staged summary plot: `results/analysis/lr_discovery_mlx_m5tiny_global_matrix_unembedding_test/staged_lr_discovery_plot.png`.
+
 ### New commit — train/lr: add optional bowl-finding discovery mode — score `4` — complexity `8`
 
 **Human-directed, AI-shaped (4)**
