@@ -959,25 +959,45 @@ def _masked_token_sums(loss_flat, target_ids, token_bytes):
 def _iter_eval_batches(loader, steps: int, eval_slices: int, reference_steps: int | None = None):
     if isinstance(loader, PrepackedDataLoader) and eval_slices > 1:
         available_batches = max(1, loader.row_count // loader.batch_size)
-        horizon_batches = available_batches
-        if reference_steps is not None:
-            # For cheap canonical evals, spread slices across the same prefix
-            # horizon that the full upstream contract would traverse.
-            horizon_batches = max(1, min(max(steps, reference_steps), available_batches))
-        slice_count = max(1, min(eval_slices, max(1, steps // EVAL_SLICE_TARGET_STEPS), horizon_batches))
-        for slice_idx in range(slice_count):
-            slice_steps = steps // slice_count + (1 if slice_idx < steps % slice_count else 0)
-            if slice_steps <= 0:
-                continue
-            row_index = ((slice_idx * horizon_batches) // slice_count) * loader.batch_size
-            for _ in range(slice_steps):
-                yield loader.batch_at_row_index(row_index)
-                row_index = (row_index + loader.batch_size) % loader.row_count
+        batch_plan = build_prepacked_eval_batch_plan(
+            steps,
+            eval_slices,
+            reference_steps=reference_steps,
+            available_batches=available_batches,
+        )
+        for batch_index in batch_plan:
+            yield loader.batch_at_row_index(batch_index * loader.batch_size)
         return
 
     for _ in range(steps):
         x, y, _ = next(loader)
         yield x, y
+
+
+def build_prepacked_eval_batch_plan(
+    steps: int,
+    eval_slices: int,
+    *,
+    reference_steps: int | None = None,
+    available_batches: int,
+) -> list[int]:
+    available_batches = max(1, available_batches)
+    horizon_batches = available_batches
+    if reference_steps is not None:
+        # For cheap/reference canonical evals, spread slices across the same
+        # prefix horizon that the full upstream contract would traverse.
+        horizon_batches = max(1, min(max(steps, reference_steps), available_batches))
+    slice_count = max(1, min(eval_slices, max(1, steps // EVAL_SLICE_TARGET_STEPS), horizon_batches))
+    batch_plan: list[int] = []
+    for slice_idx in range(slice_count):
+        slice_steps = steps // slice_count + (1 if slice_idx < steps % slice_count else 0)
+        if slice_steps <= 0:
+            continue
+        batch_index = (slice_idx * horizon_batches) // slice_count
+        for _ in range(slice_steps):
+            batch_plan.append(batch_index % available_batches)
+            batch_index += 1
+    return batch_plan
 
 
 def evaluate_bpb(
@@ -1015,3 +1035,36 @@ def evaluate_bpb(
         total_bytes += batch_bytes.item()
 
     return total_nats / (math.log(2) * total_bytes)
+
+
+def evaluate_bpb_batch(
+    model,
+    x,
+    y,
+    *,
+    token_bytes=None,
+) -> float:
+    return evaluate_bpb_batch_stats(
+        model,
+        x,
+        y,
+        token_bytes=token_bytes,
+    )[0]
+
+
+def evaluate_bpb_batch_stats(
+    model,
+    x,
+    y,
+    *,
+    token_bytes=None,
+) -> tuple[float, float, int]:
+    if token_bytes is None:
+        token_bytes = mx.array(load_token_bytes())
+    loss_flat = model(x, y, reduction="none").reshape((-1,))
+    y_flat = y.reshape((-1,))
+    batch_nats, batch_bytes = _masked_token_sums(loss_flat, y_flat, token_bytes)
+    mx.eval(batch_nats, batch_bytes)
+    batch_nats_f = float(batch_nats.item())
+    batch_bytes_i = int(batch_bytes.item())
+    return batch_nats_f / (math.log(2) * batch_bytes_i), batch_nats_f, batch_bytes_i

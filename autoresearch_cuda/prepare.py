@@ -371,7 +371,8 @@ def evaluate_bpb_configured(
     total_bytes = 0
     for _ in range(steps):
         x, y, _ = next(val_loader)
-        loss_flat = model(x, y, reduction='none').view(-1)
+        with torch.amp.autocast(device_type="cuda", dtype=torch.bfloat16):
+            loss_flat = model(x, y, reduction='none').view(-1)
         y_flat = y.view(-1)
         nbytes = token_bytes[y_flat]
         mask = nbytes > 0
@@ -390,6 +391,31 @@ def evaluate_bpb(model, tokenizer, batch_size):
         seq_len=MAX_SEQ_LEN,
         eval_tokens=EVAL_TOKENS,
     )
+
+
+@torch.no_grad()
+def evaluate_bpb_batch(model, x, y, *, token_bytes=None):
+    batch_bpb, _, _ = evaluate_bpb_batch_stats(
+        model,
+        x,
+        y,
+        token_bytes=token_bytes,
+    )
+    return batch_bpb
+
+
+@torch.no_grad()
+def evaluate_bpb_batch_stats(model, x, y, *, token_bytes=None):
+    if token_bytes is None:
+        token_bytes = get_token_bytes(device="cuda")
+    with torch.amp.autocast(device_type="cuda", dtype=torch.bfloat16):
+        loss_flat = model(x, y, reduction="none").view(-1)
+    y_flat = y.view(-1)
+    nbytes = token_bytes[y_flat]
+    mask = nbytes > 0
+    total_nats = (loss_flat * mask).sum().item()
+    total_bytes = nbytes.sum().item()
+    return total_nats / (math.log(2) * total_bytes), total_nats, total_bytes
 
 # ---------------------------------------------------------------------------
 # Main

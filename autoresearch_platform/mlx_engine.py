@@ -157,6 +157,14 @@ class MLXEngine:
         eval_tokens: int | None = None,
         eval_batch_size: int | None = None,
         no_checkpoint: bool = True,
+        lr_multiplier: float | None = None,
+        streaming_eval_interval_steps: int | None = None,
+        streaming_eval_mode: str | None = None,
+        streaming_eval_tokens: int | None = None,
+        streaming_eval_seq_len: int | None = None,
+        streaming_eval_batch_size: int | None = None,
+        streaming_eval_history_output: Path | None = None,
+        complete_streaming_eval_cycle: bool = False,
     ) -> ProbeResult:
         del curve_eval_seconds, eval_seq_len, eval_tokens, eval_batch_size
         preset_config = PRESETS[preset]
@@ -195,6 +203,22 @@ class MLXEngine:
             cmd.append("--no-checkpoint")
         if checkpoint_path is not None:
             cmd.extend(["--checkpoint-path", str(checkpoint_path)])
+        if lr_multiplier is not None:
+            cmd.extend(["--lr-multiplier", f"{lr_multiplier:.8g}"])
+        if streaming_eval_interval_steps is not None:
+            cmd.extend(["--streaming-eval-interval-steps", str(streaming_eval_interval_steps)])
+        if streaming_eval_mode is not None:
+            cmd.extend(["--streaming-eval-mode", streaming_eval_mode])
+        if streaming_eval_tokens is not None:
+            cmd.extend(["--streaming-eval-tokens", str(streaming_eval_tokens)])
+        if streaming_eval_seq_len is not None:
+            cmd.extend(["--streaming-eval-seq-len", str(streaming_eval_seq_len)])
+        if streaming_eval_batch_size is not None:
+            cmd.extend(["--streaming-eval-batch-size", str(streaming_eval_batch_size)])
+        if streaming_eval_history_output is not None:
+            cmd.extend(["--streaming-eval-history-output", str(streaming_eval_history_output)])
+        if complete_streaming_eval_cycle:
+            cmd.append("--complete-streaming-eval-cycle")
 
         label = self._command_label(
             [
@@ -253,6 +277,17 @@ class MLXEngine:
             canonical_tokens=self._get_int(summary, "canonical_eval_tokens") or self._get_int(summary, "canonical_tokens"),
             canonical_batch=self._get_int(summary, "canonical_eval_batch_size") or self._get_int(summary, "canonical_batch"),
             canonical_slices=self._get_int(summary, "canonical_eval_slices") or self._get_int(summary, "canonical_slices"),
+            streaming_eval_points=self._get_int(summary, "streaming_eval_points"),
+            streaming_eval_cycles_completed=self._get_int(summary, "streaming_eval_cycles_completed"),
+            streaming_eval_cycle_batches=self._get_int(summary, "streaming_eval_cycle_batches"),
+            streaming_eval_total_seconds=self._get_float(summary, "streaming_eval_total_seconds"),
+            streaming_val_auc=self._get_float(summary, "streaming_val_auc"),
+            honest_val_bpb=self._get_float(summary, "honest_val_bpb"),
+            subref_one_sixth_eval_points=self._get_int(summary, "subref_one_sixth_eval_points"),
+            subref_one_sixth_eval_cycles_completed=self._get_int(summary, "subref_one_sixth_eval_cycles_completed"),
+            honest_subref_one_sixth_bpb=self._get_float(summary, "honest_subref_one_sixth_bpb"),
+            reference_streaming_eval_cycles_completed=self._get_int(summary, "reference_streaming_eval_cycles_completed"),
+            honest_reference_bpb=self._get_float(summary, "honest_reference_bpb"),
             eval_calibration_status=self._get_str(summary, "eval_calibration_status"),
             eval_calibration_effective_confidence=self._get_str(summary, "eval_calibration_effective_confidence"),
             eval_calibration_freshness=self._get_str(summary, "eval_calibration_freshness"),

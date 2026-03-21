@@ -8,6 +8,8 @@ or directly as:
 
 import argparse
 import gc
+import json
+import math
 import os
 import subprocess
 import statistics
@@ -15,6 +17,7 @@ import sys
 import time
 from dataclasses import asdict, dataclass, replace
 from functools import partial
+from pathlib import Path
 
 import mlx.core as mx
 import mlx.nn as nn
@@ -56,9 +59,20 @@ from autoresearch_mlx.calibration_signature import (
     current_eval_semantics_signature,
     current_runtime_shape_signature,
 )
-from autoresearch_mlx.data import Tokenizer, evaluate_bpb, make_dataloader
+from autoresearch_mlx.data import (
+    PrepackedDataLoader,
+    Tokenizer,
+    build_prepacked_eval_batch_plan,
+    evaluate_bpb,
+    evaluate_bpb_batch_stats,
+    load_token_bytes,
+    make_dataloader,
+)
 from autoresearch_mlx.eval_policy import (
     EVAL_POLICY_VERSION,
+    CHEAP_EVAL_RUNG,
+    REFERENCE_EVAL_RUNG,
+    SUBREF_ONE_SIXTH_EVAL_RUNG,
     choose_auto_eval_decision,
     detect_current_hardware_key,
     find_eval_calibration,
@@ -77,6 +91,16 @@ from autoresearch_platform.step_telemetry import (
     estimate_step_tflops,
     percent,
     summarize_step_telemetry,
+)
+from autoresearch_platform.streaming_eval import (
+    DEFAULT_STREAMING_EVAL_INTERVAL_STEPS,
+    STREAMING_EVAL_MODES,
+    STREAMING_EVAL_MODE_SUBREF_ONE_SIXTH,
+    streaming_mode_uses_cheap,
+    streaming_mode_uses_subref,
+    StreamingEvalConfig,
+    StreamingSupercycleAccumulator,
+    StreamingEvalTracker,
 )
 
 
@@ -145,6 +169,14 @@ class RunConfig:
     checkpoint_path: str | None
     checkpoint_interval: str | None
     checkpoint_interval_is_auto: bool
+    lr_multiplier: float
+    streaming_eval_interval_steps: int | None
+    streaming_eval_mode: str | None
+    streaming_eval_tokens: int | None
+    streaming_eval_seq_len: int | None
+    streaming_eval_batch_size: int | None
+    streaming_eval_history_output: str | None
+    complete_streaming_eval_cycle: bool
     resume_from: str | None
 
 
@@ -512,6 +544,52 @@ def get_weight_decay(progress: float) -> float:
     return WEIGHT_DECAY * (1.0 - progress)
 
 
+@dataclass
+class PlannedEvalCursor:
+    loader: PrepackedDataLoader
+    batch_plan: tuple[int, ...]
+    position: int = 0
+
+    def next_batch(self):
+        if not self.batch_plan:
+            raise RuntimeError("PlannedEvalCursor requires at least one batch in the plan.")
+        batch_index = self.batch_plan[self.position]
+        self.position = (self.position + 1) % len(self.batch_plan)
+        return self.loader.batch_at_row_index(batch_index * self.loader.batch_size)
+
+
+def resolve_streaming_eval_config(args: RunConfig) -> StreamingEvalConfig | None:
+    interval_steps = args.streaming_eval_interval_steps
+    if interval_steps is None:
+        return None
+    if interval_steps <= 0:
+        raise ValueError("--streaming-eval-interval-steps must be positive.")
+    mode = args.streaming_eval_mode or STREAMING_EVAL_MODE_SUBREF_ONE_SIXTH
+    if mode not in STREAMING_EVAL_MODES:
+        raise ValueError(f"Unsupported --streaming-eval-mode: {mode!r}")
+    eval_tokens = args.streaming_eval_tokens or args.canonical_eval_tokens or CHEAP_EVAL_RUNG.eval_tokens
+    if eval_tokens <= 0:
+        raise ValueError("--streaming-eval-tokens must be positive.")
+    batch_size = args.streaming_eval_batch_size or args.canonical_eval_batch_size
+    seq_len = args.streaming_eval_seq_len or args.canonical_eval_seq_len
+    return StreamingEvalConfig(
+        interval_steps=interval_steps,
+        eval_tokens=eval_tokens,
+        batch_size=batch_size,
+        seq_len=seq_len,
+        mode=mode,
+        complete_cycle_on_budget=args.complete_streaming_eval_cycle,
+    )
+
+
+SUBREF_ONE_SIXTHS_PER_REFERENCE, _SUBREF_REFERENCE_REMAINDER = divmod(
+    REFERENCE_EVAL_RUNG.eval_tokens,
+    SUBREF_ONE_SIXTH_EVAL_RUNG.eval_tokens,
+)
+if _SUBREF_REFERENCE_REMAINDER != 0:
+    raise ValueError("subref-one-sixth must divide the reference rung exactly.")
+
+
 def make_grad_step_fn(model):
     def loss_fn(model, inputs, targets):
         return model(inputs, targets)
@@ -779,6 +857,18 @@ def resolve_run_config(args: argparse.Namespace) -> RunConfig:
             else None
         ),
         checkpoint_interval_is_auto=False,
+        lr_multiplier=1.0 if args.lr_multiplier is None else args.lr_multiplier,
+        streaming_eval_interval_steps=args.streaming_eval_interval_steps,
+        streaming_eval_mode=(
+            args.streaming_eval_mode
+            if args.streaming_eval_mode is not None
+            else STREAMING_EVAL_MODE_SUBREF_ONE_SIXTH
+        ),
+        streaming_eval_tokens=args.streaming_eval_tokens,
+        streaming_eval_seq_len=args.streaming_eval_seq_len,
+        streaming_eval_batch_size=args.streaming_eval_batch_size,
+        streaming_eval_history_output=args.streaming_eval_history_output,
+        complete_streaming_eval_cycle=args.complete_streaming_eval_cycle,
         resume_from=args.resume_from,
     )
 
@@ -814,10 +904,18 @@ def resolve_run_config(args: argparse.Namespace) -> RunConfig:
         "window_pattern",
         "device_batch_size",
         "total_batch_size",
+        "lr_multiplier",
+        "streaming_eval_interval_steps",
+        "streaming_eval_tokens",
+        "streaming_eval_seq_len",
+        "streaming_eval_batch_size",
+        "streaming_eval_history_output",
     ):
         value = getattr(args, field)
         if value is not None:
             overrides[field] = value
+    if args.complete_streaming_eval_cycle:
+        overrides["complete_streaming_eval_cycle"] = True
     if overrides:
         config = replace(config, **overrides)
     if args.token_budget is not None and args.time_budget is None:
@@ -852,6 +950,13 @@ def resolve_resume_config(args: argparse.Namespace) -> RunConfig:
         "device_batch_size",
         "total_batch_size",
         "seed",
+        "lr_multiplier",
+        "streaming_eval_interval_steps",
+        "streaming_eval_mode",
+        "streaming_eval_tokens",
+        "streaming_eval_seq_len",
+        "streaming_eval_batch_size",
+        "streaming_eval_history_output",
     ):
         if getattr(args, field) is not None:
             disallowed.append(field)
@@ -907,6 +1012,14 @@ def resolve_resume_config(args: argparse.Namespace) -> RunConfig:
     run_config.setdefault("checkpoint_path", None)
     run_config.setdefault("checkpoint_interval", None)
     run_config.setdefault("checkpoint_interval_is_auto", False)
+    run_config.setdefault("lr_multiplier", 1.0)
+    run_config.setdefault("streaming_eval_interval_steps", None)
+    run_config.setdefault("streaming_eval_mode", STREAMING_EVAL_MODE_SUBREF_ONE_SIXTH)
+    run_config.setdefault("streaming_eval_tokens", None)
+    run_config.setdefault("streaming_eval_seq_len", None)
+    run_config.setdefault("streaming_eval_batch_size", None)
+    run_config.setdefault("streaming_eval_history_output", None)
+    run_config.setdefault("complete_streaming_eval_cycle", False)
     run_config["time_budget"] = args.time_budget if args.time_budget is not None else run_config["time_budget"]
     run_config["token_budget"] = args.token_budget if args.token_budget is not None else run_config["token_budget"]
     if args.token_budget is not None and args.time_budget is None:
@@ -916,6 +1029,8 @@ def resolve_resume_config(args: argparse.Namespace) -> RunConfig:
         if args.time_budget_mode is not None
         else run_config["time_budget_mode"]
     )
+    if args.complete_streaming_eval_cycle:
+        run_config["complete_streaming_eval_cycle"] = True
     run_config["no_checkpoint"] = args.no_checkpoint
     run_config["checkpoint_mode"] = (
         args.checkpoint_mode
@@ -1047,6 +1162,48 @@ def parse_args() -> RunConfig:
     parser.add_argument(
         "--resume-from",
         help="Resume training from a checkpoint directory.",
+    )
+    parser.add_argument(
+        "--lr-multiplier",
+        type=float,
+        help="Multiply all preset LR groups by this scalar while preserving their ratios.",
+    )
+    parser.add_argument(
+        "--streaming-eval-interval-steps",
+        type=int,
+        help=f"Run one deterministic validation batch every N training steps. Default for discovery flows is {DEFAULT_STREAMING_EVAL_INTERVAL_STEPS}.",
+    )
+    parser.add_argument(
+        "--streaming-eval-mode",
+        choices=STREAMING_EVAL_MODES,
+        help="Streaming eval mode. 'subref-one-sixth' is the default online path; 'cheap' favors repeated comparable cycles; 'both' enables both streams.",
+    )
+    parser.add_argument(
+        "--streaming-eval-tokens",
+        type=int,
+        help=(
+            "Token budget represented by one full repeated cheap streaming-eval cycle. "
+            f"Defaults to the cheap canonical rung ({CHEAP_EVAL_RUNG.eval_tokens})."
+        ),
+    )
+    parser.add_argument(
+        "--streaming-eval-seq-len",
+        type=int,
+        help="Sequence length for deterministic streaming validation batches. Defaults to the canonical eval seq_len.",
+    )
+    parser.add_argument(
+        "--streaming-eval-batch-size",
+        type=int,
+        help="Batch size for deterministic streaming validation batches. Defaults to the canonical eval batch size.",
+    )
+    parser.add_argument(
+        "--streaming-eval-history-output",
+        help="Optional JSON path to write deterministic streaming validation history.",
+    )
+    parser.add_argument(
+        "--complete-streaming-eval-cycle",
+        action="store_true",
+        help="If a run stops mid streaming-eval cycle, continue until the current cycle boundary so the final honest metric is complete.",
     )
     args = parser.parse_args()
     if args.time_budget is not None and args.token_budget is not None:
@@ -1226,6 +1383,7 @@ def main() -> None:
         print(f"  {key:24s}: {value:,}")
     num_params = param_counts["total"]
     args, checkpoint_resolution = resolve_checkpoint_settings(args, num_params)
+    streaming_eval_config = resolve_streaming_eval_config(args)
     print(f"Model config: {asdict(config)}")
     print(f"Run preset: {args.preset} ({PRESETS[args.preset].description})")
     time_budget_label = f"{args.time_budget}s" if args.time_budget is not None else "None"
@@ -1262,16 +1420,38 @@ def main() -> None:
         f"eval_calibration_limited_by={args.eval_calibration_limited_by}, "
         f"eval_policy_version={args.eval_policy_version}, "
         f"device_batch_size={args.device_batch_size}, total_batch_size={args.total_batch_size}, "
+        f"lr_multiplier={args.lr_multiplier}, "
         f"smoke={args.smoke}, benchmark_warmup_steps={args.benchmark_warmup_steps if args.benchmark_warmup_steps is not None else 'auto'}, "
         f"benchmark_skip_eval={args.benchmark_skip_eval}, prefer_prepacked_cache={args.prefer_prepacked_cache}, "
         f"no_checkpoint={args.no_checkpoint}, checkpoint_mode={args.checkpoint_mode}, checkpoint_save_mode={args.checkpoint_save_mode}, checkpoint_path={args.checkpoint_path}, "
-        f"checkpoint_interval={args.checkpoint_interval}, resume_from={args.resume_from}"
+        f"checkpoint_interval={args.checkpoint_interval}, "
+        f"streaming_eval_interval_steps={args.streaming_eval_interval_steps}, "
+        f"streaming_eval_mode={args.streaming_eval_mode}, "
+        f"streaming_eval_tokens={args.streaming_eval_tokens}, "
+        f"streaming_eval_seq_len={args.streaming_eval_seq_len}, "
+        f"streaming_eval_batch_size={args.streaming_eval_batch_size}, "
+        f"streaming_eval_history_output={args.streaming_eval_history_output}, "
+        f"complete_streaming_eval_cycle={args.complete_streaming_eval_cycle}, "
+        f"resume_from={args.resume_from}"
     )
     num_flops_per_token = model.estimate_flops()
     print(f"Estimated FLOPs per token: {num_flops_per_token:e}")
     if checkpoint_resolution is not None:
         print(f"Checkpoint policy: {checkpoint_resolution}")
     print(f"Eval policy: {describe_eval_policy(args)}")
+    if streaming_eval_config is not None:
+        print(
+            "Streaming eval: "
+            f"every={streaming_eval_config.interval_steps} steps, "
+            f"mode={streaming_eval_config.mode}, "
+            f"tokens={streaming_eval_config.eval_tokens}, "
+            f"seq_len={streaming_eval_config.seq_len}, "
+            f"batch_size={streaming_eval_config.batch_size}, "
+            f"cycle_batches={streaming_eval_config.cycle_batches}, "
+            f"complete_cycle_on_budget={streaming_eval_config.complete_cycle_on_budget}"
+        )
+    else:
+        print("Streaming eval: disabled")
 
     tokens_per_fwdbwd = args.device_batch_size * args.seq_len
     if args.total_batch_size % tokens_per_fwdbwd != 0:
@@ -1352,6 +1532,92 @@ def main() -> None:
     session_step_seconds: list[float] = []
     session_post_step_wall_seconds: list[float] = []
     t_budget_start = time.perf_counter()
+    streaming_eval_seconds = 0.0
+    subref_streaming_eval_seconds = 0.0
+    cheap_stream_enabled = streaming_eval_config is not None and streaming_mode_uses_cheap(streaming_eval_config.mode)
+    subref_stream_enabled = (
+        streaming_eval_config is not None and streaming_mode_uses_subref(streaming_eval_config.mode)
+    )
+    streaming_eval_tracker = (
+        StreamingEvalTracker(streaming_eval_config)
+        if cheap_stream_enabled
+        else None
+    )
+    streaming_eval_token_bytes = (
+        mx.array(load_token_bytes())
+        if cheap_stream_enabled or subref_stream_enabled
+        else None
+    )
+    streaming_eval_loader = None
+    streaming_eval_cursor = None
+    subref_streaming_tracker = None
+    subref_streaming_cursor = None
+    derived_reference_streaming = None
+    if cheap_stream_enabled:
+        streaming_eval_loader = make_dataloader(
+            tokenizer,
+            streaming_eval_config.batch_size,
+            streaming_eval_config.seq_len,
+            "val",
+            prefer_prepacked_cache=args.prefer_prepacked_cache,
+        )
+        if isinstance(streaming_eval_loader, PrepackedDataLoader):
+            streaming_eval_step_tokens = max(1, streaming_eval_config.batch_size * streaming_eval_config.seq_len)
+            streaming_eval_steps = max(1, math.ceil(streaming_eval_config.eval_tokens / streaming_eval_step_tokens))
+            streaming_reference_steps = None
+            if args.canonical_eval_reference_tokens is not None:
+                streaming_reference_steps = max(
+                    1,
+                    math.ceil(args.canonical_eval_reference_tokens / streaming_eval_step_tokens),
+                )
+            available_batches = max(1, streaming_eval_loader.row_count // streaming_eval_loader.batch_size)
+            cheap_batch_plan = build_prepacked_eval_batch_plan(
+                streaming_eval_steps,
+                args.canonical_eval_slices,
+                reference_steps=streaming_reference_steps,
+                available_batches=available_batches,
+            )
+            streaming_eval_cursor = PlannedEvalCursor(streaming_eval_loader, tuple(cheap_batch_plan))
+
+    if subref_stream_enabled:
+        subref_loader = make_dataloader(
+            tokenizer,
+            args.canonical_eval_batch_size,
+            args.canonical_eval_seq_len,
+            "val",
+            prefer_prepacked_cache=args.prefer_prepacked_cache,
+        )
+        if isinstance(subref_loader, PrepackedDataLoader):
+            subref_step_tokens = max(1, args.canonical_eval_batch_size * args.canonical_eval_seq_len)
+            subref_steps = max(1, math.ceil(SUBREF_ONE_SIXTH_EVAL_RUNG.eval_tokens / subref_step_tokens))
+            reference_steps = max(1, math.ceil(REFERENCE_EVAL_RUNG.eval_tokens / subref_step_tokens))
+            reference_horizon_steps = None
+            if REFERENCE_EVAL_RUNG.reference_eval_tokens is not None:
+                reference_horizon_steps = max(
+                    1,
+                    math.ceil(REFERENCE_EVAL_RUNG.reference_eval_tokens / subref_step_tokens),
+                )
+            available_batches = max(1, subref_loader.row_count // subref_loader.batch_size)
+            reference_batch_plan = build_prepacked_eval_batch_plan(
+                reference_steps,
+                REFERENCE_EVAL_RUNG.eval_slices,
+                reference_steps=reference_horizon_steps,
+                available_batches=available_batches,
+            )
+            if len(reference_batch_plan) >= subref_steps * SUBREF_ONE_SIXTHS_PER_REFERENCE:
+                subref_streaming_tracker = StreamingEvalTracker(
+                    StreamingEvalConfig(
+                        interval_steps=streaming_eval_config.interval_steps,
+                        eval_tokens=subref_steps * subref_step_tokens,
+                        batch_size=args.canonical_eval_batch_size,
+                        seq_len=args.canonical_eval_seq_len,
+                        complete_cycle_on_budget=False,
+                    )
+                )
+                subref_streaming_cursor = PlannedEvalCursor(subref_loader, tuple(reference_batch_plan))
+                derived_reference_streaming = StreamingSupercycleAccumulator(
+                    subcycles_per_supercycle=SUBREF_ONE_SIXTHS_PER_REFERENCE
+                )
     async_checkpoint_writer = (
         make_async_checkpoint_writer()
         if args.checkpoint_path is not None and args.checkpoint_save_mode == CHECKPOINT_SAVE_MODE_ASYNC
@@ -1366,10 +1632,19 @@ def main() -> None:
     def budget_elapsed_tokens() -> int:
         return step * args.total_batch_size
 
-    def budget_satisfied() -> bool:
+    def nominal_budget_satisfied() -> bool:
         if args.token_budget is not None:
             return budget_elapsed_tokens() >= args.token_budget
         return budget_elapsed_seconds() >= float(args.time_budget)
+
+    def budget_satisfied() -> bool:
+        if not nominal_budget_satisfied():
+            return False
+        if streaming_eval_tracker is not None and streaming_eval_tracker.requires_cycle_completion():
+            return False
+        if subref_streaming_tracker is not None and subref_streaming_tracker.requires_cycle_completion():
+            return False
+        return True
 
     def budget_progress() -> float:
         if args.token_budget is not None:
@@ -1380,6 +1655,88 @@ def main() -> None:
         if args.token_budget is not None:
             return f"{max(0, args.token_budget - budget_elapsed_tokens()):,} tok"
         return f"{max(0.0, float(args.time_budget) - budget_elapsed_seconds()):.0f}s"
+
+    def maybe_run_streaming_eval() -> None:
+        nonlocal streaming_eval_loader, streaming_eval_seconds, subref_streaming_eval_seconds
+        if streaming_eval_config is None:
+            return
+        if not streaming_eval_config.interval_steps or step <= 0 or step % streaming_eval_config.interval_steps != 0:
+            return
+        model.eval()
+        if streaming_eval_tracker is not None:
+            t_streaming_eval_start = time.perf_counter()
+            if streaming_eval_cursor is not None:
+                x_val, y_val = streaming_eval_cursor.next_batch()
+            elif streaming_eval_loader is not None:
+                x_val, y_val, _ = next(streaming_eval_loader)
+            else:
+                model.train()
+                return
+            batch_bpb, batch_nats, batch_bytes = evaluate_bpb_batch_stats(
+                model,
+                x_val,
+                y_val,
+                token_bytes=streaming_eval_token_bytes,
+            )
+            streaming_eval_seconds += time.perf_counter() - t_streaming_eval_start
+            point = streaming_eval_tracker.record(
+                step=step,
+                total_training_time=total_training_time,
+                total_tokens=step * args.total_batch_size,
+                batch_bpb=batch_bpb,
+                batch_nats=batch_nats,
+                batch_bytes=batch_bytes,
+            )
+            if point.cycle_completed:
+                summary = streaming_eval_tracker.summary()
+                auc_label = "skipped" if summary.auc is None else f"{summary.auc:.6f}"
+                honest_label = "skipped" if point.honest_bpb is None else f"{point.honest_bpb:.6f}"
+                print(
+                    f"\nstreaming_eval: step={point.step} cycle={point.cycle_index} "
+                    f"honest_bpb={honest_label} auc={auc_label}"
+                )
+        if subref_streaming_tracker is not None and subref_streaming_cursor is not None:
+            t_subref_eval_start = time.perf_counter()
+            x_subref, y_subref = subref_streaming_cursor.next_batch()
+            subref_bpb, subref_nats, subref_bytes = evaluate_bpb_batch_stats(
+                model,
+                x_subref,
+                y_subref,
+                token_bytes=streaming_eval_token_bytes,
+            )
+            subref_streaming_eval_seconds += time.perf_counter() - t_subref_eval_start
+            subref_point = subref_streaming_tracker.record(
+                step=step,
+                total_training_time=total_training_time,
+                total_tokens=step * args.total_batch_size,
+                batch_bpb=subref_bpb,
+                batch_nats=subref_nats,
+                batch_bytes=subref_bytes,
+            )
+            if subref_point.cycle_completed:
+                subref_label = "skipped" if subref_point.honest_bpb is None else f"{subref_point.honest_bpb:.6f}"
+                print(
+                    f"\nsubref_one_sixth_eval: step={subref_point.step} cycle={subref_point.cycle_index} "
+                    f"honest_bpb={subref_label}"
+                )
+                if (
+                    derived_reference_streaming is not None
+                    and derived_reference_streaming.record_completed_subcycle(
+                        cycle_nats=subref_point.cycle_nats,
+                        cycle_bytes=subref_point.cycle_bytes,
+                        honest_bpb=subref_point.honest_bpb,
+                    )
+                ):
+                    reference_label = (
+                        "skipped"
+                        if derived_reference_streaming.honest_supercycle_bpb is None
+                        else f"{derived_reference_streaming.honest_supercycle_bpb:.6f}"
+                    )
+                    print(
+                        f"\nreference_streaming_eval: cycle={derived_reference_streaming.supercycles_completed} "
+                        f"honest_bpb={reference_label}"
+                    )
+        model.train()
 
     def maybe_save_checkpoint(*, force: bool = False) -> None:
         nonlocal last_checkpoint_time, last_checkpoint_tokens, checkpoint_seconds, checkpoint_count, checkpoint_write_seconds
@@ -1455,7 +1812,7 @@ def main() -> None:
         muon_momentum = get_muon_momentum(step)
         muon_weight_decay = get_weight_decay(progress)
         optimizer.set_schedule(
-            lr_multiplier=lrm,
+            lr_multiplier=args.lr_multiplier * lrm,
             muon_momentum=muon_momentum,
             muon_weight_decay=muon_weight_decay,
         )
@@ -1511,6 +1868,7 @@ def main() -> None:
 
         step += 1
         local_step_index += 1
+        maybe_run_streaming_eval()
         maybe_save_checkpoint()
         session_post_step_wall_seconds.append(time.perf_counter() - t_budget_start)
 
@@ -1571,6 +1929,35 @@ def main() -> None:
         )
         canonical_eval_seconds = time.perf_counter() - t_canonical_eval_start
     total_wall_seconds = time.perf_counter() - t_start
+    streaming_eval_summary = streaming_eval_tracker.summary() if streaming_eval_tracker is not None else None
+    subref_streaming_eval_summary = (
+        subref_streaming_tracker.summary() if subref_streaming_tracker is not None else None
+    )
+    if args.streaming_eval_history_output and (
+        streaming_eval_tracker is not None or subref_streaming_tracker is not None
+    ):
+        output_path = Path(args.streaming_eval_history_output)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        primary_tracker = (
+            streaming_eval_tracker
+            if streaming_eval_tracker is not None
+            else subref_streaming_tracker
+        )
+        history_payload = primary_tracker.to_dict()
+        history_payload["streaming_eval_mode"] = streaming_eval_config.mode if streaming_eval_config is not None else None
+        if (
+            streaming_eval_summary is not None
+            and subref_streaming_eval_summary is not None
+            and subref_streaming_tracker is not None
+        ):
+            history_payload["subref_one_sixth"] = subref_streaming_tracker.to_dict()
+        if derived_reference_streaming is not None:
+            history_payload["reference_from_subref"] = {
+                "subcycle_key": SUBREF_ONE_SIXTH_EVAL_RUNG.key,
+                "supercycle_key": REFERENCE_EVAL_RUNG.key,
+                **derived_reference_streaming.to_dict(),
+            }
+        output_path.write_text(json.dumps(history_payload, indent=2) + "\n")
     telemetry_summary = summarize_step_telemetry(
         step_telemetry,
         num_flops_per_token=num_flops_per_token,
@@ -1580,7 +1967,7 @@ def main() -> None:
     session_training_seconds = total_training_time - resumed_training_time
     cumulative_training_seconds = total_training_time
     session_total_seconds = total_wall_seconds
-    session_eval_seconds = proxy_eval_seconds + canonical_eval_seconds
+    session_eval_seconds = proxy_eval_seconds + canonical_eval_seconds + streaming_eval_seconds + subref_streaming_eval_seconds
     session_checkpoint_count = checkpoint_count
     cumulative_checkpoint_seconds = resumed_checkpoint_seconds + checkpoint_seconds
     cumulative_checkpoint_count = resumed_checkpoint_count + checkpoint_count
@@ -1638,8 +2025,65 @@ def main() -> None:
     print(f"time_budget:      {args.time_budget}")
     print(f"token_budget:     {args.token_budget}")
     print(f"time_budget_mode: {args.time_budget_mode}")
+    print(f"lr_multiplier:   {args.lr_multiplier:.6f}")
     print(f"budget_elapsed_seconds: {budget_elapsed_at_cutoff:.1f}")
     print(f"budget_elapsed_tokens_M: {total_tokens / 1e6:.3f}")
+    if streaming_eval_config is None:
+        print("streaming_eval_points: skipped")
+        print("streaming_eval_cycles_completed: skipped")
+        print("streaming_eval_cycle_batches: skipped")
+        print("streaming_eval_total_seconds: skipped")
+        print("streaming_val_auc: skipped")
+        print("honest_val_bpb: skipped")
+        print("subref_one_sixth_eval_points: skipped")
+        print("subref_one_sixth_eval_cycles_completed: skipped")
+        print("honest_subref_one_sixth_bpb: skipped")
+        print("reference_streaming_eval_cycles_completed: skipped")
+        print("honest_reference_bpb: skipped")
+    else:
+        print(f"streaming_eval_mode: {streaming_eval_config.mode}")
+        if streaming_eval_summary is None:
+            print("streaming_eval_points: skipped")
+            print("streaming_eval_cycles_completed: skipped")
+            print("streaming_eval_cycle_batches: skipped")
+        else:
+            print(f"streaming_eval_points: {streaming_eval_summary.total_points}")
+            print(f"streaming_eval_cycles_completed: {streaming_eval_summary.cycles_completed}")
+            print(f"streaming_eval_cycle_batches: {streaming_eval_summary.cycle_batches}")
+        print(f"streaming_eval_total_seconds: {streaming_eval_seconds + subref_streaming_eval_seconds:.1f}")
+        if streaming_eval_summary is None or streaming_eval_summary.auc is None:
+            print("streaming_val_auc: skipped")
+        else:
+            print(f"streaming_val_auc: {streaming_eval_summary.auc:.6f}")
+        if streaming_eval_summary is None or streaming_eval_summary.honest_bpb is None:
+            print("honest_val_bpb: skipped")
+        else:
+            print(f"honest_val_bpb: {streaming_eval_summary.honest_bpb:.6f}")
+        if subref_streaming_eval_summary is None:
+            print("subref_one_sixth_eval_points: skipped")
+            print("subref_one_sixth_eval_cycles_completed: skipped")
+            print("honest_subref_one_sixth_bpb: skipped")
+            print("reference_streaming_eval_cycles_completed: skipped")
+            print("honest_reference_bpb: skipped")
+        else:
+            print(f"subref_one_sixth_eval_points: {subref_streaming_eval_summary.total_points}")
+            print(f"subref_one_sixth_eval_cycles_completed: {subref_streaming_eval_summary.cycles_completed}")
+            if derived_reference_streaming is None or derived_reference_streaming.honest_subcycle_bpb is None:
+                print("honest_subref_one_sixth_bpb: skipped")
+            else:
+                print(f"honest_subref_one_sixth_bpb: {derived_reference_streaming.honest_subcycle_bpb:.6f}")
+            if derived_reference_streaming is None:
+                print("reference_streaming_eval_cycles_completed: skipped")
+                print("honest_reference_bpb: skipped")
+            else:
+                print(
+                    "reference_streaming_eval_cycles_completed: "
+                    f"{derived_reference_streaming.supercycles_completed}"
+                )
+                if derived_reference_streaming.honest_supercycle_bpb is None:
+                    print("honest_reference_bpb: skipped")
+                else:
+                    print(f"honest_reference_bpb: {derived_reference_streaming.honest_supercycle_bpb:.6f}")
     print(f"canonical_rung:   {args.canonical_eval_rung}")
     print(f"eval_hardware_key: {args.eval_hardware_key}")
     print(f"eval_calibration_status: {args.eval_calibration_status}")

@@ -180,6 +180,13 @@ REFERENCE_EVAL_RUNG = EvalRungSpec(
     eval_slices=EVAL_SLICE_CAP,
     reference_eval_tokens=EVAL_TOKENS,
 )
+SUBREF_ONE_SIXTH_EVAL_RUNG = EvalRungSpec(
+    key="subref-one-sixth",
+    label="Subreference one-sixth",
+    eval_tokens=REFERENCE_EVAL_TOKENS // 6,
+    eval_slices=EVAL_SLICE_CAP,
+    reference_eval_tokens=EVAL_TOKENS,
+)
 FULL_EVAL_RUNG = EvalRungSpec(
     key="full",
     label="Full upstream audit",

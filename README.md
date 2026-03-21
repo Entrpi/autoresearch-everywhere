@@ -24,7 +24,7 @@ Two validated fast-track paths exist today:
 
 If you are on one of those reference machines, skip to the matching fast-track section below. If this is a different machine, use the generic bring-up flow first.
 
-**Validated fast-track requirements:** either Apple Silicon, macOS, Python 3.10+, and [uv](https://docs.astral.sh/uv/), or a DGX Spark / GB10 host with the FA4-capable runtime image described in [docs/dgx-spark-setup.md](docs/dgx-spark-setup.md). Other NVIDIA hardware still uses the same top-level commands, but Spark / GB10 is the currently validated CUDA shortcut path.
+**Validated fast-track requirements:** either Apple Silicon, macOS, Python 3.12+, and [uv](https://docs.astral.sh/uv/), or a DGX Spark / GB10 host with the FA4-capable runtime image described in [docs/dgx-spark-setup.md](docs/dgx-spark-setup.md). Other NVIDIA hardware still uses the same top-level commands, but Spark / GB10 is the currently validated CUDA shortcut path.
 
 ## Running an Agent
 
@@ -296,10 +296,10 @@ Current project snapshot from [CHANGELOG.md](CHANGELOG.md):
 
 | Metric | Value |
 | --- | --- |
-| Mean autonomy score | `3.12 / 6` |
-| Mean complexity | `6.82 / commit` |
-| Mean score per top-level bullet | `3.18 / 6` |
-| History covered | `88` commits across `15` subsystems |
+| Mean autonomy score | `3.13 / 6` |
+| Mean complexity | `6.90 / commit` |
+| Mean score per top-level bullet | `3.20 / 6` |
+| History covered | `89` commits across `16` subsystems |
 <!-- autonomy-golf-snapshot:end -->
 
 Refresh with:

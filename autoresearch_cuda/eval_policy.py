@@ -124,6 +124,13 @@ CUDA_REFERENCE_RUNG = EvalRungSpec(
     eval_tokens=3 * 524288,
     batch_size=32,
 )
+CUDA_SUBREF_ONE_SIXTH_RUNG = EvalRungSpec(
+    key="subref-one-sixth",
+    label="Subreference one-sixth",
+    seq_len=2048,
+    eval_tokens=262144,
+    batch_size=32,
+)
 CUDA_FULL_RUNG = EvalRungSpec(
     key="full",
     label="Full upstream audit",

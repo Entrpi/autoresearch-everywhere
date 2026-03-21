@@ -29,7 +29,71 @@ On this hardware, the default canonical matched benchmark window for optimizatio
 
 ## Latest
 
-### New commit — platform/checkpoints: unify exact checkpoint policy and telemetry across MLX and CUDA — score `3` — complexity `12`
+### New commit — train/eval: add shared streaming honest eval hierarchy — score `4` — complexity `14`
+
+**Human-directed, AI-shaped (4)**
+
+- Add a shared deterministic streaming-validation surface to both trainers so short runs can produce directly comparable AUC and cycle-complete honest metrics without paying for standalone eval passes.
+  - Meaning: both MLX and CUDA now expose the same online-eval contract: one deterministic validation batch every `N` steps, rolling cycle summaries that emit `honest_val_bpb` when the configured slice completes, optional history JSON, and an opt-in rule to finish the current cycle before stopping so the final online metric is not truncated.
+  - Motivation: the new probe workflow needed two capabilities the trainers did not expose: identical validation ordering across short runs, and a cheap amortized signal stable enough to score the ramp before a full canonical eval would be worth pausing for.
+  - Purpose: make early-training online eval a first-class shared surface that downstream probes and longer runs can both rely on without splitting MLX and CUDA behavior.
+  - Add shared `autoresearch_platform.streaming_eval` types and engine/result-surface fields for streaming AUC, honest BPB, cycle counts, history output, and derived reference reporting.
+  - Wire both trainers and the shared engine surface to accept `--streaming-eval-*` plus `--lr-multiplier`, emit `streaming_val_auc` / `honest_val_bpb`, and persist optional point-by-point streaming history while keeping the multiplier as a scale factor over the preset LR ratios.
+  - Refine the online-eval hierarchy so repeated fixed-sample `cheap` cycles remain available for fast comparable probes, while `subref-one-sixth` walks disjoint one-sixth shards of `reference` and derives `honest_reference_bpb` every six completed subcycles.
+- Close the CUDA front door and Blackwell bring-up gaps that the new online-eval surface exposed.
+  - Meaning: `uv run train.py --engine cuda --smoke` now works as a true tiny end-to-end sanity pass, the CUDA batch-eval helper now runs under autocast instead of dying on bf16/float mismatches, and the repo’s default `uv` env now uses Python `3.12` so the published RTX 5090 FA4 wheel can load through the advertised front door.
+  - Motivation: first contact on the 5090 Runpod box exposed three real parity gaps: CUDA had no usable `--smoke` path, the new online eval crashed outside an autocast region, and the `3.10` repo pin prevented the published `torch 2.9 / cu12` FlashAttention wheel from being used in the default env.
+  - Purpose: make the shared streaming probe surface operational on the current Blackwell reference path instead of leaving the CUDA side only theoretically wired.
+  - Add MLX-style `--smoke` handling to `autoresearch_cuda.train`, including tiny safe overrides and a smoke eval rung.
+  - Wrap CUDA batch BPB eval in autocast inside `autoresearch_cuda.prepare` so both standalone and streaming batch eval share the same bf16-safe behavior.
+  - Pin `.python-version` to `3.12` and update the README fast-track wording accordingly.
+
+**Grounding**
+
+- Files:
+  - `.python-version`
+  - `CHANGELOG.md`
+  - `autoresearch_platform/engines.py`
+  - `autoresearch_platform/streaming_eval.py`
+  - `autoresearch_platform/cuda_engine.py`
+  - `autoresearch_platform/mlx_engine.py`
+  - `autoresearch_cuda/eval_policy.py`
+  - `autoresearch_cuda/prepare.py`
+  - `autoresearch_cuda/train.py`
+  - `autoresearch_mlx/data.py`
+  - `autoresearch_mlx/eval_policy.py`
+  - `autoresearch_mlx/train.py`
+  - `README.md`
+- Validation:
+  - `python3 -m py_compile autoresearch_platform/engines.py autoresearch_platform/mlx_engine.py autoresearch_platform/cuda_engine.py autoresearch_platform/streaming_eval.py autoresearch_mlx/data.py autoresearch_mlx/eval_policy.py autoresearch_mlx/train.py autoresearch_cuda/prepare.py autoresearch_cuda/train.py`
+  - `uv run python train.py --engine cuda --help | rg -n -- "--smoke|benchmark-skip-eval|no-compile|streaming-eval-interval-steps"`
+  - `uv run python -V` after updating `.python-version` to `3.12`
+  - `UV_CACHE_DIR=/tmp/uv-cache uv run python -m autoresearch_mlx.train --smoke --time-budget 0.2 --benchmark-skip-eval --no-checkpoint --streaming-eval-interval-steps 1 --streaming-eval-tokens 1024 --complete-streaming-eval-cycle --streaming-eval-history-output /tmp/autoresearch_mlx_streaming_smoke/history.json`
+  - `uv run python - <<'PY' ...` structural check that `cheap` stays a repeated subset while six disjoint `subref-one-sixth` shards exactly reconstruct `reference`
+  - `uv run python -m autoresearch_mlx.train --preset m5-tiny --token-budget 4718592 --streaming-eval-interval-steps 1 --streaming-eval-tokens 262144 --streaming-eval-history-output /tmp/autoresearch_subref_mlx/history.json --benchmark-skip-eval --no-checkpoint`
+  - real RTX 5090 Runpod checks after syncing the patched CUDA trainer files into the Runpod checkout:
+    - `uv run prepare.py --engine cuda`
+    - `uv run train.py --engine cuda --smoke`
+    - `uv run python -m autoresearch_cuda.train --smoke --token-budget 32768 --streaming-eval-interval-steps 1 --benchmark-skip-eval --no-checkpoint --no-compile`
+    - `uv run python -m autoresearch_cuda.train --smoke --token-budget 32768 --streaming-eval-interval-steps 1 --streaming-eval-mode cheap --streaming-eval-tokens 262144 --benchmark-skip-eval --no-checkpoint --no-compile`
+    - `uv run python -m autoresearch_cuda.train --smoke --token-budget 32768 --streaming-eval-interval-steps 1 --streaming-eval-mode both --streaming-eval-tokens 262144 --benchmark-skip-eval --no-checkpoint --no-compile`
+    - `python3 - <<'PY' ...` summary readback of `/tmp/autoresearch-cuda-subref-smoke.json`, `/tmp/autoresearch-cuda-cheap-smoke.json`, and `/tmp/autoresearch-cuda-both-smoke.json`
+- Measurements:
+  - local MLX streaming-eval smoke on the trainer path completed `12` deterministic eval points over `6` full cycles, ending with `streaming_val_auc=2.821716` and `honest_val_bpb=2.650096` while still skipping the expensive final canonical eval.
+  - the new MLX canonical-plan relationship is now explicit rather than accidental: with the current eval contracts, `cheap` is `64` batches, `subref-one-sixth` is also `64`, and `reference` is `384`; the six `subref-one-sixth` chunks are pairwise disjoint, their union exactly matches the full `reference` plan, and the repeated `cheap` plan stays a fixed subset of the same reference horizon rather than becoming the first sixth verbatim.
+  - a real MLX trainer run on `m5-tiny` with one streamed eval batch every training step and a `4,718,592`-token budget completed `384` training steps, `384` repeated-cheap points, `384` `subref-one-sixth` points, `6` cheap cycles, `6` `subref-one-sixth` cycles, and `1` derived `reference` cycle, ending with `honest_val_bpb=1.790825`, `honest_subref_one_sixth_bpb=1.793900`, `honest_reference_bpb=1.951716`, `streaming_val_auc=1.944725`, `training_seconds=52.9`, and `streaming_eval_total_seconds=15.4`.
+  - a real RTX 5090 / Runpod smoke now completes on the patched front door using the exact README command, reporting `hardware_key=nvidia-blackwell-rtx50-31gb`, `canonical_rung=smoke`, `eval_calibration_status=smoke`, `val_bpb=3.144333`, `training_seconds=1.0`, `peak_vram_mb=142.1`, and `resolved_attention_backend=torch-sdpa`.
+  - the first real CUDA streaming smoke immediately exposed and grounded a real parity bug in the new online-eval path: `evaluate_bpb_batch_stats(...)` was calling the model outside the CUDA autocast context and died on `RuntimeError: expected mat1 and mat2 to have the same dtype, but got: c10::BFloat16 != float`; the fix was to make the helper enter `torch.amp.autocast(...)` internally so both standalone eval and online eval are safe when called outside a surrounding autocast block.
+  - after that fix, the same RTX 5090 host completed all three CUDA streaming modes on the tiny smoke shape with `--token-budget 32768` and one eval tick per training step:
+    - default `subref-one-sixth`: `64` subref points, `16` completed subref cycles, `2` derived reference cycles, `honest_subref_one_sixth_bpb=2.495688`, `honest_reference_bpb=2.569155`, `training_seconds=0.5`, `total_seconds=3.3`
+    - `cheap`: `64` repeated-cheap points, `16` cheap cycles, `streaming_val_auc=2.660665`, `honest_val_bpb=2.538248`, `training_seconds=0.5`, `total_seconds=4.0`
+    - `both`: `64` repeated-cheap points, `64` subref points, `16` cheap cycles, `16` subref cycles, `2` derived reference cycles, `streaming_val_auc=2.660214`, `honest_val_bpb=2.537253`, `honest_subref_one_sixth_bpb=2.495301`, `honest_reference_bpb=2.568650`, `training_seconds=0.5`, `total_seconds=6.1`
+  - that same host also grounded the bug this patch closes: before the smoke flag was added, the committed CUDA front door rejected `--smoke`, and a minimal fallback `upstream` probe on the same machine OOMed immediately under the normal default shape.
+  - on the RTX 5090 host, the repo’s old `.python-version=3.10` pin prevented FA4 from coming up through the normal `uv` path because upstream only published the `torch 2.9 / cu12` Linux wheel for `cp312`; after rebuilding a `3.12` env and installing `flash_attn-2.8.3+cu12torch2.9cxx11abiTRUE-cp312-cp312-linux_x86_64.whl`, `train.py --engine cuda --smoke` resolved `installed:flash_attn.flash_attn_interface` instead of `torch-sdpa`.
+
+## Committed History
+
+### March 20, 2026 — `72fe88e` — platform/checkpoints: unify exact checkpoint policy and telemetry across MLX and CUDA — score `3` — complexity `12`
 
 **AI-identified within brief, human-shaped (3)**
 
@@ -77,8 +141,6 @@ On this hardware, the default canonical matched benchmark window for optimizatio
   - GB10 repeated-save overhead profiling now grounds CUDA's balanced band (`m5-balanced`, `seq=1024`, `db=32`, `tb=32768`) at `0.5216s/save` for `exact/sync` and `0.2970s/save` for `exact/async`, which yields calibrated auto plans of `10m` and `5m` respectively under the shared `0.1%` save-only overhead cap.
   - The same GB10 harness grounds CUDA's xlarge band (`m5-xlarge`, `seq=2048`, `db=16`, `tb=32768`) at `0.3804s/save` for `exact/sync` and `0.6936s/save` for `exact/async`, which yields calibrated auto plans of `10m` and `15m`; on this heavier band the async path is more blocking than sync because snapshot capture dominates.
   - A local MLX smoke on the new shared telemetry path still completed cleanly and emitted both the legacy aliases and the new shared fields in the final summary, including `compute_share_percent=99.80`, `input_pipeline_percent=0.15`, `phase_loader_percent=0.15`, `phase_grad_percent=66.95`, `phase_accumulate_percent=7.55`, and `phase_optimizer_percent=25.30`.
-
-## Committed History
 
 ### March 14, 2026 — `3e64c13` — platform/checkpoints: add token-budget checkpoint parity to the MLX trainer — score `3` — complexity `7`
 
@@ -1002,7 +1064,7 @@ On this hardware, the default canonical matched benchmark window for optimizatio
 - Broadened the direct CUDA trainer-hook layer again by wiring the fused RoPE + Q/K normalization seam into both the starter workspace catalog and the real attention path.
   - Meaning: the CUDA lab can now exercise one more honest trainer seam immediately around the attention core:
     - RoPE application and Q/K RMSNorm via `rope_qk_fused`
-    That fills the gap between `attention_prelude` and the attention kernel itself, so the CUDA starter-ready set now spans the practical narrow seams on both sides of the core attention op.
+      That fills the gap between `attention_prelude` and the attention kernel itself, so the CUDA starter-ready set now spans the practical narrow seams on both sides of the core attention op.
   - Motivation: after `attention_prelude`, the next natural narrow seam was the rotary-plus-Q/K-normalization path. It already exists as a repeated attention-side boundary in the trainer, is trace-visible, and is still much simpler than trying to hook the full attention core or FlashAttention path directly.
   - Purpose: complete the current narrow CUDA attention-side hook set before shifting the focus back toward stronger trace-backed evidence and broader promotion logic.
   - Added a `rope_qk_fused` starter workspace in `/Users/ent/Codex/autoresearch/autoresearch_cuda/lab_workspace.py` with fixed quick/full harness cases and a fused reference path.
@@ -1050,7 +1112,7 @@ On this hardware, the default canonical matched benchmark window for optimizatio
   - Meaning: the CUDA lab can now exercise two more repeated trainer-real paths without inventing fake integration stories:
     - residual-add launch fusion via `launch_fusion`
     - attention-output flattening via `data_movement`
-    That pushes the direct CUDA integration set past only norms, loss-side prep, epilogues, and block-local compute into the small repeated glue seams that often show up as launch-bound or reshape-heavy work in traces.
+      That pushes the direct CUDA integration set past only norms, loss-side prep, epilogues, and block-local compute into the small repeated glue seams that often show up as launch-bound or reshape-heavy work in traces.
   - Motivation: after `fused_mlp` and `attention_prelude`, the two remaining generic starter families still did not map onto honest trainer seams. The right next step was to retune those families around real residual-add and reshape boundaries instead of leaving them as synthetic-only workspaces.
   - Purpose: widen the CUDA direct-hook set with the last practical narrow seams before the next stage shifts from adding hooks toward stronger integration evidence and eventual CUDA workspace promotion.
   - Retuned `launch_fusion` in `/Users/ent/Codex/autoresearch/autoresearch_cuda/lab_workspace.py` so it models residual-add fusion, and retuned `data_movement` so it models the real attention-output reshape from `[B, T, H, D]` to `[B, T, H*D]`.
@@ -1097,7 +1159,7 @@ On this hardware, the default canonical matched benchmark window for optimizatio
   - Meaning: the CUDA lab can now exercise two more trainer-real paths inside the transformer block itself:
     - the feed-forward path via `fused_mlp`
     - the Q/K/V staging path via `attention_prelude`
-    That moves the direct CUDA integration story beyond normalization, loss-side prelude, and final projection epilogues into repeated block-local compute and attention setup regions.
+      That moves the direct CUDA integration story beyond normalization, loss-side prelude, and final projection epilogues into repeated block-local compute and attention setup regions.
   - Motivation: after the first narrow seams landed and the broader starter CUDA workspaces existed, the cleanest next direct hooks were the MLP path and the attention prelude. Both already had starter workspaces and map onto real trainer boundaries without forcing a fake full-attention or full-GEMM rewrite story.
   - Purpose: keep widening the direct CUDA trainer-hook set with seams that are still narrow enough to validate honestly, but broad enough to make promotion evidence about repeated block-local work rather than only edge fragments.
   - Extended `/Users/ent/Codex/autoresearch/autoresearch_cuda/lab_integration.py` so `fused_mlp` and `attention_prelude` both run through the shared environment-driven workspace injection path alongside the earlier direct targets.
@@ -1192,7 +1254,7 @@ On this hardware, the default canonical matched benchmark window for optimizatio
     - normalization
     - loss-side prelude
     - final projection epilogue
-    That gives the CUDA integration story coverage on more than one part of the training stack before we attempt any broader family.
+      That gives the CUDA integration story coverage on more than one part of the training stack before we attempt any broader family.
   - Motivation: after `norm` and `loss_prelude`, the cleanest next seam was the final projection. `matmul_epilogue` already existed as a starter workspace, and the trainer has a clear final-projection boundary where a narrow epilogue hook can be inserted without committing to a full GEMM rewrite story.
   - Purpose: keep widening the CUDA trainer-hook layer with seams that are both narrow and trainer-real, so future promotion evidence can move beyond one-off path fragments and start comparing different classes of kernel work under the same lab loop.
   - Extended `/Users/ent/Codex/autoresearch/autoresearch_cuda/lab_integration.py` so `matmul_epilogue` can run through the shared environment-driven workspace injection path alongside `norm` and `loss_prelude`.
@@ -2306,45 +2368,41 @@ On this hardware, the default canonical matched benchmark window for optimizatio
 - Measurements:
   - The new `device_batch_size x total_batch_size` grid already surfaces a real operating-point choice on `m5-fast`:
 
-    | device batch | total batch | grad accum | steady tok/s | peak MB |
-    | ---: | ---: | ---: | ---: | ---: |
-    | `1` | `512` | `2` | `7296.8` | `107.1` |
-    | `2` | `512` | `1` | `32493.6` | `147.0` |
-    | `1` | `1024` | `4` | `28728.2` | `114.7` |
-    | `2` | `1024` | `2` | `39978.7` | `156.5` |
-
+    | device batch | total batch | grad accum | steady tok/s |   peak MB |
+    | -----------: | ----------: | ---------: | -----------: | --------: |
+    |        `1` |     `512` |      `2` |   `7296.8` | `107.1` |
+    |        `2` |     `512` |      `1` |  `32493.6` | `147.0` |
+    |        `1` |    `1024` |      `4` |  `28728.2` | `114.7` |
+    |        `2` |    `1024` |      `2` |  `39978.7` | `156.5` |
   - The same command path now handles a constrained `seq_len` sweep without extra glue code:
 
-    | seq len | device batch | total batch | grad accum | steady tok/s | peak MB |
-    | ---: | ---: | ---: | ---: | ---: | ---: |
-    | `256` | `2` | `1024` | `2` | `23750.5` | `156.5` |
-    | `512` | `2` | `1024` | `1` | `30684.2` | `253.2` |
-
+    | seq len | device batch | total batch | grad accum | steady tok/s |   peak MB |
+    | ------: | -----------: | ----------: | ---------: | -----------: | --------: |
+    | `256` |        `2` |    `1024` |      `2` |  `23750.5` | `156.5` |
+    | `512` |        `2` |    `1024` |      `1` |  `30684.2` | `253.2` |
   - And it can probe a small `window_pattern` candidate set on the same preset shell:
 
-    | window | steady tok/s | peak MB | steps |
-    | --- | ---: | ---: | ---: |
-    | `L` | `34663.7` | `950.2` | `23` |
-    | `SSSL` | `35698.2` | `950.2` | `26` |
-
+    | window   | steady tok/s |   peak MB |  steps |
+    | -------- | -----------: | --------: | -----: |
+    | `L`    |  `34663.7` | `950.2` | `23` |
+    | `SSSL` |  `35698.2` | `950.2` | `26` |
   - The short `window_pattern` probe is only a capability check for the new axis, not a recommendation to change preset defaults. The important point is that batch and shape axes now live under one mechanical sweep instead of separate ad hoc scripts.
-
   - The richer aggregation policy now distinguishes repeated evidence from broad stable evidence:
 
-    | case | rung | status | effective confidence | freshness | telemetry | stable rungs | limited by |
-    | --- | --- | --- | --- | --- | ---: | --- | --- |
-    | `m5-balanced`, `300s` | `reference` | `calibrated` | `telemetry-repeated-single-hardware` | `fresh` | `42` | `reference` |  |
-    | `m5-balanced`, `8h` | `reference` | `calibrated-limited` | `telemetry-repeated-single-hardware` | `fresh` | `42` | `reference` | `confidence` |
-    | simulated broader stable evidence | `full` | `calibrated` | `telemetry-cross-session-stable` | `fresh` | `8` | `cheap,reference` |  |
-    | simulated stale row | `default` | `stale-age` | `telemetry-cross-session-stable` | `stale-age` | `8` | `cheap,reference` | `stale-age` |
-    | `m5-balanced` with `--seq-len 1024` | `default` | `shape-fallback` |  |  |  |  |
-    | `m5-balanced` on simulated `apple-m9-96gb-40gpu` | `default` | `hardware-unmatched` |  |  |  |  |
-
+    | case                                                 | rung          | status                 | effective confidence                   | freshness     | telemetry | stable rungs        | limited by     |
+    | ---------------------------------------------------- | ------------- | ---------------------- | -------------------------------------- | ------------- | --------: | ------------------- | -------------- |
+    | `m5-balanced`, `300s`                            | `reference` | `calibrated`         | `telemetry-repeated-single-hardware` | `fresh`     |    `42` | `reference`       |                |
+    | `m5-balanced`, `8h`                              | `reference` | `calibrated-limited` | `telemetry-repeated-single-hardware` | `fresh`     |    `42` | `reference`       | `confidence` |
+    | simulated broader stable evidence                    | `full`      | `calibrated`         | `telemetry-cross-session-stable`     | `fresh`     |     `8` | `cheap,reference` |                |
+    | simulated stale row                                  | `default`   | `stale-age`          | `telemetry-cross-session-stable`     | `stale-age` |     `8` | `cheap,reference` | `stale-age`  |
+    | `m5-balanced` with `--seq-len 1024`              | `default`   | `shape-fallback`     |                                        |               |           |                     |                |
+    | `m5-balanced` on simulated `apple-m9-96gb-40gpu` | `default`   | `hardware-unmatched` |                                        |               |           |                     |                |
   - `telemetry-summary` exposes the passive evidence directly for a real preset/hardware row:
+
     - `m5-balanced` on `apple-m5-32gb-10gpu`: `eligible_count=42`, `commit_count=6`, `day_count=2`, `observed_rungs=reference`, `stable_rungs=reference`
     - rung stats: `median_eval_seconds=13.552`, `rel_mad_eval_seconds=0.0089`, `stable_timing=true`
-
   - A short real `m5-fast` run confirms that ordinary runs now append passive telemetry and feed it back into the next matching config:
+
     - `canonical_eval_rung=cheap`
     - run summary: `eval_calibration_status=calibrated`, `eval_calibration_effective_confidence=seed-single-checkpoint`, `eval_calibration_limited_by=None`
     - telemetry ledger after the run: `~/.cache/autoresearch/eval_policy_telemetry.jsonl` exists and increments
@@ -2383,38 +2441,35 @@ On this hardware, the default canonical matched benchmark window for optimizatio
 - Measurements:
   - The quick `train-batch` validation already reproduces the expected local batch preference on `m5-fast`:
 
-    | device batch | status | steady tok/s | peak MB |
-    | ---: | --- | ---: | ---: |
-    | `1` | `ok` | `976.4` | `86.6` |
-    | `2` | `ok` | `26249.2` | `147.0` |
-
+    | device batch | status | steady tok/s |   peak MB |
+    | -----------: | ------ | -----------: | --------: |
+    |        `1` | `ok` |    `976.4` |  `86.6` |
+    |        `2` | `ok` |  `26249.2` | `147.0` |
   - The `eval-rungs` mode reproduces the existing `m5-fast` rung measurements on the saved checkpoint without retraining:
 
-    | rung | eval sec | `val_bpb` |
-    | --- | ---: | ---: |
-    | `cheap` | `1.32` | `2.002362005` |
+    | rung          | eval sec |     `val_bpb` |
+    | ------------- | -------: | --------------: |
+    | `cheap`     | `1.32` | `2.002362005` |
     | `reference` | `6.54` | `2.014320405` |
-
   - The `eval-batch` mode surfaced an important calibration rule: batch sweeps should stay sequential by default. With the tool's intended default (`eval_slices=1`), the same saved `m5-balanced` checkpoint stays effectively batch-invariant at `seq=2048`:
 
-    | batch | eval sec | `val_bpb` |
-    | ---: | ---: | ---: |
+    | batch | eval sec |     `val_bpb` |
+    | ----: | -------: | --------------: |
     | `1` | `2.44` | `1.622281806` |
     | `2` | `2.47` | `1.622281811` |
     | `4` | `2.60` | `1.622281804` |
-
   - A sliced `eval-batch` probe during validation showed visible batch dependence on the same checkpoint, which is a useful failure mode to catch early:
+
     - when the batch sweep reused horizon slicing (`eval_slices=32`, `reference_eval_tokens=20971520`), the measured `val_bpb` drifted across batches instead of staying invariant
     - that is why the tool keeps `eval-batch` sequential by default, while `eval-rungs` is the place where reduced-budget sliced canonical measurements belong
-
   - The seeded policy module already produces the selector preview we would expect from the earlier manual tables:
 
-    | preset | `5m` recommendation | `8h` recommendation |
-    | --- | --- | --- |
-    | `m5-fast` | `reference` (`2.58%`) | `full` (`0.381%`) |
-    | `m5-balanced` | `reference` (`5.78%`) | `full` (`0.638%`) |
-    | `m5-large` | `cheap` (`1.96%`) | `reference` (`0.121%`) |
-    | `m5-xlarge` | `cheap` (`2.18%`) | `reference` (`0.132%`) |
+    | preset          | `5m` recommendation     | `8h` recommendation      |
+    | --------------- | ------------------------- | -------------------------- |
+    | `m5-fast`     | `reference` (`2.58%`) | `full` (`0.381%`)      |
+    | `m5-balanced` | `reference` (`5.78%`) | `full` (`0.638%`)      |
+    | `m5-large`    | `cheap` (`1.96%`)     | `reference` (`0.121%`) |
+    | `m5-xlarge`   | `cheap` (`2.18%`)     | `reference` (`0.132%`) |
 
 ### March 10, 2026 — `28fe7d9` — eval: Stratify canonical val sampling across the upstream horizon — score `3` — complexity `6`
 
@@ -2444,54 +2499,49 @@ On this hardware, the default canonical matched benchmark window for optimizatio
 - Measurements:
   - On the same saved `m5-balanced` 2-minute checkpoint, the upstream-horizon slice sweep picked a clear rule:
 
-    | eval contract | steps | best slice count | best `val_bpb` | eval sec |
-    | --- | ---: | ---: | ---: | ---: |
-    | canonical `2048 / 262144 / 2` | `64` | `8` | `1.625061687` | `2.31` |
-    | Trevin `2048 / 1572864 / 2` | `384` | `32` | `1.627754259` | `14.80` |
-
+    | eval contract                   |   steps | best slice count | best `val_bpb` |  eval sec |
+    | ------------------------------- | ------: | ---------------: | ---------------: | --------: |
+    | canonical `2048 / 262144 / 2` |  `64` |            `8` |  `1.625061687` |  `2.31` |
+    | Trevin `2048 / 1572864 / 2`   | `384` |           `32` |  `1.627754259` | `14.80` |
   - Against the previously measured upstream practical reference (`2048 / 20971520 / 256 -> 1.627251` on this same checkpoint), the new slice strategy moved the cheap contracts closer without adding meaningful runtime:
 
-    | eval contract | mode | `val_bpb` | abs error vs upstream practical | eval sec |
-    | --- | --- | ---: | ---: | ---: |
-    | canonical `2048 / 262144 / 2` | sequential prefix | `1.622281811` | `0.004969` | `2.38` |
-    | canonical `2048 / 262144 / 2` | upstream-horizon slices | `1.625061687` | `0.002189` | `2.37` |
-    | Trevin `2048 / 1572864 / 2` | sequential prefix | `1.609068586` | `0.018182` | `14.16` |
-    | Trevin `2048 / 1572864 / 2` | upstream-horizon slices | `1.627754259` | `0.000503` | `14.13` |
-
+    | eval contract                   | mode                    |     `val_bpb` | abs error vs upstream practical |  eval sec |
+    | ------------------------------- | ----------------------- | --------------: | ------------------------------: | --------: |
+    | canonical `2048 / 262144 / 2` | sequential prefix       | `1.622281811` |                    `0.004969` |  `2.38` |
+    | canonical `2048 / 262144 / 2` | upstream-horizon slices | `1.625061687` |                    `0.002189` |  `2.37` |
+    | Trevin `2048 / 1572864 / 2`   | sequential prefix       | `1.609068586` |                    `0.018182` | `14.16` |
+    | Trevin `2048 / 1572864 / 2`   | upstream-horizon slices | `1.627754259` |                    `0.000503` | `14.13` |
   - Re-ran the full upstream-shaped baseline on the same checkpoint with the locally optimal long-context batch (`2`) under both sequential and sliced scheduling:
 
-    | full upstream mode | `val_bpb` | eval sec |
-    | --- | ---: | ---: |
-    | sequential `2048 / 20971520 / 2` | `1.627251004` | `183.79` |
+    | full upstream mode                  |     `val_bpb` |   eval sec |
+    | ----------------------------------- | --------------: | ---------: |
+    | sequential `2048 / 20971520 / 2`  | `1.627251004` | `183.79` |
     | sliced `2048 / 20971520 / 2 / 32` | `1.627251004` | `232.12` |
-
   - That confirmed the cheap sliced estimator is still chasing the same full upstream target rather than a different metric, and that full upstream eval should stay sequential because slicing only adds wall time at full budget.
-
   - Built the first preset-calibration table for an eventual rung selector using the same sliced cheap/reference contracts and the sequential full upstream baseline:
 
-    | preset | rung | eval tokens | eval sec | abs error vs full | speedup vs full | `5m` overhead | `8h` overhead |
-    | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-    | `m5-fast` | cheap | `262144` | `1.34` | `0.008803` | `81.8x` | `0.45%` | `0.005%` |
-    | `m5-fast` | reference | `1572864` | `7.74` | `0.003155` | `14.2x` | `2.58%` | `0.027%` |
-    | `m5-fast` | full | `20971520` | `109.74` | `0.000000` | `1.0x` | `36.58%` | `0.381%` |
-    | `m5-balanced` | cheap | `262144` | `2.96` | `0.002189` | `62.0x` | `0.99%` | `0.010%` |
-    | `m5-balanced` | reference | `1572864` | `17.34` | `0.000503` | `10.6x` | `5.78%` | `0.060%` |
-    | `m5-balanced` | full | `20971520` | `183.79` | `0.000000` | `1.0x` | `61.26%` | `0.638%` |
-    | `m5-large` | cheap | `262144` | `5.87` | `0.004303` | `74.0x` | `1.96%` | `0.020%` |
-    | `m5-large` | reference | `1572864` | `34.82` | `0.003782` | `12.5x` | `11.61%` | `0.121%` |
-    | `m5-large` | full | `20971520` | `434.09` | `0.000000` | `1.0x` | `144.70%` | `1.507%` |
-    | `m5-xlarge` | cheap | `262144` | `6.55` | `0.008206` | `72.6x` | `2.18%` | `0.023%` |
-    | `m5-xlarge` | reference | `1572864` | `38.03` | `0.004042` | `12.5x` | `12.68%` | `0.132%` |
-    | `m5-xlarge` | full | `20971520` | `475.17` | `0.000000` | `1.0x` | `158.39%` | `1.650%` |
-
+    | preset          | rung      |  eval tokens |   eval sec | abs error vs full | speedup vs full | `5m` overhead | `8h` overhead |
+    | --------------- | --------- | -----------: | ---------: | ----------------: | --------------: | --------------: | --------------: |
+    | `m5-fast`     | cheap     |   `262144` |   `1.34` |      `0.008803` |       `81.8x` |       `0.45%` |      `0.005%` |
+    | `m5-fast`     | reference |  `1572864` |   `7.74` |      `0.003155` |       `14.2x` |       `2.58%` |      `0.027%` |
+    | `m5-fast`     | full      | `20971520` | `109.74` |      `0.000000` |        `1.0x` |      `36.58%` |      `0.381%` |
+    | `m5-balanced` | cheap     |   `262144` |   `2.96` |      `0.002189` |       `62.0x` |       `0.99%` |      `0.010%` |
+    | `m5-balanced` | reference |  `1572864` |  `17.34` |      `0.000503` |       `10.6x` |       `5.78%` |      `0.060%` |
+    | `m5-balanced` | full      | `20971520` | `183.79` |      `0.000000` |        `1.0x` |      `61.26%` |      `0.638%` |
+    | `m5-large`    | cheap     |   `262144` |   `5.87` |      `0.004303` |       `74.0x` |       `1.96%` |      `0.020%` |
+    | `m5-large`    | reference |  `1572864` |  `34.82` |      `0.003782` |       `12.5x` |      `11.61%` |      `0.121%` |
+    | `m5-large`    | full      | `20971520` | `434.09` |      `0.000000` |        `1.0x` |     `144.70%` |      `1.507%` |
+    | `m5-xlarge`   | cheap     |   `262144` |   `6.55` |      `0.008206` |       `72.6x` |       `2.18%` |      `0.023%` |
+    | `m5-xlarge`   | reference |  `1572864` |  `38.03` |      `0.004042` |       `12.5x` |      `12.68%` |      `0.132%` |
+    | `m5-xlarge`   | full      | `20971520` | `475.17` |      `0.000000` |        `1.0x` |     `158.39%` |      `1.650%` |
   - The early selector read is preset-sensitive rather than global:
+
     - `m5-fast` has a plausible middle rung; `reference` cuts error by about `2.8x` versus `cheap` while still costing only `2.58%` of a `5m` training run.
     - `m5-balanced` is the cleanest argument for the three-rung policy itself: `reference` is much closer to full than `cheap` (`0.000503` vs `0.002189` error) while still staying under `6%` overhead for a `5m` run, and full upstream only becomes cheap enough to treat as normal once the run is much longer.
     - `m5-large` does not have the same middle-rung economics on a `5m` run; `reference` is only slightly more accurate than `cheap`, but costs `11.61%` of the run budget instead of `1.96%`.
     - `m5-xlarge` behaves like the heavier version of that same story: `reference` does improve over `cheap` (`0.004042` vs `0.008206` error), but the `5m` tax is `12.68%`, so it still reads more like a long-run rung than a short-run default.
     - On long runs the tradeoff flips. For an `8h` training run, even `m5-large` `reference` is only `0.121%` overhead, while full upstream remains expensive enough (`1.507%`) that it still reads more like an audit rung than a default.
     - `m5-xlarge` reaches the same conclusion with slightly worse full-rung cost: `reference` is only `0.132%` overhead on an `8h` run, while full upstream is still `1.650%`.
-
   - This change is about estimator quality, not raw eval speed. Runtime stayed effectively flat while the cheap long-context estimates moved substantially closer to the upstream-shaped reference.
 
 ### March 10, 2026 — `a3c1aa2` — train: Scale canonical eval batch with sequence length — score `4` — complexity `7`
@@ -2519,6 +2569,7 @@ On this hardware, the default canonical matched benchmark window for optimizatio
   - `python3 -m py_compile autoresearch_mlx/train.py autoresearch_mlx/constants.py`
 - Measurements:
   - On the same saved `m5-balanced` 2-minute checkpoint, the canonical-style BPB estimates tightened from shorter-sequence local estimates toward the upstream-shaped contract as sequence length increased:
+
     - `seq=256`: `1.660391`
     - `seq=512`: `1.634503`
     - `seq=1024`: `1.560247`
@@ -2531,11 +2582,10 @@ On this hardware, the default canonical matched benchmark window for optimizatio
   - `seq=2048`: fastest batch `2`
   - Under the Trevin-sized long-context contract (`seq=2048`, `eval_tokens=1572864`), the optimized local batch stayed metric-equivalent while materially reducing eval time:
 
-    | batch | eval sec | `val_bpb` |
-    | ---: | ---: | ---: |
-    | `2` | `14.02` | `1.609068586` |
+    |   batch |  eval sec |     `val_bpb` |
+    | ------: | --------: | --------------: |
+    |   `2` | `14.02` | `1.609068586` |
     | `256` | `20.31` | `1.609068590` |
-
   - BPB was effectively invariant across the swept batch sizes for each sequence length, so the change is about eval efficiency, not metric drift.
 
 ### March 10, 2026 — `1778297` — changelog: Sync autonomy-golf resources from canonical repo — score `4` — complexity `8`
@@ -2598,12 +2648,11 @@ On this hardware, the default canonical matched benchmark window for optimizatio
   - `./.venv/bin/python -m autoresearch_mlx.train --resume-from /tmp/autoresearch_budget_mode_resume --time-budget 1.5 --time-budget-mode wall --no-checkpoint`
 - Measurements:
   - Budget-mode smoke summary:
-
-    | Run shape | `time_budget_mode` | `training_seconds` | `budget_elapsed_seconds` | `total_seconds` | `session_steps` |
-    | --- | --- | ---: | ---: | ---: | ---: |
-    | smoke default | `train` | `1.0` | `1.0` | `1.1` | `92` |
-    | smoke no-checkpoint benchmark | `wall` | `1.0` | `1.0` | `1.0` | `91` |
-    | resume with wall override | `wall` | `1.5` | `1.5` | `1.5` | `159` |
+    | Run shape                     | `time_budget_mode` | `training_seconds` | `budget_elapsed_seconds` | `total_seconds` | `session_steps` |
+    | ----------------------------- | -------------------- | -------------------: | -------------------------: | ----------------: | ----------------: |
+    | smoke default                 | `train`            |              `1.0` |                    `1.0` |           `1.1` |            `92` |
+    | smoke no-checkpoint benchmark | `wall`             |              `1.0` |                    `1.0` |           `1.0` |            `91` |
+    | resume with wall override     | `wall`             |              `1.5` |                    `1.5` |           `1.5` |           `159` |
 - Interpretation:
   - The meaning of this change is not “make wall clock the new objective.” It is to make the objective explicit. `train` mode remains the core research default, while `wall` mode is now available when reduced elapsed blocking is itself the thing being measured.
   - The wall-mode resume check confirms that the new mode is a real runtime override, not just a fresh-run flag, while the distinct auto checkpoint slugs keep train-budget and wall-budget runs from clobbering each other.
@@ -2633,23 +2682,22 @@ On this hardware, the default canonical matched benchmark window for optimizatio
 - Measurements:
   - Midpoint resume-convergence comparison:
 
-    | Preset | Trajectory | final loss | trailing loss | canonical `val_bpb` | relative RMS param drift vs uninterrupted |
-    | --- | --- | ---: | ---: | ---: | ---: |
-    | `m5-balanced` | uninterrupted | `5.953065` | `5.795487` | `2.088155` | `0.000e+00` |
-    | `m5-balanced` | exact midpoint resume | `5.945498` | `5.783511` | `2.088881` | `5.009e-01` |
-    | `m5-balanced` | `weights_only` midpoint resume | `6.139996` | `5.601696` | `2.194967` | `7.852e-01` |
-    | `m5-large` | uninterrupted | `5.846727` | `6.018619` | `2.188738` | `0.000e+00` |
-    | `m5-large` | exact midpoint resume | `5.846764` | `6.019718` | `2.188925` | `2.616e-01` |
-    | `m5-large` | `weights_only` midpoint resume | `6.425774` | `5.762017` | `2.318585` | `6.785e-01` |
-
+    | Preset          | Trajectory                       |   final loss | trailing loss | canonical `val_bpb` | relative RMS param drift vs uninterrupted |
+    | --------------- | -------------------------------- | -----------: | ------------: | --------------------: | ----------------------------------------: |
+    | `m5-balanced` | uninterrupted                    | `5.953065` |  `5.795487` |          `2.088155` |                             `0.000e+00` |
+    | `m5-balanced` | exact midpoint resume            | `5.945498` |  `5.783511` |          `2.088881` |                             `5.009e-01` |
+    | `m5-balanced` | `weights_only` midpoint resume | `6.139996` |  `5.601696` |          `2.194967` |                             `7.852e-01` |
+    | `m5-large`    | uninterrupted                    | `5.846727` |  `6.018619` |          `2.188738` |                             `0.000e+00` |
+    | `m5-large`    | exact midpoint resume            | `5.846764` |  `6.019718` |          `2.188925` |                             `2.616e-01` |
+    | `m5-large`    | `weights_only` midpoint resume | `6.425774` |  `5.762017` |          `2.318585` |                             `6.785e-01` |
   - Uninterrupted same-seed repeatability baseline ([artifact](/Users/ent/Codex/autoresearch-everywhere/results/analysis/uninterrupted_repeatability.json)):
 
-    | Preset | steps | run 1 canonical `val_bpb` | run 2 canonical `val_bpb` | delta | relative RMS param drift |
-    | --- | ---: | ---: | ---: | ---: | ---: |
-    | `m5-balanced` | `200` | `2.089673` | `2.093795` | `+0.004122` | `5.794e-01` |
-    | `m5-large` | `80` | `2.189574` | `2.188915` | `-0.000659` | `2.484e-01` |
-
+    | Preset          |   steps | run 1 canonical `val_bpb` | run 2 canonical `val_bpb` |         delta | relative RMS param drift |
+    | --------------- | ------: | --------------------------: | --------------------------: | ------------: | -----------------------: |
+    | `m5-balanced` | `200` |                `2.089673` |                `2.093795` | `+0.004122` |            `5.794e-01` |
+    | `m5-large`    |  `80` |                `2.189574` |                `2.188915` | `-0.000659` |            `2.484e-01` |
   - Interpretation:
+
     - `weights_only` is clearly not trajectory-equivalent: on both tested presets it finishes at a worse canonical `val_bpb` and a materially different parameter state after the midpoint resume.
     - This is enough to treat `weights_only` as a failed experiment, not an active checkpoint direction. It remains useful as historical evidence and for targeted ablations, but it should no longer be recommended as the practical cheap-resume path.
     - Uninterrupted same-seed runs are not bitwise repeatable on this MLX stack either. On both tested presets, exact midpoint resume stays within the same broad parameter-drift envelope as uninterrupted-repeat baselines while keeping canonical `val_bpb` very close.
@@ -2686,41 +2734,38 @@ On this hardware, the default canonical matched benchmark window for optimizatio
 - Measurements:
   - Exact sync vs async checkpoint benchmark ([artifact](/Users/ent/Codex/autoresearch-everywhere/results/analysis/exact_async_checkpoint_benchmark.json)):
 
-    | Preset | Save mode | total seconds | blocking checkpoint % | total checkpoint write % | session tokens (M) | session steps | steady-state tok/s |
-    | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-    | `m5-large` | sync | `20.5` | `2.03` | `2.03` | `0.258` | `63` | `12805.5` |
-    | `m5-large` | async | `20.4` | `1.17` | `2.66` | `0.254` | `62` | `12637.7` |
-    | `m5-xlarge` | sync | `62.2` | `3.37` | `3.37` | `0.393` | `96` | `6556.8` |
-    | `m5-xlarge` | async | `61.8` | `1.66` | `6.09` | `0.520` | `127` | `8581.8` |
-
+    | Preset        | Save mode | total seconds | blocking checkpoint % | total checkpoint write % | session tokens (M) | session steps | steady-state tok/s |
+    | ------------- | --------- | ------------: | --------------------: | -----------------------: | -----------------: | ------------: | -----------------: |
+    | `m5-large`  | sync      |      `20.5` |              `2.03` |                 `2.03` |          `0.258` |        `63` |        `12805.5` |
+    | `m5-large`  | async     |      `20.4` |              `1.17` |                 `2.66` |          `0.254` |        `62` |        `12637.7` |
+    | `m5-xlarge` | sync      |      `62.2` |              `3.37` |                 `3.37` |          `0.393` |        `96` |         `6556.8` |
+    | `m5-xlarge` | async     |      `61.8` |              `1.66` |                 `6.09` |          `0.520` |       `127` |         `8581.8` |
   - Exact sync vs async ABAB benchmark ([artifact](/Users/ent/Codex/autoresearch-everywhere/results/analysis/exact_async_abab_summary.json)):
 
-    | Preset | Save mode | mean total seconds | mean blocking checkpoint % | mean total checkpoint write % | mean session tokens (M) | mean steady-state tok/s |
-    | --- | --- | ---: | ---: | ---: | ---: | ---: |
-    | `m5-large` | sync | `20.5` | `1.93` | `1.93` | `0.264` | `13184.4` |
-    | `m5-large` | async | `20.3` | `1.07` | `3.03` | `0.262` | `13080.9` |
-    | `m5-xlarge` | sync | `62.7` | `3.47` | `3.47` | `0.393` | `6309.7` |
-    | `m5-xlarge` | async | `61.1` | `1.33` | `6.53` | `0.381` | `6329.5` |
-
+    | Preset        | Save mode | mean total seconds | mean blocking checkpoint % | mean total checkpoint write % | mean session tokens (M) | mean steady-state tok/s |
+    | ------------- | --------- | -----------------: | -------------------------: | ----------------------------: | ----------------------: | ----------------------: |
+    | `m5-large`  | sync      |           `20.5` |                   `1.93` |                      `1.93` |               `0.264` |             `13184.4` |
+    | `m5-large`  | async     |           `20.3` |                   `1.07` |                      `3.03` |               `0.262` |             `13080.9` |
+    | `m5-xlarge` | sync      |           `62.7` |                   `3.47` |                      `3.47` |               `0.393` |              `6309.7` |
+    | `m5-xlarge` | async     |           `61.1` |                   `1.33` |                      `6.53` |               `0.381` |              `6329.5` |
   - Helper-process async exact ABAB benchmark ([artifact](/Users/ent/Codex/autoresearch-everywhere/results/analysis/exact_async_process_abab_summary.json)):
 
-    | Preset | Save mode | mean total seconds | mean blocking checkpoint % | mean total checkpoint write % | mean session tokens (M) | mean steady-state tok/s |
-    | --- | --- | ---: | ---: | ---: | ---: | ---: |
-    | `m5-large` | sync | `20.7` | `2.20` | `2.20` | `0.258` | `12821.1` |
-    | `m5-large` | async helper process | `20.7` | `2.02` | `7.73` | `0.254` | `12634.3` |
-    | `m5-xlarge` | sync | `62.3` | `3.41` | `3.41` | `0.389` | `6433.5` |
-    | `m5-xlarge` | async helper process | `62.2` | `2.45` | `15.27` | `0.387` | `6402.9` |
-
+    | Preset        | Save mode            | mean total seconds | mean blocking checkpoint % | mean total checkpoint write % | mean session tokens (M) | mean steady-state tok/s |
+    | ------------- | -------------------- | -----------------: | -------------------------: | ----------------------------: | ----------------------: | ----------------------: |
+    | `m5-large`  | sync                 |           `20.7` |                   `2.20` |                      `2.20` |               `0.258` |             `12821.1` |
+    | `m5-large`  | async helper process |           `20.7` |                   `2.02` |                      `7.73` |               `0.254` |             `12634.3` |
+    | `m5-xlarge` | sync                 |           `62.3` |                   `3.41` |                      `3.41` |               `0.389` |              `6433.5` |
+    | `m5-xlarge` | async helper process |           `62.2` |                   `2.45` |                     `15.27` |               `0.387` |              `6402.9` |
   - Exact sync vs async under a `60s` wall-clock budget ([artifact](/Users/ent/Codex/autoresearch-everywhere/results/analysis/exact_async_wallclock_60s.json)):
 
-    | Preset | Save mode | steps by cutoff | tokens by cutoff (M) | wall tok/s | blocking checkpoint % of wall | total checkpoint write % of wall |
-    | --- | --- | ---: | ---: | ---: | ---: | ---: |
-    | `m5-large` | sync | `177` | `0.725` | `12015.7` | `2.33` | `2.33` |
-    | `m5-large` | async | `180` | `0.737` | `12255.8` | `0.66` | `3.37` |
-    | `m5-xlarge` | sync | `111` | `0.455` | `7508.4` | `3.88` | `3.88` |
-    | `m5-xlarge` | async | `114` | `0.467` | `7762.6` | `1.13` | `5.91` |
-
+    | Preset        | Save mode | steps by cutoff | tokens by cutoff (M) |  wall tok/s | blocking checkpoint % of wall | total checkpoint write % of wall |
+    | ------------- | --------- | --------------: | -------------------: | ----------: | ----------------------------: | -------------------------------: |
+    | `m5-large`  | sync      |         `177` |            `0.725` | `12015.7` |                      `2.33` |                         `2.33` |
+    | `m5-large`  | async     |         `180` |            `0.737` | `12255.8` |                      `0.66` |                         `3.37` |
+    | `m5-xlarge` | sync      |         `111` |            `0.455` |  `7508.4` |                      `3.88` |                         `3.88` |
+    | `m5-xlarge` | async     |         `114` |            `0.467` |  `7762.6` |                      `1.13` |                         `5.91` |
   - Interpretation:
+
     - Async exact is viable because it keeps the resume semantics exact while moving the expensive on-disk write out of the training thread. The host snapshot path preserves `bfloat16` tensors exactly by reinterpreting them as `uint16` during transfer and viewing them back on restore.
     - Under the repo's usual training-time budget, the grounded result is still mixed: async exact reliably lowers blocking checkpoint time, but the matched ABAB runs do not show a stable end-to-end throughput win.
     - Under a real `60s` wall-clock budget, async exact does help on both tested heavier presets, because lowering blocking time lets the run complete slightly more optimizer steps before the deadline.
@@ -2758,19 +2803,18 @@ On this hardware, the default canonical matched benchmark window for optimizatio
 - Measurements:
   - Repeated-save `weights_only` overhead from matched long-window runs:
 
-    | Preset | time budget (s) | saves | non-training overhead baseline (s) | non-training overhead with `weights_only` (s) | added wall overhead (s) | approx. save cost (ms/save) |
-    | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-    | `m5-large` | `20` | `10` | `0.0` | `0.2` | `0.2` | `20` |
-    | `m5-xlarge` | `60` | `28` | `0.1` | `0.9` | `0.8` | `29` |
-
+    | Preset        | time budget (s) |  saves | non-training overhead baseline (s) | non-training overhead with `weights_only` (s) | added wall overhead (s) | approx. save cost (ms/save) |
+    | ------------- | --------------: | -----: | ---------------------------------: | ----------------------------------------------: | ----------------------: | --------------------------: |
+    | `m5-large`  |          `20` | `10` |                            `0.0` |                                         `0.2` |                 `0.2` |                      `20` |
+    | `m5-xlarge` |          `60` | `28` |                            `0.1` |                                         `0.9` |                 `0.8` |                      `29` |
   - Mode-aware default interval outcomes on the calibrated M5 profiles:
 
-    | Preset band | exact default | `weights_only` default |
-    | --- | --- | --- |
-    | up to `m5-large` | `2m` at `0.0583%` save-only overhead | `1m` at `0.0333%` save-only overhead |
+    | Preset band                    | exact default                            | `weights_only` default                 |
+    | ------------------------------ | ---------------------------------------- | ---------------------------------------- |
+    | up to `m5-large`             | `2m` at `0.0583%` save-only overhead | `1m` at `0.0333%` save-only overhead |
     | `m5-xlarge` / upstream-scale | `2m` at `0.0917%` save-only overhead | `1m` at `0.0500%` save-only overhead |
-
   - Interpretation:
+
     - The stronger repeated-save measurements confirm that `weights_only` is cheap enough to justify a shorter default interval than exact full-state resume under the same fixed-overhead cap.
     - Exact remains at `2m` because its measured save cost still pushes `1m` above the current `0.1%` save-only overhead target on the calibrated M5 shapes.
     - `weights_only` now resolves to `1m` because its repeated-save overhead is materially lower, while exact still remains the default when exact optimizer/loader continuity matters.
@@ -2811,21 +2855,20 @@ On this hardware, the default canonical matched benchmark window for optimizatio
 - Measurements:
   - Exact vs `weights_only` resume-ready medians (`3` trials each, prepacked path, `5` seed train steps before save):
 
-    | Preset | Mode | median save (s) | median restore (s) | median resume-ready (s) | median first resumed step wall (s) |
-    | --- | --- | ---: | ---: | ---: | ---: |
-    | `m5-large` | `exact` | `0.057` | `0.017` | `1.129` | `1.033` |
-    | `m5-large` | `weights_only` | `0.023` | `0.010` | `1.176` | `1.104` |
-    | `m5-xlarge` | `exact` | `0.084` | `0.028` | `1.215` | `1.125` |
-    | `m5-xlarge` | `weights_only` | `0.042` | `0.015` | `1.236` | `1.152` |
-
+    | Preset        | Mode             | median save (s) | median restore (s) | median resume-ready (s) | median first resumed step wall (s) |
+    | ------------- | ---------------- | --------------: | -----------------: | ----------------------: | ---------------------------------: |
+    | `m5-large`  | `exact`        |       `0.057` |          `0.017` |               `1.129` |                          `1.033` |
+    | `m5-large`  | `weights_only` |       `0.023` |          `0.010` |               `1.176` |                          `1.104` |
+    | `m5-xlarge` | `exact`        |       `0.084` |          `0.028` |               `1.215` |                          `1.125` |
+    | `m5-xlarge` | `weights_only` |       `0.042` |          `0.015` |               `1.236` |                          `1.152` |
   - Direct `m5-xlarge` save-path attribution:
 
-    | Mode | save total (s) | model bytes | optimizer bytes | loader bytes |
-    | --- | ---: | ---: | ---: | ---: |
-    | `exact` | `0.497` | `159.4M` | `218.3M` | `22` |
-    | `weights_only` | `0.432` | `159.4M` | `0` | `0` |
-
+    | Mode             | save total (s) | model bytes | optimizer bytes | loader bytes |
+    | ---------------- | -------------: | ----------: | --------------: | -----------: |
+    | `exact`        |      `0.497` |  `159.4M` |      `218.3M` |       `22` |
+    | `weights_only` |      `0.432` |  `159.4M` |           `0` |        `0` |
   - Interpretation:
+
     - `weights_only` materially reduces save cost: about `-60%` on `m5-large` median save time and about `-50%` on `m5-xlarge`.
     - Resume-ready latency does not improve in the current measurements. The first resumed optimizer step still dominates the path back to productive training, and `weights_only` resumes approximately with a fresh optimizer and train-loader state.
     - The direct `m5-xlarge` save-path profile explains why the save win is bounded: omitting optimizer state removes about `218 MB` of writes, but the model weights still dominate the checkpoint payload.
@@ -2853,12 +2896,12 @@ On this hardware, the default canonical matched benchmark window for optimizatio
 - Measurements:
   - Updated scenario table with measured resume-ready penalties and a clean split between fixed save overhead and projected total waste:
 
-    | Profile | Events/day | Optimal interval (min) | Fixed checkpoint overhead (%) | Projected total waste (%) | Save cost (ms) | Resume penalty (ms) |
-    | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-    | `m5-large` exact full-state | `1` | `1.83` | `0.064` | `0.128` | `70` | `641` |
-    | `m5-xlarge` exact full-state | `1` | `2.30` | `0.080` | `0.160` | `110` | `683` |
-
+    | Profile                        | Events/day | Optimal interval (min) | Fixed checkpoint overhead (%) | Projected total waste (%) | Save cost (ms) | Resume penalty (ms) |
+    | ------------------------------ | ---------: | ---------------------: | ----------------------------: | ------------------------: | -------------: | ------------------: |
+    | `m5-large` exact full-state  |      `1` |               `1.83` |                     `0.064` |                 `0.128` |         `70` |             `641` |
+    | `m5-xlarge` exact full-state |      `1` |               `2.30` |                     `0.080` |                 `0.160` |        `110` |             `683` |
   - Interpretation:
+
     - The fixed checkpoint overhead column is now the actual save-time tax from taking checkpoints at the chosen interval. It does not depend on the assumed restart frequency.
     - The projected total waste column is the modeled all-in waste under the assumed resume-needed event rate, including save overhead, lost work, and measured resume-ready penalty.
     - Young/Daly-style optimal intervals are unchanged because the resume penalty is interval-independent, but the projected total waste curves are now more honest about restart cost.
@@ -2885,12 +2928,12 @@ On this hardware, the default canonical matched benchmark window for optimizatio
 - Measurements:
   - Resume-ready summary (`3` trials each, prepacked path, `5` seed train steps before save):
 
-    | Preset | median resume-ready (s) | median runtime build (s) | median restore (s) | median first step wall (s) | median steady step wall (s) | median resume tax vs steady wall (s) |
-    | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-    | `m5-large` | `0.641` | `0.039` | `0.016` | `0.581` | `0.568` | `0.073` |
-    | `m5-xlarge` | `0.683` | `0.060` | `0.020` | `0.549` | `0.538` | `0.168` |
-
+    | Preset        | median resume-ready (s) | median runtime build (s) | median restore (s) | median first step wall (s) | median steady step wall (s) | median resume tax vs steady wall (s) |
+    | ------------- | ----------------------: | -----------------------: | -----------------: | -------------------------: | --------------------------: | -----------------------------------: |
+    | `m5-large`  |               `0.641` |                `0.039` |          `0.016` |                  `0.581` |                   `0.568` |                            `0.073` |
+    | `m5-xlarge` |               `0.683` |                `0.060` |          `0.020` |                  `0.549` |                   `0.538` |                            `0.168` |
   - Interpretation:
+
     - The user-facing resume-ready delay is not dominated by checkpoint metadata or loader restore. It is mostly runtime rebuild plus the first resumed optimizer step.
     - `m5-large` is reasonably tight across the three trials; the median resume-ready delay is about `0.64s`, with about `73ms` above a steady resumed step.
     - `m5-xlarge` is centered closer to about `0.68s`, and one of the three trials again had a much slower first resumed step. That makes the median much more trustworthy than the mean for policy work at this shape.
@@ -2918,17 +2961,18 @@ On this hardware, the default canonical matched benchmark window for optimizatio
   - `./.venv/bin/python -m autoresearch_mlx.train --preset m5-fast --time-budget 5 --benchmark-warmup-steps 62 --benchmark-skip-eval --no-checkpoint`
 - Measurements:
   - Detection rule:
+
     - The auto cutoff compares early-step windows against a trailing reference window taken from the end of the run instead of guessing a fixed warmup length ahead of time.
     - The reference center is the trailing-window median, and the tolerance is the larger of a `3%` relative band or `3 x` the trailing-window median absolute deviation.
     - The chosen cutoff is the first step prefix after which a short stability window stays within that tolerance, so `warmup_done_step` marks the first step whose timing looks statistically indistinguishable from the trailing steady-state band.
   - Auto-vs-fixed `m5-fast` comparison (`5s`, eval skipped, no checkpoint):
 
-    | Mode | `benchmark_warmup_steps` | `warmup_done_step` | warmup step seconds | warmup wall seconds | steady-state steps | steady-state training seconds | steady-state `tok_per_sec` |
-    | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-    | `auto` | `37` | `37` | `1.258` | `1.291` | `316` | `3.749` | `43153.8` |
-    | `fixed` | `62` | `62` | `1.012` | `1.046` | `333` | `3.990` | `42734.9` |
-
+    | Mode      | `benchmark_warmup_steps` | `warmup_done_step` | warmup step seconds | warmup wall seconds | steady-state steps | steady-state training seconds | steady-state `tok_per_sec` |
+    | --------- | -------------------------: | -------------------: | ------------------: | ------------------: | -----------------: | ----------------------------: | ---------------------------: |
+    | `auto`  |                     `37` |               `37` |           `1.258` |           `1.291` |            `316` |                     `3.749` |                  `43153.8` |
+    | `fixed` |                     `62` |               `62` |           `1.012` |           `1.046` |            `333` |                     `3.990` |                  `42734.9` |
   - Interpretation:
+
     - The default statistical detector produces a concrete benchmark cutoff without requiring a manually chosen step count.
     - The detector is responsive to real startup shape, so it should not be expected to pick the same cutoff across materially different warmup profiles.
     - On the final `m5-fast` rerun, the auto and fixed modes still landed in the same steady-state performance band, which is the main practical requirement: the new default is more ergonomic without obscuring the benchmark semantics.
@@ -2952,12 +2996,12 @@ On this hardware, the default canonical matched benchmark window for optimizatio
 - Measurements:
   - Save-path breakdown on the default prepared prepacked path:
 
-    | Preset | save total (s) | model write (s) | optimizer write (s) | loader write (s) | metadata write (s) | model bytes | optimizer bytes | loader bytes |
-    | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-    | `m5-large` | `0.254` | `0.224` | `0.028` | `0.0017` | `0.0008` | `80.2M` | `118.1M` | `22` |
-    | `m5-xlarge` | `0.473` | `0.422` | `0.050` | `0.0004` | `0.0002` | `159.4M` | `218.3M` | `22` |
-
+    | Preset        | save total (s) | model write (s) | optimizer write (s) | loader write (s) | metadata write (s) | model bytes | optimizer bytes | loader bytes |
+    | ------------- | -------------: | --------------: | ------------------: | ---------------: | -----------------: | ----------: | --------------: | -----------: |
+    | `m5-large`  |      `0.254` |       `0.224` |           `0.028` |       `0.0017` |         `0.0008` |   `80.2M` |      `118.1M` |       `22` |
+    | `m5-xlarge` |      `0.473` |       `0.422` |           `0.050` |       `0.0004` |         `0.0002` |  `159.4M` |      `218.3M` |       `22` |
   - Interpretation:
+
     - On the shipped prepacked path, checkpoint cost is overwhelmingly dominated by writing model and optimizer safetensors. Loader serialization and metadata are effectively free by comparison.
     - That means the next meaningful checkpoint optimization is not Python-side cleanup inside the current save path; it would need to change semantics or scheduling, such as lighter resume tiers or asynchronous/background save behavior.
     - The current restore-side numbers from this tool are exploratory only. `mx.load` appears lazy enough that raw file-load timings understate "resume ready" cost, so restore optimization should not be driven from those numbers yet without a stronger resume-readiness benchmark.
@@ -2984,14 +3028,14 @@ On this hardware, the default canonical matched benchmark window for optimizatio
 - Measurements:
   - Matched fallback-only before/after profile (`80` measured steps after `5` warmup steps):
 
-    | Preset | version | `tok_per_sec` | total mean (ms) | loader mean (ms) | grad mean (ms) | optimizer mean (ms) |
-    | --- | --- | ---: | ---: | ---: | ---: | ---: |
-    | `m5-balanced` | before | `33306.25` | `61.49` | `0.963` | `45.85` | `13.47` |
-    | `m5-balanced` | after | `34334.42` | `59.65` | `0.174` | `45.14` | `13.28` |
-    | `m5-large` | before | `14456.33` | `283.34` | `1.328` | `222.57` | `52.66` |
-    | `m5-large` | after | `14522.86` | `282.04` | `0.245` | `222.67` | `52.40` |
-
+    | Preset          | version | `tok_per_sec` | total mean (ms) | loader mean (ms) | grad mean (ms) | optimizer mean (ms) |
+    | --------------- | ------- | --------------: | --------------: | ---------------: | -------------: | ------------------: |
+    | `m5-balanced` | before  |    `33306.25` |       `61.49` |        `0.963` |      `45.85` |           `13.47` |
+    | `m5-balanced` | after   |    `34334.42` |       `59.65` |        `0.174` |      `45.14` |           `13.28` |
+    | `m5-large`    | before  |    `14456.33` |      `283.34` |        `1.328` |     `222.57` |           `52.66` |
+    | `m5-large`    | after   |    `14522.86` |      `282.04` |        `0.245` |     `222.67` |           `52.40` |
   - Interpretation:
+
     - The new packing buffer removes most of the Python-side fallback cost on both tested presets: loader-call time dropped by about `82%` on `m5-balanced` and `m5-large`.
     - The end-to-end win is real but modest because these steps are still compute-dominated: about `+3.1% tok/s` on `m5-balanced` and `+0.5% tok/s` on `m5-large`.
     - This is worth keeping as a fallback-path cleanup, but the grounded effect is much smaller than the raw loader-time drop might suggest.
@@ -3026,32 +3070,31 @@ On this hardware, the default canonical matched benchmark window for optimizatio
 - Measurements:
   - `80` measured xlarge steps after `5` warmup steps:
 
-    | Train path | `tok_per_sec` | total mean / median (ms) | loader mean / median (ms) | grad mean / median (ms) | optimizer mean / median (ms) |
-    | --- | ---: | ---: | ---: | ---: | ---: |
-    | prepacked cache | `7637.86` | `536.28 / 534.48` | `0.46 / 0.08` | `447.99 / 446.38` | `84.05 / 83.95` |
-    | token cache / live packing | `7359.01` | `556.60 / 549.47` | `1.66 / 0.90` | `463.84 / 456.97` | `87.54 / 86.47` |
-
+    | Train path                 | `tok_per_sec` | total mean / median (ms) | loader mean / median (ms) | grad mean / median (ms) | optimizer mean / median (ms) |
+    | -------------------------- | --------------: | -----------------------: | ------------------------: | ----------------------: | ---------------------------: |
+    | prepacked cache            |     `7637.86` |      `536.28 / 534.48` |           `0.46 / 0.08` |     `447.99 / 446.38` |            `84.05 / 83.95` |
+    | token cache / live packing |     `7359.01` |      `556.60 / 549.47` |           `1.66 / 0.90` |     `463.84 / 456.97` |            `87.54 / 86.47` |
   - `20` measured xlarge steps after `5` warmup steps:
 
-    | Train path | steady `tok_per_sec` | steady total mean / median (ms) | warmup total mean / median (ms) |
-    | --- | ---: | ---: | ---: |
-    | prepacked cache | `7742.33` | `529.04 / 527.70` | `619.00 / 541.36` |
-    | token cache / live packing | `7736.51` | `529.44 / 527.13` | `554.78 / 539.72` |
-
+    | Train path                 | steady `tok_per_sec` | steady total mean / median (ms) | warmup total mean / median (ms) |
+    | -------------------------- | ---------------------: | ------------------------------: | ------------------------------: |
+    | prepacked cache            |            `7742.33` |             `529.04 / 527.70` |             `619.00 / 541.36` |
+    | token cache / live packing |            `7736.51` |             `529.44 / 527.13` |             `554.78 / 539.72` |
   - Interpretation:
+
     - There is no evidence here of a structural steady-state xlarge regression caused by the prepacked loader path.
     - The only consistent loader-path effect is that prepacked reduces `loader_call` time. Forced `mx.eval(x, y)` materialization stays effectively zero on both paths, so the earlier regression is not explained by unified-memory handoff showing up outside the loader bucket.
     - The earlier `60s` end-to-end xlarge regression now looks more like run-level variance or warmup/compile noise than a genuine fast-path loss.
   - Warmup-aware `ABAB` end-to-end benchmark (`60s`, `benchmark_warmup_steps=5`, eval skipped):
 
-    | Leg | Train path | `session_steps` | `session_tokens_M` | warmup step seconds | steady-state `tok_per_sec` | `train_tflops` | `loader_percent` |
-    | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-    | `A1` | prepacked cache | `116` | `0.475` | `3.229` | `7974.2` | `2.206` | `0.04` |
-    | `B1` | token cache / live packing | `115` | `0.471` | `2.686` | `7858.0` | `2.176` | `0.27` |
-    | `A2` | prepacked cache | `116` | `0.475` | `3.101` | `7938.6` | `2.197` | `0.06` |
-    | `B2` | token cache / live packing | `115` | `0.471` | `2.738` | `7809.5` | `2.163` | `0.38` |
-
+    | Leg    | Train path                 | `session_steps` | `session_tokens_M` | warmup step seconds | steady-state `tok_per_sec` | `train_tflops` | `loader_percent` |
+    | ------ | -------------------------- | ----------------: | -------------------: | ------------------: | ---------------------------: | ---------------: | -----------------: |
+    | `A1` | prepacked cache            |           `116` |            `0.475` |           `3.229` |                   `7974.2` |        `2.206` |           `0.04` |
+    | `B1` | token cache / live packing |           `115` |            `0.471` |           `2.686` |                   `7858.0` |        `2.176` |           `0.27` |
+    | `A2` | prepacked cache            |           `116` |            `0.475` |           `3.101` |                   `7938.6` |        `2.197` |           `0.06` |
+    | `B2` | token cache / live packing |           `115` |            `0.471` |           `2.738` |                   `7809.5` |        `2.163` |           `0.38` |
   - Interpreting the warmup-aware `ABAB` run:
+
     - Prepacked pays an extra startup cost of about `0.45s` on average across the first `5` warmup steps.
     - After warmup, prepacked runs about `1.6%` faster in steady-state (`7956 tok/s` average vs `7834 tok/s` average).
     - That implies a rough xlarge crossover at about `56` steady-state steps, or about `29s`, before the prepacked path amortizes its slower warmup and comes out ahead overall.
@@ -3090,29 +3133,31 @@ On this hardware, the default canonical matched benchmark window for optimizatio
   - `./.venv/bin/python -m autoresearch_mlx.train --preset m5-fast --time-budget 60 --eval-tokens 512 --canonical-eval-tokens 512 --no-prepacked-cache`
 - Measurements:
   - Default `autoresearch_mlx/prepare.py --num-shards 1` behavior on the existing cache directory detected the raw data, tokenizer, and token caches, then built the missing shipped prepacked coverage automatically:
+
     - `train seq_len=1024`
     - `train seq_len=2048`
     - `val seq_len=1024`
     - `val seq_len=2048`
   - The shipped preset coverage now hits the prepacked train path without extra preparation flags:
+
     - `m5-fast`: `Data loader (train): using prepacked cache.`
     - `m5-balanced`: `Data loader (train): using prepacked cache.`
     - `m5-large`: `Data loader (train): using prepacked cache.`
     - `m5-xlarge`: `Data loader (train): using prepacked cache.`
   - `60s` A/B comparison (`512` proxy/canonical eval tokens):
 
-    | Preset | Train path | `val_bpb` | `proxy_val_bpb` | `train_tflops` | `loader_percent` | `session_steps` | `session_tokens_M` |
-    | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-    | `m5-fast` | prepacked cache | `1.956952` | `1.920689` | `0.624` | `0.44` | `7741` | `3.963` |
-    | `m5-fast` | token cache / live packing | `1.975841` | `1.901032` | `0.594` | `3.58` | `7369` | `3.773` |
-    | `m5-balanced` | prepacked cache | `1.730654` | `1.739594` | `1.384` | `0.18` | `1072` | `2.195` |
-    | `m5-balanced` | token cache / live packing | `1.731765` | `1.707002` | `1.306` | `1.23` | `1014` | `2.077` |
-    | `m5-large` | prepacked cache | `1.911791` | `1.929047` | `1.692` | `0.13` | `224` | `0.918` |
-    | `m5-large` | token cache / live packing | `1.906361` | `1.934655` | `1.607` | `0.51` | `213` | `0.872` |
-    | `m5-xlarge` | prepacked cache | `2.169967` | `2.132617` | `2.152` | `0.05` | `114` | `0.467` |
-    | `m5-xlarge` | token cache / live packing | `2.140543` | `2.115287` | `2.233` | `0.36` | `118` | `0.483` |
-
+    | Preset          | Train path                 |  `val_bpb` | `proxy_val_bpb` | `train_tflops` | `loader_percent` | `session_steps` | `session_tokens_M` |
+    | --------------- | -------------------------- | -----------: | ----------------: | ---------------: | -----------------: | ----------------: | -------------------: |
+    | `m5-fast`     | prepacked cache            | `1.956952` |      `1.920689` |        `0.624` |           `0.44` |          `7741` |            `3.963` |
+    | `m5-fast`     | token cache / live packing | `1.975841` |      `1.901032` |        `0.594` |           `3.58` |          `7369` |            `3.773` |
+    | `m5-balanced` | prepacked cache            | `1.730654` |      `1.739594` |        `1.384` |           `0.18` |          `1072` |            `2.195` |
+    | `m5-balanced` | token cache / live packing | `1.731765` |      `1.707002` |        `1.306` |           `1.23` |          `1014` |            `2.077` |
+    | `m5-large`    | prepacked cache            | `1.911791` |      `1.929047` |        `1.692` |           `0.13` |           `224` |            `0.918` |
+    | `m5-large`    | token cache / live packing | `1.906361` |      `1.934655` |        `1.607` |           `0.51` |           `213` |            `0.872` |
+    | `m5-xlarge`   | prepacked cache            | `2.169967` |      `2.132617` |        `2.152` |           `0.05` |           `114` |            `0.467` |
+    | `m5-xlarge`   | token cache / live packing | `2.140543` |      `2.115287` |        `2.233` |           `0.36` |           `118` |            `0.483` |
   - Interpreting the matched runs:
+
     - `m5-fast` shows a clear prepacked win: `7741` vs `7369` steps, `3.963M` vs `3.773M` session tokens (`+5.0%`), and `loader_percent` dropped from `3.58` to `0.44`.
     - `m5-balanced` also shows a clear prepacked win: `1072` vs `1014` steps, `2.195M` vs `2.077M` session tokens (`+5.7%`), and `loader_percent` dropped from `1.23` to `0.18`.
     - `m5-large` shows a real fast-path win from prepacking: `224` vs `213` steps in the same `60s`, `0.918M` vs `0.872M` session tokens (`+5.3%`), and `loader_percent` dropped from `0.51` to `0.13`.
@@ -3153,22 +3198,24 @@ On this hardware, the default canonical matched benchmark window for optimizatio
 - Measurements:
   - `20s` profile comparison runs (`512` proxy/canonical eval tokens):
 
-    | Preset | `val_bpb` | `proxy_val_bpb` | `mfu_percent` | `train_tflops` | `loader_percent` | `grad_percent` | `accum_percent` | `optimizer_percent` | `other_step_percent` | `checkpoint_percent` | `eval_percent` | `peak_vram_mb` | `util_window_steps` | Train loader |
-    | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |
-    | `m5-fast` | `2.018503` | `1.946999` | `99.50` | `0.706` | `0.45` | `66.24` | `5.97` | `27.30` | `0.05` | `0.00` | `0.11` | `146.5` | `2912` | prepacked cache |
-    | `m5-balanced` | `1.929286` | `1.908801` | `99.83` | `1.359` | `0.16` | `75.85` | `1.77` | `22.21` | `0.01` | `0.00` | `0.17` | `949.9` | `349` | prepacked cache |
-    | `m5-large` | `2.184426` | `2.200882` | `99.28` | `1.716` | `0.71` | `78.84` | `2.22` | `18.23` | `0.01` | `0.00` | `0.42` | `1944.3` | `74` | token cache / live packing |
-    | `m5-xlarge` | `2.246450` | `2.284754` | `99.86` | `2.207` | `0.13` | `83.54` | `0.67` | `15.64` | `0.00` | `0.00` | `0.78` | `4294.2` | `38` | token cache / live packing |
-
+    | Preset          |  `val_bpb` | `proxy_val_bpb` | `mfu_percent` | `train_tflops` | `loader_percent` | `grad_percent` | `accum_percent` | `optimizer_percent` | `other_step_percent` | `checkpoint_percent` | `eval_percent` | `peak_vram_mb` | `util_window_steps` | Train loader               |
+    | --------------- | -----------: | ----------------: | --------------: | ---------------: | -----------------: | ---------------: | ----------------: | --------------------: | ---------------------: | ---------------------: | ---------------: | ---------------: | --------------------: | -------------------------- |
+    | `m5-fast`     | `2.018503` |      `1.946999` |       `99.50` |        `0.706` |           `0.45` |        `66.24` |          `5.97` |             `27.30` |               `0.05` |               `0.00` |         `0.11` |        `146.5` |              `2912` | prepacked cache            |
+    | `m5-balanced` | `1.929286` |      `1.908801` |       `99.83` |        `1.359` |           `0.16` |        `75.85` |          `1.77` |             `22.21` |               `0.01` |               `0.00` |         `0.17` |        `949.9` |               `349` | prepacked cache            |
+    | `m5-large`    | `2.184426` |      `2.200882` |       `99.28` |        `1.716` |           `0.71` |        `78.84` |          `2.22` |             `18.23` |               `0.01` |               `0.00` |         `0.42` |       `1944.3` |                `74` | token cache / live packing |
+    | `m5-xlarge`   | `2.246450` |      `2.284754` |       `99.86` |        `2.207` |           `0.13` |        `83.54` |          `0.67` |             `15.64` |               `0.00` |               `0.00` |         `0.78` |       `4294.2` |                `38` | token cache / live packing |
   - smoke run:
+
     - `mfu_percent=99.32`
     - `train_tflops=0.564`
     - `loader_percent=0.63`
     - `optimizer_percent=26.50`
   - smoke checkpoint/resume path:
+
     - checkpointed smoke ended with `checkpoint_count=2` and `checkpoint_percent=2.24`
     - resumed smoke ended with `mfu_percent=99.43`, `train_tflops=0.591`, `util_window_steps=175`, and `checkpoint_count=1`
   - resume-metrics smoke path:
+
     - checkpointed smoke ended with `training_seconds=1.0`, `total_seconds=1.1`, `checkpoint_count=2`, `cumulative_training_seconds=1.0`, `cumulative_checkpoint_seconds=0.020`, and `cumulative_checkpoint_count=2`
     - resumed smoke ended with `training_seconds=0.5`, `total_seconds=0.5`, `checkpoint_count=1`, `cumulative_training_seconds=1.5`, `cumulative_checkpoint_seconds=0.027`, and `cumulative_checkpoint_count=3`
 - Confirmed behavior:
@@ -3228,42 +3275,44 @@ On this hardware, the default canonical matched benchmark window for optimizatio
   - `env MPLCONFIGDIR=/Users/ent/Codex/autoresearch-everywhere/.mplconfig .venv/bin/python tools/checkpoint_tradeoff.py`
 - Measurements:
   - Generated:
+
     - `results/analysis/checkpoint_tradeoff.png`
     - `results/analysis/checkpoint_tradeoff.csv`
     - `results/analysis/checkpoint_tradeoff.md`
     - `results/analysis/checkpoint_tradeoff.json`
   - Scenario table:
 
-    | Profile | Robustness | Events/day | Mean hours between resumes | Optimal interval (min) | Expected waste (%) | Save cost (ms) |
-    | --- | --- | ---: | ---: | ---: | ---: | ---: |
-    | Exact full-state resume (m5-large calibrated) | exact step-boundary full-state resume | 0.25 | 96.00 | 3.66 | 0.064 | 70 |
-    | Exact full-state resume (m5-large calibrated) | exact step-boundary full-state resume | 1.00 | 24.00 | 1.83 | 0.127 | 70 |
-    | Exact full-state resume (m5-large calibrated) | exact step-boundary full-state resume | 2.00 | 12.00 | 1.29 | 0.180 | 70 |
-    | Exact full-state resume (m5-large calibrated) | exact step-boundary full-state resume | 4.00 | 6.00 | 0.92 | 0.255 | 70 |
-    | Exact full-state resume (m5-large calibrated) | exact step-boundary full-state resume | 8.00 | 3.00 | 0.65 | 0.360 | 70 |
-    | Exact full-state resume (m5-large calibrated) | exact step-boundary full-state resume | 24.00 | 1.00 | 0.37 | 0.624 | 70 |
-    | Exact full-state resume (m5-xlarge calibrated) | exact step-boundary full-state resume | 0.25 | 96.00 | 4.59 | 0.080 | 110 |
-    | Exact full-state resume (m5-xlarge calibrated) | exact step-boundary full-state resume | 1.00 | 24.00 | 2.30 | 0.160 | 110 |
-    | Exact full-state resume (m5-xlarge calibrated) | exact step-boundary full-state resume | 2.00 | 12.00 | 1.62 | 0.226 | 110 |
-    | Exact full-state resume (m5-xlarge calibrated) | exact step-boundary full-state resume | 4.00 | 6.00 | 1.15 | 0.319 | 110 |
-    | Exact full-state resume (m5-xlarge calibrated) | exact step-boundary full-state resume | 8.00 | 3.00 | 0.81 | 0.451 | 110 |
-    | Exact full-state resume (m5-xlarge calibrated) | exact step-boundary full-state resume | 24.00 | 1.00 | 0.47 | 0.782 | 110 |
+    | Profile                                        | Robustness                            | Events/day | Mean hours between resumes | Optimal interval (min) | Expected waste (%) | Save cost (ms) |
+    | ---------------------------------------------- | ------------------------------------- | ---------: | -------------------------: | ---------------------: | -----------------: | -------------: |
+    | Exact full-state resume (m5-large calibrated)  | exact step-boundary full-state resume |       0.25 |                      96.00 |                   3.66 |              0.064 |             70 |
+    | Exact full-state resume (m5-large calibrated)  | exact step-boundary full-state resume |       1.00 |                      24.00 |                   1.83 |              0.127 |             70 |
+    | Exact full-state resume (m5-large calibrated)  | exact step-boundary full-state resume |       2.00 |                      12.00 |                   1.29 |              0.180 |             70 |
+    | Exact full-state resume (m5-large calibrated)  | exact step-boundary full-state resume |       4.00 |                       6.00 |                   0.92 |              0.255 |             70 |
+    | Exact full-state resume (m5-large calibrated)  | exact step-boundary full-state resume |       8.00 |                       3.00 |                   0.65 |              0.360 |             70 |
+    | Exact full-state resume (m5-large calibrated)  | exact step-boundary full-state resume |      24.00 |                       1.00 |                   0.37 |              0.624 |             70 |
+    | Exact full-state resume (m5-xlarge calibrated) | exact step-boundary full-state resume |       0.25 |                      96.00 |                   4.59 |              0.080 |            110 |
+    | Exact full-state resume (m5-xlarge calibrated) | exact step-boundary full-state resume |       1.00 |                      24.00 |                   2.30 |              0.160 |            110 |
+    | Exact full-state resume (m5-xlarge calibrated) | exact step-boundary full-state resume |       2.00 |                      12.00 |                   1.62 |              0.226 |            110 |
+    | Exact full-state resume (m5-xlarge calibrated) | exact step-boundary full-state resume |       4.00 |                       6.00 |                   1.15 |              0.319 |            110 |
+    | Exact full-state resume (m5-xlarge calibrated) | exact step-boundary full-state resume |       8.00 |                       3.00 |                   0.81 |              0.451 |            110 |
+    | Exact full-state resume (m5-xlarge calibrated) | exact step-boundary full-state resume |      24.00 |                       1.00 |                   0.47 |              0.782 |            110 |
   - Human-factors interval scan:
 
-    | Profile | Interval | Save-only overhead (%) | Allowed overhead (%) | Pass |
-    | --- | ---: | ---: | ---: | --- |
-    | Exact full-state resume (m5-large calibrated) | 1m | 0.1167 | 0.100 | False |
-    | Exact full-state resume (m5-large calibrated) | 2m | 0.0583 | 0.100 | True |
-    | Exact full-state resume (m5-xlarge calibrated) | 1m | 0.1833 | 0.100 | False |
-    | Exact full-state resume (m5-xlarge calibrated) | 2m | 0.0917 | 0.100 | True |
+    | Profile                                        | Interval | Save-only overhead (%) | Allowed overhead (%) | Pass  |
+    | ---------------------------------------------- | -------: | ---------------------: | -------------------: | ----- |
+    | Exact full-state resume (m5-large calibrated)  |       1m |                 0.1167 |                0.100 | False |
+    | Exact full-state resume (m5-large calibrated)  |       2m |                 0.0583 |                0.100 | True  |
+    | Exact full-state resume (m5-xlarge calibrated) |       1m |                 0.1833 |                0.100 | False |
+    | Exact full-state resume (m5-xlarge calibrated) |       2m |                 0.0917 |                0.100 | True  |
   - Human-factors recommendations:
 
-    | Profile | Recommended max interval | Reason |
-    | --- | ---: | --- |
-    | Exact full-state resume (m5-large calibrated) | 2m | 2m is the shortest friendly interval under the fixed 0.100% save-only overhead cap (1m fail); hourly anchor overhead is 0.0019%. |
-    | Exact full-state resume (m5-xlarge calibrated) | 2m | 2m is the shortest friendly interval under the fixed 0.100% save-only overhead cap (1m fail); hourly anchor overhead is 0.0031%. |
+    | Profile                                        | Recommended max interval | Reason                                                                                                                           |
+    | ---------------------------------------------- | -----------------------: | -------------------------------------------------------------------------------------------------------------------------------- |
+    | Exact full-state resume (m5-large calibrated)  |                       2m | 2m is the shortest friendly interval under the fixed 0.100% save-only overhead cap (1m fail); hourly anchor overhead is 0.0019%. |
+    | Exact full-state resume (m5-xlarge calibrated) |                       2m | 2m is the shortest friendly interval under the fixed 0.100% save-only overhead cap (1m fail); hourly anchor overhead is 0.0031%. |
   - Tradeoff image: [results/analysis/checkpoint_tradeoff.png](results/analysis/checkpoint_tradeoff.png)
   - Using the currently measured exact full-state resume costs:
+
     - `m5-large` calibration (`70 ms/save`): optimal interval is about `1.83 min` at `1` resume/day and `0.92 min` at `4` resumes/day
     - `m5-xlarge` calibration (`110 ms/save`): optimal interval is about `2.30 min` at `1` resume/day and `1.15 min` at `4` resumes/day
     - under the generalized human-factors scan anchored at `0.1%` save-only overhead, both grounded profiles recommend a practical maximum checkpoint interval of `2 minutes`

@@ -98,6 +98,17 @@ class ProbeResult:
     canonical_tokens: int | None = None
     canonical_batch: int | None = None
     canonical_slices: int | None = None
+    streaming_eval_points: int | None = None
+    streaming_eval_cycles_completed: int | None = None
+    streaming_eval_cycle_batches: int | None = None
+    streaming_eval_total_seconds: float | None = None
+    streaming_val_auc: float | None = None
+    honest_val_bpb: float | None = None
+    subref_one_sixth_eval_points: int | None = None
+    subref_one_sixth_eval_cycles_completed: int | None = None
+    honest_subref_one_sixth_bpb: float | None = None
+    reference_streaming_eval_cycles_completed: int | None = None
+    honest_reference_bpb: float | None = None
     eval_calibration_status: str | None = None
     eval_calibration_effective_confidence: str | None = None
     eval_calibration_freshness: str | None = None
@@ -150,6 +161,14 @@ class TrainingEngine(Protocol):
         eval_tokens: int | None = None,
         eval_batch_size: int | None = None,
         no_checkpoint: bool = True,
+        lr_multiplier: float | None = None,
+        streaming_eval_interval_steps: int | None = None,
+        streaming_eval_mode: str | None = None,
+        streaming_eval_tokens: int | None = None,
+        streaming_eval_seq_len: int | None = None,
+        streaming_eval_batch_size: int | None = None,
+        streaming_eval_history_output: Path | None = None,
+        complete_streaming_eval_cycle: bool = False,
     ) -> ProbeResult:
         ...
 

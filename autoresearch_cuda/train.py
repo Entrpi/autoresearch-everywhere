@@ -11,10 +11,25 @@ import argparse
 import json
 import gc
 import time
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass, asdict, replace
 from pathlib import Path
 
 from autoresearch_cuda.config import CUDA_PRESETS, resolve_run_preset
+from autoresearch_platform.streaming_eval import (
+    DEFAULT_STREAMING_EVAL_INTERVAL_STEPS,
+    DEFAULT_STREAMING_EVAL_TOKENS,
+    STREAMING_EVAL_MODES,
+    STREAMING_EVAL_MODE_SUBREF_ONE_SIXTH,
+    streaming_mode_uses_cheap,
+    streaming_mode_uses_subref,
+    StreamingEvalConfig,
+    StreamingSupercycleAccumulator,
+    StreamingEvalTracker,
+)
+
+DEFAULT_CUDA_STREAMING_SEQ_LEN = 2048
+DEFAULT_CUDA_STREAMING_BATCH_SIZE = 32
+DEFAULT_CUDA_SUBREF_ONE_SIXTH_TOKENS = 262144
 
 
 def build_parser():
@@ -35,6 +50,11 @@ def build_parser():
     parser.add_argument("--total-batch-size", type=int, help="Total batch size override.")
     parser.add_argument("--depth", type=int, help="Transformer depth override.")
     parser.add_argument("--device-batch-size", type=int, help="Per-device batch size override.")
+    parser.add_argument(
+        "--smoke",
+        action="store_true",
+        help="Run a short end-to-end sanity check with smaller defaults.",
+    )
     parser.add_argument(
         "--benchmark-skip-eval",
         action="store_true",
@@ -95,6 +115,46 @@ def build_parser():
         type=str,
         help="Optional JSON path to write periodic validation curve data to.",
     )
+    parser.add_argument(
+        "--lr-multiplier",
+        type=float,
+        help="Multiply all preset LR groups by this scalar while preserving their ratios.",
+    )
+    parser.add_argument(
+        "--streaming-eval-interval-steps",
+        type=int,
+        help=f"Run one deterministic validation batch every N training steps. Default for discovery flows is {DEFAULT_STREAMING_EVAL_INTERVAL_STEPS}.",
+    )
+    parser.add_argument(
+        "--streaming-eval-mode",
+        choices=STREAMING_EVAL_MODES,
+        help="Streaming eval mode. 'subref-one-sixth' is the default online path; 'cheap' favors repeated comparable cycles; 'both' enables both streams.",
+    )
+    parser.add_argument(
+        "--streaming-eval-tokens",
+        type=int,
+        help=f"Token budget represented by one full streaming-eval cycle. Defaults to the cheap/subref-one-sixth budget ({DEFAULT_CUDA_SUBREF_ONE_SIXTH_TOKENS}).",
+    )
+    parser.add_argument(
+        "--streaming-eval-seq-len",
+        type=int,
+        help=f"Sequence length for deterministic streaming validation batches. Defaults to the canonical streaming seq_len ({DEFAULT_CUDA_STREAMING_SEQ_LEN}).",
+    )
+    parser.add_argument(
+        "--streaming-eval-batch-size",
+        type=int,
+        help=f"Batch size for deterministic streaming validation batches. Defaults to the canonical streaming batch size ({DEFAULT_CUDA_STREAMING_BATCH_SIZE}).",
+    )
+    parser.add_argument(
+        "--streaming-eval-history-output",
+        type=str,
+        help="Optional JSON path to write deterministic streaming validation history.",
+    )
+    parser.add_argument(
+        "--complete-streaming-eval-cycle",
+        action="store_true",
+        help="If a run stops mid streaming-eval cycle, continue until the current cycle boundary so the final honest metric is complete.",
+    )
     return parser
 
 
@@ -120,6 +180,59 @@ def _parse_curve_eval_seconds(value: str | None) -> list[float]:
 
 CURVE_EVAL_SECONDS = _parse_curve_eval_seconds(ARGS.curve_eval_seconds)
 
+
+def _resolve_streaming_eval_config(args, *, seq_len: int, device_batch_size: int, resume_run_config: dict | None = None):
+    saved = resume_run_config or {}
+    interval_steps = (
+        args.streaming_eval_interval_steps
+        if args.streaming_eval_interval_steps is not None
+        else saved.get("streaming_eval_interval_steps")
+    )
+    if interval_steps is None:
+        return None
+    if interval_steps <= 0:
+        raise ValueError("--streaming-eval-interval-steps must be positive.")
+    mode = (
+        args.streaming_eval_mode
+        if args.streaming_eval_mode is not None
+        else saved.get("streaming_eval_mode")
+        or STREAMING_EVAL_MODE_SUBREF_ONE_SIXTH
+    )
+    if mode not in STREAMING_EVAL_MODES:
+        raise ValueError(f"Unsupported --streaming-eval-mode: {mode!r}")
+    eval_tokens = (
+        args.streaming_eval_tokens
+        if args.streaming_eval_tokens is not None
+        else saved.get("streaming_eval_tokens")
+        or DEFAULT_CUDA_SUBREF_ONE_SIXTH_TOKENS
+    )
+    if eval_tokens <= 0:
+        raise ValueError("--streaming-eval-tokens must be positive.")
+    streaming_seq_len = (
+        args.streaming_eval_seq_len
+        if args.streaming_eval_seq_len is not None
+        else saved.get("streaming_eval_seq_len")
+        or DEFAULT_CUDA_STREAMING_SEQ_LEN
+    )
+    streaming_batch_size = (
+        args.streaming_eval_batch_size
+        if args.streaming_eval_batch_size is not None
+        else saved.get("streaming_eval_batch_size")
+        or DEFAULT_CUDA_STREAMING_BATCH_SIZE
+    )
+    complete_cycle_on_budget = bool(
+        args.complete_streaming_eval_cycle
+        or saved.get("complete_streaming_eval_cycle", False)
+    )
+    return StreamingEvalConfig(
+        interval_steps=interval_steps,
+        eval_tokens=eval_tokens,
+        batch_size=streaming_batch_size,
+        seq_len=streaming_seq_len,
+        mode=mode,
+        complete_cycle_on_budget=complete_cycle_on_budget,
+    )
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -131,9 +244,14 @@ from autoresearch_cuda.prepare import (
     Tokenizer,
     make_dataloader,
     evaluate_bpb,
+    evaluate_bpb_batch,
+    evaluate_bpb_batch_stats,
     evaluate_bpb_configured,
+    get_token_bytes,
 )
 from autoresearch_cuda.eval_policy import (
+    CUDA_REFERENCE_RUNG,
+    CUDA_SUBREF_ONE_SIXTH_RUNG,
     EVAL_POLICY_VERSION,
     choose_runtime_eval,
     current_eval_semantics_signature,
@@ -173,6 +291,12 @@ from autoresearch_platform.step_telemetry import (
 )
 
 
+SUBREF_ONE_SIXTHS_PER_REFERENCE, _SUBREF_REFERENCE_REMAINDER = divmod(
+    CUDA_REFERENCE_RUNG.eval_tokens,
+    CUDA_SUBREF_ONE_SIXTH_RUNG.eval_tokens,
+)
+if _SUBREF_REFERENCE_REMAINDER != 0:
+    raise SystemExit("CUDA subref-one-sixth must divide the reference rung exactly.")
 def _resolved_run_config_from_checkpoint(checkpoint_dir: str):
     metadata = load_checkpoint_metadata(checkpoint_dir)
     bundle = load_training_checkpoint(checkpoint_dir, map_location="cpu")
@@ -306,7 +430,7 @@ def _resolve_checkpoint_settings(
 
 def _resolve_run_preset_with_resume(args):
     if not args.resume_from:
-        return resolve_run_preset(
+        resolved = resolve_run_preset(
             args.preset,
             time_budget=args.time_budget,
             seq_len=args.seq_len,
@@ -314,7 +438,34 @@ def _resolve_run_preset_with_resume(args):
             total_batch_size=args.total_batch_size,
             depth=args.depth,
             device_batch_size=args.device_batch_size,
-        ), None, None
+        )
+        if args.smoke:
+            smoke_seq_len = min(resolved.seq_len, 256)
+            smoke_depth = min(resolved.depth, 2)
+            smoke_device_batch_size = min(resolved.device_batch_size, 2)
+            resolved = replace(
+                resolved,
+                time_budget=1.0,
+                seq_len=smoke_seq_len,
+                window_pattern="L",
+                total_batch_size=smoke_seq_len * smoke_device_batch_size,
+                depth=smoke_depth,
+                device_batch_size=smoke_device_batch_size,
+            )
+            resolved = replace(
+                resolved,
+                time_budget=args.time_budget if args.time_budget is not None else resolved.time_budget,
+                seq_len=args.seq_len if args.seq_len is not None else resolved.seq_len,
+                window_pattern=args.window_pattern if args.window_pattern is not None else resolved.window_pattern,
+                total_batch_size=args.total_batch_size if args.total_batch_size is not None else resolved.total_batch_size,
+                depth=args.depth if args.depth is not None else resolved.depth,
+                device_batch_size=(
+                    args.device_batch_size
+                    if args.device_batch_size is not None
+                    else resolved.device_batch_size
+                ),
+            )
+        return resolved, None, None
 
     metadata, bundle, run_config, training_state = _resolved_run_config_from_checkpoint(args.resume_from)
     checkpoint_preset = run_config["preset"]
@@ -322,6 +473,8 @@ def _resolve_run_preset_with_resume(args):
         raise ValueError(
             f"--resume-from expects preset {checkpoint_preset!r}; received {args.preset!r}."
         )
+    if args.smoke:
+        raise ValueError("--resume-from cannot be combined with --smoke.")
 
     disallowed_overrides: list[str] = []
     if args.seq_len is not None and args.seq_len != run_config["seq_len"]:
@@ -334,6 +487,8 @@ def _resolve_run_preset_with_resume(args):
         disallowed_overrides.append("--depth")
     if args.device_batch_size is not None and args.device_batch_size != run_config["device_batch_size"]:
         disallowed_overrides.append("--device-batch-size")
+    if args.lr_multiplier is not None and args.lr_multiplier != run_config.get("lr_multiplier", 1.0):
+        disallowed_overrides.append("--lr-multiplier")
     if disallowed_overrides:
         raise ValueError(
             "Resume does not allow shape-changing overrides: "
@@ -394,6 +549,19 @@ FLASH_ATTN_INTERFACE, RESOLVED_ATTENTION_BACKEND = _resolve_flash_attention_inte
 
 
 def _runtime_eval_plan():
+    if ARGS.smoke:
+        return {
+            "rung": "smoke",
+            "status": "smoke",
+            "effective_confidence": None,
+            "freshness": None,
+            "policy_version": EVAL_POLICY_VERSION,
+            "limited_by": None,
+            "seq_len": MAX_SEQ_LEN,
+            "eval_tokens": MAX_SEQ_LEN * DEVICE_BATCH_SIZE,
+            "batch_size": DEVICE_BATCH_SIZE,
+            "reason": "smoke override",
+        }
     if ARGS.eval_only:
         return {
             "rung": "manual",
@@ -1040,6 +1208,23 @@ FINAL_LR_FRAC = RUN_PRESET.final_lr_frac
 # Model size
 DEPTH = RUN_PRESET.depth
 DEVICE_BATCH_SIZE = RUN_PRESET.device_batch_size
+RESUME_RUN_CONFIG = RESUME_BUNDLE.get("run_config") if RESUME_BUNDLE is not None else {}
+LR_MULTIPLIER = (
+    ARGS.lr_multiplier
+    if ARGS.lr_multiplier is not None
+    else float(RESUME_RUN_CONFIG.get("lr_multiplier", 1.0))
+)
+STREAMING_EVAL_CONFIG = _resolve_streaming_eval_config(
+    ARGS,
+    seq_len=MAX_SEQ_LEN,
+    device_batch_size=DEVICE_BATCH_SIZE,
+    resume_run_config=RESUME_RUN_CONFIG,
+)
+STREAMING_EVAL_HISTORY_OUTPUT = (
+    ARGS.streaming_eval_history_output
+    if ARGS.streaming_eval_history_output is not None
+    else RESUME_RUN_CONFIG.get("streaming_eval_history_output")
+)
 CHECKPOINT_PATH = None
 CHECKPOINT_INTERVAL = None
 CHECKPOINT_SAVE_MODE = None
@@ -1056,10 +1241,20 @@ def budget_progress(*, total_training_time: float, total_tokens: int) -> float:
     return min(total_training_time / max(TIME_BUDGET, 1e-9), 1.0)
 
 
-def budget_satisfied(*, total_training_time: float, total_tokens: int) -> bool:
+def nominal_budget_satisfied(*, total_training_time: float, total_tokens: int) -> bool:
     if TOKEN_BUDGET is not None:
         return total_tokens >= TOKEN_BUDGET
     return total_training_time >= TIME_BUDGET
+
+
+def budget_satisfied(*, total_training_time: float, total_tokens: int) -> bool:
+    if not nominal_budget_satisfied(total_training_time=total_training_time, total_tokens=total_tokens):
+        return False
+    if streaming_eval_tracker is not None and streaming_eval_tracker.requires_cycle_completion():
+        return False
+    if subref_streaming_tracker is not None and subref_streaming_tracker.requires_cycle_completion():
+        return False
+    return True
 
 
 def budget_remaining(*, total_training_time: float, total_tokens: int) -> str:
@@ -1224,6 +1419,59 @@ while curve_eval_index < len(CURVE_EVAL_SECONDS) and CURVE_EVAL_SECONDS[curve_ev
 last_checkpoint_training_time = total_training_time
 last_checkpoint_tokens = total_tokens
 async_checkpoint_writer = None
+streaming_eval_seconds = 0.0
+subref_streaming_eval_seconds = 0.0
+cheap_stream_enabled = STREAMING_EVAL_CONFIG is not None and streaming_mode_uses_cheap(STREAMING_EVAL_CONFIG.mode)
+subref_stream_enabled = STREAMING_EVAL_CONFIG is not None and streaming_mode_uses_subref(STREAMING_EVAL_CONFIG.mode)
+streaming_eval_tracker = (
+    StreamingEvalTracker(STREAMING_EVAL_CONFIG)
+    if cheap_stream_enabled
+    else None
+)
+streaming_eval_token_bytes = (
+    get_token_bytes(device="cuda")
+    if cheap_stream_enabled or subref_stream_enabled
+    else None
+)
+streaming_eval_loader = (
+    make_dataloader(
+        tokenizer,
+        STREAMING_EVAL_CONFIG.batch_size,
+        STREAMING_EVAL_CONFIG.seq_len,
+        "val",
+    )
+    if cheap_stream_enabled
+    else None
+)
+subref_streaming_loader = (
+    make_dataloader(
+        tokenizer,
+        CUDA_SUBREF_ONE_SIXTH_RUNG.batch_size,
+        CUDA_SUBREF_ONE_SIXTH_RUNG.seq_len,
+        "val",
+    )
+    if subref_stream_enabled
+    else None
+)
+subref_streaming_tracker = (
+    StreamingEvalTracker(
+        StreamingEvalConfig(
+            interval_steps=STREAMING_EVAL_CONFIG.interval_steps,
+            eval_tokens=CUDA_SUBREF_ONE_SIXTH_RUNG.eval_tokens,
+            batch_size=CUDA_SUBREF_ONE_SIXTH_RUNG.batch_size,
+            seq_len=CUDA_SUBREF_ONE_SIXTH_RUNG.seq_len,
+            mode=STREAMING_EVAL_MODE_SUBREF_ONE_SIXTH,
+            complete_cycle_on_budget=False,
+        )
+    )
+    if subref_stream_enabled and STREAMING_EVAL_CONFIG is not None
+    else None
+)
+derived_reference_streaming = (
+    StreamingSupercycleAccumulator(subcycles_per_supercycle=SUBREF_ONE_SIXTHS_PER_REFERENCE)
+    if subref_stream_enabled
+    else None
+)
 
 
 def maybe_save_checkpoint(*, force: bool = False):
@@ -1253,6 +1501,7 @@ def maybe_save_checkpoint(*, force: bool = False):
 
     run_config = {
         "preset": ARGS.preset,
+        "smoke": ARGS.smoke,
         "time_budget": RUN_PRESET.time_budget,
         "token_budget": TOKEN_BUDGET,
         "seq_len": MAX_SEQ_LEN,
@@ -1265,6 +1514,26 @@ def maybe_save_checkpoint(*, force: bool = False):
         "checkpoint_interval": format_interval_spec(CHECKPOINT_INTERVAL),
         "checkpoint_interval_is_auto": CHECKPOINT_INTERVAL_IS_AUTO,
         "checkpoint_save_mode": CHECKPOINT_SAVE_MODE,
+        "lr_multiplier": LR_MULTIPLIER,
+        "streaming_eval_interval_steps": (
+            STREAMING_EVAL_CONFIG.interval_steps if STREAMING_EVAL_CONFIG is not None else None
+        ),
+        "streaming_eval_mode": (
+            STREAMING_EVAL_CONFIG.mode if STREAMING_EVAL_CONFIG is not None else None
+        ),
+        "streaming_eval_tokens": (
+            STREAMING_EVAL_CONFIG.eval_tokens if STREAMING_EVAL_CONFIG is not None else None
+        ),
+        "streaming_eval_seq_len": (
+            STREAMING_EVAL_CONFIG.seq_len if STREAMING_EVAL_CONFIG is not None else None
+        ),
+        "streaming_eval_batch_size": (
+            STREAMING_EVAL_CONFIG.batch_size if STREAMING_EVAL_CONFIG is not None else None
+        ),
+        "streaming_eval_history_output": STREAMING_EVAL_HISTORY_OUTPUT,
+        "complete_streaming_eval_cycle": (
+            STREAMING_EVAL_CONFIG.complete_cycle_on_budget if STREAMING_EVAL_CONFIG is not None else False
+        ),
     }
     training_state_base = {
         "step": step,
@@ -1330,6 +1599,99 @@ def maybe_save_checkpoint(*, force: bool = False):
         print(f"\nCheckpoint queued to {CHECKPOINT_PATH} at step {step}{interval_label}.")
     return checkpoint_saved_to
 
+
+def maybe_run_streaming_eval():
+    global streaming_eval_loader, subref_streaming_loader, streaming_eval_seconds, subref_streaming_eval_seconds
+    if STREAMING_EVAL_CONFIG is None:
+        return
+    if not STREAMING_EVAL_CONFIG.interval_steps or step <= 0 or step % STREAMING_EVAL_CONFIG.interval_steps != 0:
+        return
+    model.eval()
+    if streaming_eval_tracker is not None and streaming_eval_loader is not None:
+        torch.cuda.synchronize()
+        t_streaming_eval_start = time.perf_counter()
+        x_val, y_val, _ = next(streaming_eval_loader)
+        batch_bpb, batch_nats, batch_bytes = evaluate_bpb_batch_stats(
+            model,
+            x_val,
+            y_val,
+            token_bytes=streaming_eval_token_bytes,
+        )
+        torch.cuda.synchronize()
+        streaming_eval_seconds += time.perf_counter() - t_streaming_eval_start
+        point = streaming_eval_tracker.record(
+            step=step,
+            total_training_time=total_training_time,
+            total_tokens=total_tokens,
+            batch_bpb=batch_bpb,
+            batch_nats=batch_nats,
+            batch_bytes=batch_bytes,
+        )
+        if point.cycle_completed:
+            summary = streaming_eval_tracker.summary()
+            auc_label = "skipped" if summary.auc is None else f"{summary.auc:.6f}"
+            honest_label = "skipped" if point.honest_bpb is None else f"{point.honest_bpb:.6f}"
+            print(
+                f"\nstreaming_eval: step={point.step} cycle={point.cycle_index} "
+                f"honest_bpb={honest_label} auc={auc_label}"
+            )
+            streaming_eval_loader = make_dataloader(
+                tokenizer,
+                STREAMING_EVAL_CONFIG.batch_size,
+                STREAMING_EVAL_CONFIG.seq_len,
+                "val",
+            )
+    if subref_streaming_tracker is not None and subref_streaming_loader is not None:
+        torch.cuda.synchronize()
+        t_subref_eval_start = time.perf_counter()
+        x_subref, y_subref, _ = next(subref_streaming_loader)
+        subref_bpb, subref_nats, subref_bytes = evaluate_bpb_batch_stats(
+            model,
+            x_subref,
+            y_subref,
+            token_bytes=streaming_eval_token_bytes,
+        )
+        torch.cuda.synchronize()
+        subref_streaming_eval_seconds += time.perf_counter() - t_subref_eval_start
+        subref_point = subref_streaming_tracker.record(
+            step=step,
+            total_training_time=total_training_time,
+            total_tokens=total_tokens,
+            batch_bpb=subref_bpb,
+            batch_nats=subref_nats,
+            batch_bytes=subref_bytes,
+        )
+        if subref_point.cycle_completed:
+            honest_label = "skipped" if subref_point.honest_bpb is None else f"{subref_point.honest_bpb:.6f}"
+            print(
+                f"\nsubref_one_sixth_eval: step={subref_point.step} cycle={subref_point.cycle_index} "
+                f"honest_bpb={honest_label}"
+            )
+            if (
+                derived_reference_streaming is not None
+                and derived_reference_streaming.record_completed_subcycle(
+                    cycle_nats=subref_point.cycle_nats,
+                    cycle_bytes=subref_point.cycle_bytes,
+                    honest_bpb=subref_point.honest_bpb,
+                )
+            ):
+                reference_label = (
+                    "skipped"
+                    if derived_reference_streaming.honest_supercycle_bpb is None
+                    else f"{derived_reference_streaming.honest_supercycle_bpb:.6f}"
+                )
+                print(
+                    f"\nreference_streaming_eval: cycle={derived_reference_streaming.supercycles_completed} "
+                    f"honest_bpb={reference_label}"
+                )
+                subref_streaming_loader = make_dataloader(
+                    tokenizer,
+                    CUDA_SUBREF_ONE_SIXTH_RUNG.batch_size,
+                    CUDA_SUBREF_ONE_SIXTH_RUNG.seq_len,
+                    "val",
+                )
+    model.train()
+
 resumed_from = None
 if RESUME_BUNDLE is not None:
     model.load_state_dict(RESUME_BUNDLE["model_state_dict"])
@@ -1345,6 +1707,8 @@ if ARGS.eval_only:
         print(f"Reference time budget: {TIME_BUDGET}s")
     else:
         print(f"Time budget: {TIME_BUDGET}s")
+    print(f"Smoke mode: {str(ARGS.smoke).lower()}")
+    print(f"LR multiplier: {LR_MULTIPLIER:.6f}")
     if CHECKPOINT_PATH is not None:
         print(f"Checkpoint path: {CHECKPOINT_PATH}")
     if CHECKPOINT_INTERVAL is not None:
@@ -1354,6 +1718,19 @@ if ARGS.eval_only:
         print(f"Checkpoint policy: {CHECKPOINT_DECISION_REASON}")
     print(f"Gradient accumulation steps: {grad_accum_steps}")
     print(f"Compile enabled: {str(not ARGS.no_compile).lower()}")
+    if STREAMING_EVAL_CONFIG is not None:
+        print(
+            "Streaming eval: "
+            f"every={STREAMING_EVAL_CONFIG.interval_steps} steps, "
+            f"mode={STREAMING_EVAL_CONFIG.mode}, "
+            f"tokens={STREAMING_EVAL_CONFIG.eval_tokens}, "
+            f"seq_len={STREAMING_EVAL_CONFIG.seq_len}, "
+            f"batch_size={STREAMING_EVAL_CONFIG.batch_size}, "
+            f"cycle_batches={STREAMING_EVAL_CONFIG.cycle_batches}, "
+            f"complete_cycle_on_budget={STREAMING_EVAL_CONFIG.complete_cycle_on_budget}"
+        )
+    else:
+        print("Streaming eval: disabled")
     print(
         "Eval only: "
         f"seq_len={ARGS.eval_seq_len or MAX_SEQ_LEN}, "
@@ -1399,6 +1776,8 @@ else:
         print(f"Reference time budget: {TIME_BUDGET}s")
     else:
         print(f"Time budget: {TIME_BUDGET}s")
+    print(f"Smoke mode: {str(ARGS.smoke).lower()}")
+    print(f"LR multiplier: {LR_MULTIPLIER:.6f}")
     if CHECKPOINT_PATH is not None:
         print(f"Checkpoint path: {CHECKPOINT_PATH}")
     if CHECKPOINT_INTERVAL is not None:
@@ -1408,6 +1787,18 @@ else:
         print(f"Checkpoint policy: {CHECKPOINT_DECISION_REASON}")
     print(f"Gradient accumulation steps: {grad_accum_steps}")
     print(f"Compile enabled: {str(not ARGS.no_compile).lower()}")
+    if STREAMING_EVAL_CONFIG is not None:
+        print(
+            "Streaming eval: "
+            f"every={STREAMING_EVAL_CONFIG.interval_steps} steps, "
+            f"tokens={STREAMING_EVAL_CONFIG.eval_tokens}, "
+            f"seq_len={STREAMING_EVAL_CONFIG.seq_len}, "
+            f"batch_size={STREAMING_EVAL_CONFIG.batch_size}, "
+            f"cycle_batches={STREAMING_EVAL_CONFIG.cycle_batches}, "
+            f"complete_cycle_on_budget={STREAMING_EVAL_CONFIG.complete_cycle_on_budget}"
+        )
+    else:
+        print("Streaming eval: disabled")
     async_checkpoint_writer = (
         make_async_checkpoint_writer()
         if CHECKPOINT_PATH is not None and CHECKPOINT_SAVE_MODE == CHECKPOINT_SAVE_MODE_ASYNC
@@ -1586,7 +1977,7 @@ if not ARGS.eval_only:
         muon_momentum = get_muon_momentum(step)
         muon_weight_decay = get_weight_decay(progress)
         for group in optimizer.param_groups:
-            group["lr"] = group["initial_lr"] * lrm
+            group["lr"] = group["initial_lr"] * LR_MULTIPLIER * lrm
             if group['kind'] == 'muon':
                 group["momentum"] = muon_momentum
                 group["weight_decay"] = muon_weight_decay
@@ -1645,6 +2036,7 @@ if not ARGS.eval_only:
 
         step += 1
         total_tokens = step * TOTAL_BATCH_SIZE
+        maybe_run_streaming_eval()
         curve_eval_total_seconds, curve_eval_index = maybe_run_curve_eval(
             model=model,
             tokenizer=tokenizer,
@@ -1727,11 +2119,42 @@ t_end = time.time()
 effective_steady_time = steady_state_training_time if steady_state_training_time > 0 else total_training_time
 effective_steady_steps = steady_state_step_count if steady_state_step_count > 0 else step
 session_total_seconds = t_end - t_start
+streaming_eval_summary = streaming_eval_tracker.summary() if streaming_eval_tracker is not None else None
+subref_streaming_eval_summary = (
+    subref_streaming_tracker.summary() if subref_streaming_tracker is not None else None
+)
+if STREAMING_EVAL_HISTORY_OUTPUT is not None and (
+    streaming_eval_tracker is not None or subref_streaming_tracker is not None
+):
+    history_output_path = Path(STREAMING_EVAL_HISTORY_OUTPUT)
+    history_output_path.parent.mkdir(parents=True, exist_ok=True)
+    primary_tracker = (
+        streaming_eval_tracker
+        if streaming_eval_tracker is not None
+        else subref_streaming_tracker
+    )
+    history_payload = primary_tracker.to_dict()
+    history_payload["streaming_eval_mode"] = STREAMING_EVAL_CONFIG.mode if STREAMING_EVAL_CONFIG is not None else None
+    if (
+        streaming_eval_summary is not None
+        and subref_streaming_eval_summary is not None
+        and subref_streaming_tracker is not None
+    ):
+        history_payload["subref_one_sixth"] = subref_streaming_tracker.to_dict()
+    if derived_reference_streaming is not None:
+        history_payload["reference_from_subref"] = {
+            "subcycle_key": CUDA_SUBREF_ONE_SIXTH_RUNG.key,
+            "supercycle_key": CUDA_REFERENCE_RUNG.key,
+            **derived_reference_streaming.to_dict(),
+        }
+    history_output_path.write_text(json.dumps(history_payload, indent=2) + "\n")
 session_checkpoint_count = checkpoint_count
 cumulative_checkpoint_seconds = resumed_checkpoint_seconds + checkpoint_seconds
 cumulative_checkpoint_write_seconds = resumed_checkpoint_write_seconds + checkpoint_write_seconds
 cumulative_checkpoint_count = resumed_checkpoint_count + checkpoint_count
-session_eval_seconds = curve_eval_total_seconds + (eval_seconds or 0.0)
+session_eval_seconds = (
+    curve_eval_total_seconds + (eval_seconds or 0.0) + streaming_eval_seconds + subref_streaming_eval_seconds
+)
 checkpoint_percent = 100.0 * checkpoint_seconds / session_total_seconds if session_total_seconds > 0 else 0.0
 checkpoint_write_percent = (
     100.0 * checkpoint_write_seconds / session_total_seconds if session_total_seconds > 0 else 0.0
@@ -1793,6 +2216,63 @@ if TOKEN_BUDGET is not None:
     print(f"token_budget:     {TOKEN_BUDGET}")
 print(f"training_seconds: {total_training_time:.1f}")
 print(f"total_seconds:    {session_total_seconds:.1f}")
+print(f"lr_multiplier:   {LR_MULTIPLIER:.6f}")
+if STREAMING_EVAL_CONFIG is None:
+    print("streaming_eval_points: skipped")
+    print("streaming_eval_cycles_completed: skipped")
+    print("streaming_eval_cycle_batches: skipped")
+    print("streaming_eval_total_seconds: skipped")
+    print("streaming_val_auc: skipped")
+    print("honest_val_bpb: skipped")
+    print("subref_one_sixth_eval_points: skipped")
+    print("subref_one_sixth_eval_cycles_completed: skipped")
+    print("honest_subref_one_sixth_bpb: skipped")
+    print("reference_streaming_eval_cycles_completed: skipped")
+    print("honest_reference_bpb: skipped")
+else:
+    print(f"streaming_eval_mode: {STREAMING_EVAL_CONFIG.mode}")
+    if streaming_eval_summary is None:
+        print("streaming_eval_points: skipped")
+        print("streaming_eval_cycles_completed: skipped")
+        print("streaming_eval_cycle_batches: skipped")
+    else:
+        print(f"streaming_eval_points: {streaming_eval_summary.total_points}")
+        print(f"streaming_eval_cycles_completed: {streaming_eval_summary.cycles_completed}")
+        print(f"streaming_eval_cycle_batches: {streaming_eval_summary.cycle_batches}")
+    print(f"streaming_eval_total_seconds: {streaming_eval_seconds + subref_streaming_eval_seconds:.1f}")
+    if streaming_eval_summary is None or streaming_eval_summary.auc is None:
+        print("streaming_val_auc: skipped")
+    else:
+        print(f"streaming_val_auc: {streaming_eval_summary.auc:.6f}")
+    if streaming_eval_summary is None or streaming_eval_summary.honest_bpb is None:
+        print("honest_val_bpb: skipped")
+    else:
+        print(f"honest_val_bpb: {streaming_eval_summary.honest_bpb:.6f}")
+    if subref_streaming_eval_summary is None:
+        print("subref_one_sixth_eval_points: skipped")
+        print("subref_one_sixth_eval_cycles_completed: skipped")
+        print("honest_subref_one_sixth_bpb: skipped")
+        print("reference_streaming_eval_cycles_completed: skipped")
+        print("honest_reference_bpb: skipped")
+    else:
+        print(f"subref_one_sixth_eval_points: {subref_streaming_eval_summary.total_points}")
+        print(f"subref_one_sixth_eval_cycles_completed: {subref_streaming_eval_summary.cycles_completed}")
+        if derived_reference_streaming is None or derived_reference_streaming.honest_subcycle_bpb is None:
+            print("honest_subref_one_sixth_bpb: skipped")
+        else:
+            print(f"honest_subref_one_sixth_bpb: {derived_reference_streaming.honest_subcycle_bpb:.6f}")
+        if derived_reference_streaming is None:
+            print("reference_streaming_eval_cycles_completed: skipped")
+            print("honest_reference_bpb: skipped")
+        else:
+            print(
+                "reference_streaming_eval_cycles_completed: "
+                f"{derived_reference_streaming.supercycles_completed}"
+            )
+            if derived_reference_streaming.honest_supercycle_bpb is None:
+                print("honest_reference_bpb: skipped")
+            else:
+                print(f"honest_reference_bpb: {derived_reference_streaming.honest_supercycle_bpb:.6f}")
 print(f"peak_vram_mb:     {peak_vram_mb:.1f}")
 print(f"mfu_percent:      {steady_state_mfu:.2f}")
 print(f"peak_flop_utilization_percent: {steady_state_mfu:.2f}")
