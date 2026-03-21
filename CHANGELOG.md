@@ -29,6 +29,31 @@ On this hardware, the default canonical matched benchmark window for optimizatio
 
 ## Latest
 
+### New commit — train/lr: add staged embedding multiplier discovery — score `4` — complexity `6`
+
+**Human-directed, AI-shaped (4)**
+
+- Expose `embedding_lr_multiplier` as the next staged discovery lever, so the shared sweep can now walk the full grouped LR surface instead of stopping one stage short of the embedding/value-embedding group.
+  - Meaning: staged discovery now reaches all five grouped multipliers on the shared surface: `global -> matrix -> unembedding -> scalar -> embedding`. The discovery stack can carry the previously chosen multipliers forward and then rank a dedicated embedding stage on the embedding axis itself.
+  - Motivation: after adding `scalar`, the remaining missing grouped axis was `embedding`. Exposing it answers whether the full shared LR-profile surface is actually discoverable through the generic staged machinery, rather than leaving the last group permanently manual-only.
+  - Purpose: complete the first pass over the whole grouped LR surface so the next design question can shift from “what axes are still missing?” to “which of these axes should remain default, optional, or bowl-only?”
+  - Extend `autoresearch_platform.lr_discovery` with a first-class `embedding` lever mapped onto `embedding_lr_multiplier`, and extend `tools/discover_lr.py` so staged runs can request it after the earlier grouped stages.
+  - Validate the new axis with a real MLX `m5-tiny` five-stage run and matching stage plot; the embedding stage moved off the inherited anchor to `0.5`, with a near-tied longer-horizon fallback to `0.25`.
+
+**Grounding**
+
+- Files:
+  - `CHANGELOG.md`
+  - `autoresearch_platform/lr_discovery.py`
+  - `tools/discover_lr.py`
+- Validation:
+  - `python3 -m py_compile autoresearch_platform/lr_discovery.py tools/discover_lr.py discover_lr.py`
+  - `python3 discover_lr.py --help | rg -n "discovery-levers|embedding|scalar|unembedding|matrix"`
+  - `UV_CACHE_DIR=/tmp/uv-cache uv run python discover_lr.py --engine mlx --preset m5-tiny --time-budget 1.5 --discovery-levers global matrix unembedding scalar embedding --streaming-eval-interval-steps 1 --streaming-eval-tokens 16384 --output-dir results/analysis/lr_discovery_mlx_m5tiny_global_matrix_unembedding_scalar_embedding_test`
+    - Real staged MLX result: `global=1.8340081`, `matrix=2`, `unembedding=1.8340081`, `scalar=0.5`, `embedding=0.5`, with the embedding stage recommending `0.25` as the longer-horizon fallback.
+  - `UV_CACHE_DIR=/tmp/uv-cache uv run --with matplotlib python - <<'PY' ...`
+    - Wrote staged summary plot: `results/analysis/lr_discovery_mlx_m5tiny_global_matrix_unembedding_scalar_embedding_test/staged_lr_discovery_plot.png`.
+
 ### New commit — train/lr: add staged scalar multiplier discovery — score `4` — complexity `6`
 
 **Human-directed, AI-shaped (4)**
