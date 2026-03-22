@@ -39,6 +39,7 @@ LR_MULTIPLIER_FLAG_FIELDS = (
     ("matrix_lr_multiplier", "--matrix-lr-multiplier"),
     ("scalar_lr_multiplier", "--scalar-lr-multiplier"),
 )
+DISCOVERY_BASELINE_LR_MULTIPLIER_FLAG_FIELDS = LR_MULTIPLIER_FLAG_FIELDS[1:]
 LR_MULTIPLIER_SHORT_LABELS = (
     ("lr_multiplier", "global"),
     ("embedding_lr_multiplier", "embedding"),
@@ -147,19 +148,21 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Treat multipliers within this log-distance as duplicates during refinement.",
     )
     parser.add_argument(
+        "--always-refine",
+        action="store_true",
+        help=(
+            "Always run local midpoint refinement after the coarse sweep, even if the coarse "
+            "winner does not clear the AUC-gap trigger."
+        ),
+    )
+    parser.add_argument(
         "--fine-refine-auc-fraction",
         type=float,
         default=AdaptiveLrSweepConfig.fine_refine_auc_fraction,
         help=(
             "If the best and runner-up probe AUCs differ by more than this fraction, "
-            "run finer local probes around the incumbent."
+            "run finer local midpoint probes around the incumbent."
         ),
-    )
-    parser.add_argument(
-        "--fine-refine-initial-ratio",
-        type=float,
-        default=AdaptiveLrSweepConfig.fine_refine_initial_ratio,
-        help="Initial multiplicative ratio for fine refinement (~1.09x by default).",
     )
     parser.add_argument(
         "--fine-refine-rounds",
@@ -220,6 +223,16 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--streaming-eval-seq-len", type=int, help="Sequence length for streaming eval.")
     parser.add_argument("--streaming-eval-batch-size", type=int, help="Batch size for streaming eval.")
+    for field, flag in DISCOVERY_BASELINE_LR_MULTIPLIER_FLAG_FIELDS:
+        parser.add_argument(
+            flag,
+            type=float,
+            default=1.0,
+            help=(
+                f"Fixed baseline {field.replace('_', ' ')} applied to every probe before discovery. "
+                "Use this to rediscover the global LR around a learned grouped profile."
+            ),
+        )
     parser.add_argument(
         "--complete-streaming-eval-cycle",
         action=argparse.BooleanOptionalAction,
@@ -521,6 +534,7 @@ def main() -> int:
     histories_dir = output_dir / "histories"
     logs_dir.mkdir(parents=True, exist_ok=True)
     histories_dir.mkdir(parents=True, exist_ok=True)
+    base_multipliers = lr_multipliers_from_mapping(args)
 
     def run_probe(
         multipliers: LrMultipliers,
@@ -596,14 +610,15 @@ def main() -> int:
             discovery_mode=args.discovery_mode,
             jump_threshold=args.jump_threshold,
             duplicate_log_tolerance=args.duplicate_log_tolerance,
+            always_refine=args.always_refine,
             fine_refine_auc_fraction=args.fine_refine_auc_fraction,
-            fine_refine_initial_ratio=args.fine_refine_initial_ratio,
             fine_refine_rounds=args.fine_refine_rounds,
             fine_duplicate_log_tolerance=args.fine_duplicate_log_tolerance,
             near_tie_auc_fraction=args.near_tie_auc_fraction,
             bowl_auc_fraction=args.bowl_auc_fraction,
             bowl_max_extra_probes=args.bowl_max_extra_probes,
         ),
+        base_multipliers=base_multipliers,
     )
     payload = _summary_payload(args, output_dir, discovery)
     summary_json = output_dir / "lr_sweep_summary.json"

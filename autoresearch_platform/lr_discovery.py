@@ -60,8 +60,8 @@ class AdaptiveLrSweepConfig:
     discovery_mode: str = LR_DISCOVERY_MODE_STANDARD
     jump_threshold: float = 2.0
     duplicate_log_tolerance: float = 0.1
+    always_refine: bool = False
     fine_refine_auc_fraction: float = 0.003
-    fine_refine_initial_ratio: float = 2 ** (1 / 8)
     fine_refine_rounds: int = 2
     fine_duplicate_log_tolerance: float = 0.03
     near_tie_auc_fraction: float = 0.003
@@ -291,9 +291,42 @@ def should_run_fine_refinement(
     )
     if len(distinct) < 2:
         return False
+    if config.always_refine:
+        return True
     if config.fine_refine_auc_fraction <= 0:
         return False
     return _relative_auc_gap(distinct[0], distinct[1]) > config.fine_refine_auc_fraction
+
+
+def _binary_refinement_candidates(
+    *,
+    probes: list[AdaptiveLrProbe],
+    duplicate_log_tolerance: float,
+) -> list[float]:
+    by_lr, best, best_index = _find_best_in_log_order(
+        probes,
+        duplicate_log_tolerance=duplicate_log_tolerance,
+    )
+    candidates: list[float] = []
+    if best_index > 0:
+        left_probe = by_lr[best_index - 1]
+        left_midpoint = math.sqrt(left_probe.lr_multiplier * best.lr_multiplier)
+        if left_midpoint > 0 and not already_tested(
+            left_midpoint,
+            probes,
+            tol=duplicate_log_tolerance,
+        ):
+            candidates.append(left_midpoint)
+    if best_index + 1 < len(by_lr):
+        right_probe = by_lr[best_index + 1]
+        right_midpoint = math.sqrt(best.lr_multiplier * right_probe.lr_multiplier)
+        if right_midpoint > 0 and not already_tested(
+            right_midpoint,
+            probes,
+            tol=duplicate_log_tolerance,
+        ):
+            candidates.append(right_midpoint)
+    return candidates
 
 
 def refine_direction(
@@ -392,10 +425,11 @@ def refine_locally_around_best(
 ) -> None:
     if not should_run_fine_refinement(probes=probes, config=config):
         return
-    ratio = config.fine_refine_initial_ratio
     for _ in range(config.fine_refine_rounds):
-        best = _best_probe(probes)
-        candidates = [best.lr_multiplier / ratio, best.lr_multiplier * ratio]
+        candidates = _binary_refinement_candidates(
+            probes=probes,
+            duplicate_log_tolerance=config.fine_duplicate_log_tolerance,
+        )
         ran_any = False
         for candidate in candidates:
             if candidate <= 0:
@@ -413,7 +447,6 @@ def refine_locally_around_best(
             return
         if not should_run_fine_refinement(probes=probes, config=config):
             return
-        ratio = math.sqrt(ratio)
 
 
 def extend_until_bowl(

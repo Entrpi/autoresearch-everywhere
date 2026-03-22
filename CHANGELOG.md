@@ -29,7 +29,40 @@ On this hardware, the default canonical matched benchmark window for optimizatio
 
 ## Latest
 
-### New commit — train/lr: add staged embedding multiplier discovery — score `4` — complexity `6`
+### New commit — train/lr: switch local refinement to midpoint search and add always-refine mode — score `4` — complexity `7`
+
+**Human-directed, AI-shaped (4)**
+
+- Replace octave-style local LR refinement with progressively finer midpoint refinement, add an explicit `--always-refine` mode so coarse-first sweeps can always zoom in around the winning coarse point without enabling bowl extension, and let discovery pin learned grouped LR overrides as the staged sweep baseline.
+  - Meaning: the LR search now refines by halving the current bracket in log space instead of nudging around the incumbent with a fixed multiplicative ratio. Standard discovery can also be told to always perform that local midpoint search after the coarse bracket, even when the coarse AUC gap is too small to trigger refinement automatically. Follow-up sweeps can also hold grouped multipliers fixed while rediscovering only the lever that still matters.
+  - Motivation: the staged sweep had three remaining UX problems. First, the old local search still behaved like a shrunken octave walk instead of a true progressively finer binary search. Second, there was no clean way to say "do the normal coarse sweep, then always refine locally" without also turning on the more expensive `find-bowl` outward extension behavior. Third, once the RTX 5090 `m5-large` hour run produced a better grouped profile, there was still no honest way to rediscover only the global lever around that learned grouped baseline without manually editing defaults.
+  - Purpose: make local LR refinement easier to reason about, keep it cheaper than bowl-finding, and let longer probe budgets choose between "refine the local winner" and "prove a full bowl" as two separate controls while also letting later sweeps pin learned grouped rates and only rediscover the remaining axis.
+  - Switch `autoresearch_platform.lr_discovery` local refinement from fixed multiplicative nudges to geometric midpoint probes between the incumbent and its nearest tested neighbors, so each extra round shrinks the active log-space bracket instead of reusing a baked-in ratio.
+  - Add `always_refine` to the shared sweep config and `--always-refine` to `tools/discover_lr.py`, so `standard` discovery can now mean "coarse sweep plus forced local midpoint refinement" without paying for `find-bowl`'s outward extension probes.
+  - Extend `tools/discover_lr.py` to accept fixed grouped LR multipliers as the staged discovery baseline, so a global-only rediscovery run can reuse learned `embedding` / `matrix` / `scalar` settings instead of silently falling back to the original preset ratios.
+
+**Grounding**
+
+- Files:
+  - `CHANGELOG.md`
+  - `autoresearch_platform/lr_discovery.py`
+  - `tools/discover_lr.py`
+- Validation:
+  - `python3 -m py_compile autoresearch_platform/lr_discovery.py tools/discover_lr.py`
+  - `python3 - <<'PY' ...`
+    - Synthetic always-refine smoke confirming the coarse-only path stays at `1.0, 2.0, 0.5` while `always_refine=True` adds midpoint probes like `0.7071, 1.4142, 0.8409, 1.1892`.
+  - `uv run python discover_lr.py --help | rg -n "always-refine|midpoint"`
+  - `python3 discover_lr.py --help | rg -n "embedding-lr-multiplier|unembedding-lr-multiplier|matrix-lr-multiplier|scalar-lr-multiplier"`
+    - Confirmed the discovery front door now accepts fixed grouped-baseline overrides, which is the missing surface needed to rerun global-only discovery around the learned RTX 5090 `m5-large` grouped profile rather than the original preset defaults.
+  - `UV_CACHE_DIR=/tmp/uv-cache uv run python discover_lr.py --engine mlx --preset m5-tiny --time-budget 1.5 --discovery-levers global --streaming-eval-interval-steps 1 --streaming-eval-tokens 16384 --output-dir results/analysis/lr_discovery_mlx_m5tiny_binary_refine_test`
+    - Real MLX result with midpoint refinement: probes `1, 2, 4, 0.5, 1.4142136, 2.8284271, 1.6817928, 2.3784142`, selecting `global=1.6817928`.
+- Measurements:
+  - In the real MLX `m5-tiny` probe run above, midpoint refinement replaced the old `~1.09x` local walk with a clean shrinking bracket around the incumbent and finished with `best_auc=2.697850` at `global=1.6817928`.
+  - No completed longer CUDA measurement is counted in this entry yet; the stronger `60s` RTX 5090 sweep using `standard + always-refine` is still running separately.
+
+## Committed History
+
+### March 21, 2026 — `a0147a0` — train/lr: add staged embedding multiplier discovery — score `4` — complexity `6`
 
 **Human-directed, AI-shaped (4)**
 
@@ -54,7 +87,7 @@ On this hardware, the default canonical matched benchmark window for optimizatio
   - `UV_CACHE_DIR=/tmp/uv-cache uv run --with matplotlib python - <<'PY' ...`
     - Wrote staged summary plot: `results/analysis/lr_discovery_mlx_m5tiny_global_matrix_unembedding_scalar_embedding_test/staged_lr_discovery_plot.png`.
 
-### New commit — train/lr: add staged scalar multiplier discovery — score `4` — complexity `6`
+### March 21, 2026 — `3f4798c` — train/lr: add staged scalar multiplier discovery — score `4` — complexity `6`
 
 **Human-directed, AI-shaped (4)**
 
@@ -79,7 +112,7 @@ On this hardware, the default canonical matched benchmark window for optimizatio
   - `UV_CACHE_DIR=/tmp/uv-cache uv run --with matplotlib python - <<'PY' ...`
     - Wrote staged summary plot: `results/analysis/lr_discovery_mlx_m5tiny_global_matrix_unembedding_scalar_test/staged_lr_discovery_plot.png`.
 
-### New commit — train/lr: add staged unembedding multiplier discovery — score `4` — complexity `6`
+### March 21, 2026 — `a04ccda` — train/lr: add staged unembedding multiplier discovery — score `4` — complexity `6`
 
 **Human-directed, AI-shaped (4)**
 
@@ -104,7 +137,7 @@ On this hardware, the default canonical matched benchmark window for optimizatio
   - `UV_CACHE_DIR=/tmp/uv-cache uv run --with matplotlib python - <<'PY' ...`
     - Wrote staged summary plot: `results/analysis/lr_discovery_mlx_m5tiny_global_matrix_unembedding_test/staged_lr_discovery_plot.png`.
 
-### New commit — train/lr: add optional bowl-finding discovery mode — score `4` — complexity `8`
+### March 21, 2026 — `21a5c8a` — train/lr: guard bowl sweeps against pathological jump probes — score `4` — complexity `8`
 
 **Human-directed, AI-shaped (4)**
 
@@ -140,7 +173,7 @@ On this hardware, the default canonical matched benchmark window for optimizatio
   - `UV_CACHE_DIR=/tmp/uv-cache uv run python discover_lr.py --engine mlx --preset m5-tiny --time-budget 1.5 --discovery-mode find-bowl --discovery-levers global matrix --streaming-eval-interval-steps 1 --streaming-eval-tokens 16384 --output-dir results/analysis/lr_discovery_mlx_m5tiny_global_matrix_find_bowl_test3`
     - Real staged MLX result: `global=1.8340081`, `matrix=2`, matrix-stage `discarded_pathological_probes=1`, and the ranked finite matrix probes remained `2, 4, 1, 0.5, 8, 0.25`.
 
-### New commit — train/lr: add staged matrix multiplier discovery — score `4` — complexity `7`
+### March 21, 2026 — `152de03` — train/lr: add staged matrix multiplier discovery — score `4` — complexity `7`
 
 **Human-directed, AI-shaped (4)**
 
@@ -166,7 +199,7 @@ On this hardware, the default canonical matched benchmark window for optimizatio
   - `UV_CACHE_DIR=/tmp/uv-cache uv run python discover_lr.py --engine mlx --preset m5-tiny --time-budget 1.5 --discovery-levers global matrix --streaming-eval-interval-steps 1 --streaming-eval-tokens 16384 --output-dir results/analysis/lr_discovery_mlx_m5tiny_global_matrix_test`
     - Real staged MLX result: `global=1.8340081`, `matrix=2`, `13` logical probes with one cached cross-stage reuse, and stage-local near-tie reporting for both the global and matrix sweeps.
 
-### New commit — train/lr: add a shared grouped LR profile surface — score `4` — complexity `9`
+### March 21, 2026 — `a999e53` — train/lr: add a shared grouped LR profile surface — score `4` — complexity `9`
 
 **Human-directed, AI-shaped (4)**
 
@@ -198,7 +231,7 @@ On this hardware, the default canonical matched benchmark window for optimizatio
   - `python3 - <<'PY' ...` shared LR-profile smoke covering grouped-multiplier application plus resolved per-group rates at a non-reference model width
   - `python3 - <<'PY' ...` backward-compatibility smoke confirming old scalar-only run-config payloads still restore as grouped multipliers with `embedding/unembedding/matrix/scalar = 1.0`
 
-### New commit — train/lr: add adaptive multiplier discovery and near-tie reporting — score `4` — complexity `14`
+### March 21, 2026 — `ca7702d` — train/lr: add adaptive multiplier discovery and near-tie reporting — score `4` — complexity `14`
 
 **Human-directed, AI-shaped (4)**
 
@@ -232,7 +265,7 @@ On this hardware, the default canonical matched benchmark window for optimizatio
   - On the RTX 5090 `m5-tiny` CUDA sweep, the refined policy evaluated `7` probes and moved the short-run pick from the anchor `1.0x` to `0.91700404x`, improving probe AUC from `1.518842` to `1.518370` (about `0.03%`) and improving a follow-up `10`-reference-cycle explicit end-state reference eval from `1.389380` to `1.389000`.
   - On the RTX 5090 `m5-large` CUDA sweep with FA4 working through the default `uv` front door, the corrected coarse-first policy evaluated `5` probes and returned `0.91700404x` as the short-run pick while keeping `1.0x` and `1.0905077x` inside the reported near-tie band rather than overstating a precise single optimum.
 
-### New commit — train/eval: add shared streaming honest eval hierarchy — score `4` — complexity `14`
+### March 21, 2026 — `4139a00` — train/eval: add shared streaming honest eval hierarchy — score `4` — complexity `14`
 
 **Human-directed, AI-shaped (4)**
 
@@ -293,8 +326,6 @@ On this hardware, the default canonical matched benchmark window for optimizatio
     - `both`: `64` repeated-cheap points, `64` subref points, `16` cheap cycles, `16` subref cycles, `2` derived reference cycles, `streaming_val_auc=2.660214`, `honest_val_bpb=2.537253`, `honest_subref_one_sixth_bpb=2.495301`, `honest_reference_bpb=2.568650`, `training_seconds=0.5`, `total_seconds=6.1`
   - that same host also grounded the bug this patch closes: before the smoke flag was added, the committed CUDA front door rejected `--smoke`, and a minimal fallback `upstream` probe on the same machine OOMed immediately under the normal default shape.
   - on the RTX 5090 host, the repo’s old `.python-version=3.10` pin prevented FA4 from coming up through the normal `uv` path because upstream only published the `torch 2.9 / cu12` Linux wheel for `cp312`; after rebuilding a `3.12` env and installing `flash_attn-2.8.3+cu12torch2.9cxx11abiTRUE-cp312-cp312-linux_x86_64.whl`, `train.py --engine cuda --smoke` resolved `installed:flash_attn.flash_attn_interface` instead of `torch-sdpa`.
-
-## Committed History
 
 ### March 20, 2026 — `72fe88e` — platform/checkpoints: unify exact checkpoint policy and telemetry across MLX and CUDA — score `3` — complexity `12`
 
